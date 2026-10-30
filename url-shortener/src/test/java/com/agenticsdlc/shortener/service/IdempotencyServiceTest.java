@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.IntStream;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -20,9 +22,11 @@ import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.agenticsdlc.shortener.config.ShortenerProperties;
 import com.agenticsdlc.shortener.domain.IdempotencyRecord;
 import com.agenticsdlc.shortener.repository.IdempotencyRecordRepository;
 import com.agenticsdlc.shortener.service.exception.IdempotencyConflictException;
@@ -67,6 +71,12 @@ class IdempotencyServiceTest {
 
     @Autowired
     private MutableClock clock;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
+    @Autowired
+    private JsonMapper jsonMapper;
 
     private final AtomicInteger executions = new AtomicInteger();
     private String key;
@@ -122,6 +132,93 @@ class IdempotencyServiceTest {
         assertThatThrownBy(() -> idempotency.execute(key, "fp-1", 201, Payload.class, this::newPayload))
                 .isInstanceOf(IdempotencyInProgressException.class);
         assertThat(executions).hasValue(0);
+    }
+
+    @Test
+    void aBulkReservationIsProtectedForItsLongerWindowAndRetryAfterReportsTheTimeLeft() {
+        // 100 items: 60 s + 100 x 1 s = 160 s. Two minutes in, the bulk request is still running: a retry must not
+        // take it over (it would create every link a second time), and it learns how long the protection lasts.
+        IdempotentResult<Payload> first = idempotency.execute(key, "fp-1", 200, Payload.class, 100, () -> {
+            clock.advance(Duration.ofMinutes(2));
+            assertThatThrownBy(() -> idempotency.execute(key, "fp-1", 200, Payload.class, 100, this::newPayload))
+                    .isInstanceOfSatisfying(IdempotencyInProgressException.class,
+                            e -> assertThat(e.getRetryAfterSeconds()).isEqualTo(40));
+            return new Payload("bulk", 100);
+        });
+
+        assertThat(first.replayed()).isFalse();
+        assertThat(executions).as("the retry never ran").hasValue(0);
+        assertThat(idempotency.execute(key, "fp-1", 200, Payload.class, 100, this::newPayload).body())
+                .isEqualTo(new Payload("bulk", 100));
+    }
+
+    @Test
+    void aRetryDoesNotRunABulkRequestASecondTimeWhileItIsStillInFlight() {
+        LinkService links = org.mockito.Mockito.mock(LinkService.class);
+        BulkLinkService bulk = new BulkLinkService(links, idempotency, failure -> new ItemError(
+                java.net.URI.create("urn:test:failure"), "failure", 500, failure.getMessage()),
+                java.util.Optional.empty(), new io.micrometer.core.instrument.simple.SimpleMeterRegistry());
+        List<CreateLinkCommand> commands = IntStream.range(0, 100)
+                .mapToObj(i -> new CreateLinkCommand("https://example.com/" + i, null, null, null)).toList();
+        AtomicInteger creations = new AtomicInteger();
+        AtomicReference<RuntimeException> retry = new AtomicReference<>(new IllegalStateException("no retry"));
+        org.mockito.Mockito.when(links.create(org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.isNull())).thenAnswer(invocation -> {
+                    int created = creations.incrementAndGet();
+                    if (created == 100) {
+                        // the last item finishes two minutes after the request started; the client retried meanwhile
+                        clock.advance(Duration.ofMinutes(2));
+                        try {
+                            bulk.createAll(commands, key, "client");
+                            retry.set(null);
+                        } catch (RuntimeException rejected) {
+                            retry.set(rejected);
+                        }
+                    }
+                    return new CreatedLink(new LinkView("c" + created, "https://sho.rt/c" + created,
+                            "https://example.com/", com.agenticsdlc.shortener.domain.LinkStatus.ACTIVE, NOW, null, 0),
+                            false);
+                });
+
+        BulkCreationResult result = bulk.createAll(commands, key, "client");
+
+        assertThat(result.creation().createdCount()).isEqualTo(100);
+        assertThat(retry.get()).as("the retry is told to wait instead of taking the reservation over")
+                .isInstanceOf(IdempotencyInProgressException.class);
+        assertThat(creations).as("every link was created exactly once").hasValue(100);
+    }
+
+    @Test
+    void aReservationIsTakenOverOnlyAfterTheWindowItRecorded() {
+        records.saveAndFlush(IdempotencyRecord.pending(key, "fp-1", NOW.minusSeconds(150), Duration.ofSeconds(160)));
+        assertThatThrownBy(() -> idempotency.execute(key, "fp-1", 200, Payload.class, this::newPayload))
+                .as("a retry is judged by the window of the request in flight, not by its own")
+                .isInstanceOfSatisfying(IdempotencyInProgressException.class,
+                        e -> assertThat(e.getRetryAfterSeconds()).isEqualTo(10));
+
+        clock.advance(Duration.ofSeconds(11));
+        assertThat(idempotency.execute(key, "fp-1", 200, Payload.class, this::newPayload).replayed()).isFalse();
+        assertThat(executions).hasValue(1);
+
+        String legacy = UUID.randomUUID().toString();
+        records.saveAndFlush(IdempotencyRecord.pending(legacy, "fp-1", clock.instant().minusSeconds(45)));
+        assertThatThrownBy(() -> idempotency.execute(legacy, "fp-1", 200, Payload.class, this::newPayload))
+                .as("a reservation without a recorded window keeps the base window of 60 s")
+                .isInstanceOfSatisfying(IdempotencyInProgressException.class,
+                        e -> assertThat(e.getRetryAfterSeconds()).isEqualTo(15));
+    }
+
+    @Test
+    void theTakeoverWindowsAreConfigurable() {
+        IdempotencyService custom = new IdempotencyService(records, transactionManager, jsonMapper, clock,
+                new ShortenerProperties.Idempotency(Duration.ofSeconds(10), Duration.ofMillis(500)));
+        IdempotentResult<Payload> first = custom.execute(key, "fp-1", 200, Payload.class, 4, () -> {
+            assertThatThrownBy(() -> custom.execute(key, "fp-1", 200, Payload.class, 4, this::newPayload))
+                    .isInstanceOfSatisfying(IdempotencyInProgressException.class,
+                            e -> assertThat(e.getRetryAfterSeconds()).as("10 s + 4 x 0.5 s").isEqualTo(12));
+            return new Payload("custom", 4);
+        });
+        assertThat(first.body()).isEqualTo(new Payload("custom", 4));
     }
 
     @Test

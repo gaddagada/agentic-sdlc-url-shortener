@@ -111,7 +111,7 @@ public class BulkLinkController {
             @RequestHeader(name = ApiHeaders.IDEMPOTENCY_KEY, required = false) @Size(min = 1, max = 128)
             @Nullable String idempotencyKey,
             HttpServletRequest httpRequest) {
-        String client = clientIpResolver.resolve(httpRequest.getRemoteAddr(),
+        String client = clientIpResolver.rateLimitKey(httpRequest.getRemoteAddr(),
                 httpRequest.getHeader(ClientIpResolver.FORWARDED_FOR));
         BulkCreationResult result = bulkLinkService.createAll(request.toCommands(), idempotencyKey, client);
         ResponseEntity.BodyBuilder response = ResponseEntity.ok();

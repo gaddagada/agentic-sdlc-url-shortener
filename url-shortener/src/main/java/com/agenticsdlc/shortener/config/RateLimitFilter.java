@@ -25,7 +25,9 @@ import com.agenticsdlc.shortener.service.RateLimiter;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Charges one {@link RateLimiter} token per client IP for every {@code POST} whose path starts with
+ * Charges one {@link RateLimiter} token per client (an IPv4 address, or an IPv6 prefix of
+ * {@code shortener.rate-limit.ipv6-prefix-length} bits: {@code ClientIpResolver#rateLimitKey}) for every {@code POST}
+ * whose path starts with
  * {@code /api/v1/links} (today {@code POST /api/v1/links}), except the bulk endpoint
  * {@code POST /api/v1/links/bulk}: that one is charged one token per item by {@code BulkLinkService} once the body has
  * been parsed. Only the exact (normalized) bulk path is exempt, so any other spelling that might still reach the bulk
@@ -76,7 +78,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-        String client = clientIpResolver.resolve(request.getRemoteAddr(),
+        String client = clientIpResolver.rateLimitKey(request.getRemoteAddr(),
                 request.getHeader(ClientIpResolver.FORWARDED_FOR));
         RateLimiter.Decision decision = limiter.tryConsume(client);
         response.setHeader(LIMIT_HEADER, Integer.toString(limiter.capacity()));

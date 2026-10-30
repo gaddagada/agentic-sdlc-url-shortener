@@ -226,6 +226,7 @@ class WorkspaceSandboxTest {
                 new FileChange(created, Operation.CREATE, "java", "new", ContentKind.FULL, "class Bulk {}", List.of()),
                 new FileChange(LINK_SERVICE, Operation.MODIFY, "java", "clock", ContentKind.DIFF,
                         linkServiceDiff("     private final UrlValidator urlValidator;"), List.of()),
+                new FileChange(LINK_SERVICE, Operation.MODIFY, "java", "limit", ContentKind.DIFF, second, List.of()),
                 new FileChange(respelled, Operation.MODIFY, "java", "limit", ContentKind.DIFF, second, List.of()),
                 new FileChange("url-shortener/src/main/java", Operation.DELETE, "java", "rm", ContentKind.NONE, "",
                         List.of()),
@@ -235,14 +236,54 @@ class WorkspaceSandboxTest {
 
         assertThatThrownBy(() -> sandbox.apply(changes)).isInstanceOfSatisfying(ChangeSetRejectedException.class,
                 e -> assertThat(e.problems()).containsExactly(
-                        respelled + " names the same file as " + LINK_SERVICE + "; give every file exactly one change "
-                                + "(merge the hunks into one diff)",
+                        LINK_SERVICE + " names the same file as " + LINK_SERVICE + "; give every file exactly one "
+                                + "change (merge the hunks into one diff)",
+                        respelled + " is not in normalized form (write '" + LINK_SERVICE + "')",
                         "url-shortener/src/main/java is a directory; a change must name a file",
                         LINK_SERVICE + "/Nested.java lies below the existing file " + LINK_SERVICE));
         assertThat(sandbox.path().resolve(created)).as("all or nothing").doesNotExist();
         assertThat(Files.readString(sandbox.path().resolve(LINK_SERVICE)))
                 .isEqualTo(Files.readString(workspace.resolve(LINK_SERVICE)));
         assertThat(sandbox.path().resolve("url-shortener/src/main/java")).isDirectory();
+    }
+
+    @Test
+    void pathsWithSegmentsEndingInADotOrASpaceAreRejectedBecauseWindowsDropsThem(@TempDir Path dir)
+            throws Exception {
+        Path workspace = SyntheticWorkspace.create(dir.resolve("ws"));
+        WorkspaceSandbox sandbox = WorkspaceSandbox.create(workspace, dir.resolve("sandboxes"), "r1");
+        String migration = "url-shortener/src/main/resources/db/migration/V1__init.sql";
+        ChangeSet changes = new ChangeSet("HEAD", List.of(
+                new FileChange(migration + ".", Operation.MODIFY, "sql", "sneaky", ContentKind.FULL, "drop table x;",
+                        List.of()),
+                new FileChange("url-shortener/src. /main/X.java", Operation.CREATE, "java", "space",
+                        ContentKind.FULL, "class X {}", List.of()),
+                new FileChange("url-shortener/src/main/Y.java ", Operation.CREATE, "java", "space",
+                        ContentKind.FULL, "class Y {}", List.of()),
+                new FileChange("url-shortener\\src\\main\\Z.java", Operation.CREATE, "java", "backslashes",
+                        ContentKind.FULL, "class Z {}", List.of())), "./mvnw verify", List.of(), "revert", List.of());
+
+        assertThatThrownBy(() -> sandbox.apply(changes)).isInstanceOfSatisfying(ChangeSetRejectedException.class,
+                e -> assertThat(e.problems()).containsExactly(
+                        migration + ". has the segment 'V1__init.sql.' ending with a dot or a space (Windows drops "
+                                + "them silently)",
+                        "url-shortener/src. /main/X.java has the segment 'src. ' ending with a dot or a space (Windows "
+                                + "drops them silently)",
+                        "url-shortener/src/main/Y.java  has the segment 'Y.java ' ending with a dot or a space "
+                                + "(Windows drops them silently)",
+                        "url-shortener\\src\\main\\Z.java is not in normalized form (write "
+                                + "'url-shortener/src/main/Z.java')"));
+        assertThat(Files.readString(sandbox.path().resolve(migration)))
+                .isEqualTo(Files.readString(workspace.resolve(migration)));
+        assertThat(WorkspaceSandbox.spellingProblem("url-shortener/src/main/java/A.java")).isNull();
+        assertThat(WorkspaceSandbox.spellingProblem("docs/a..b/notes.md")).isNull();
+
+        ImpactedSources.Result sources = ImpactedSources.read(workspace, List.of(
+                new ImpactedSources.Request(migration + ".", ImpactedSources.Priority.MODIFY),
+                new ImpactedSources.Request(migration, ImpactedSources.Priority.MODIFY)), 10_000, 100_000);
+        assertThat(sources.sources()).containsOnlyKeys(migration);
+        assertThat(sources.notes()).containsExactly(migration + ".: refused (the path has the segment "
+                + "'V1__init.sql.' ending with a dot or a space (Windows drops them silently))");
     }
 
     @Test

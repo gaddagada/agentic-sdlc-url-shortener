@@ -116,8 +116,9 @@ public class BulkLinkService {
             return new BulkCreationResult(creation, false, charged.get());
         }
         String fingerprint = idempotency.fingerprint(IDEMPOTENCY_SCOPE, commands);
+        // a bulk request runs longer: its reservation is protected for longer before a retry may take it over
         IdempotentResult<BulkCreation> result = idempotency.execute(idempotencyKey, fingerprint, HTTP_OK,
-                BulkCreation.class, execution);
+                BulkCreation.class, commands.size(), execution);
         return new BulkCreationResult(result.body(), result.replayed(), charged.get());
     }
 

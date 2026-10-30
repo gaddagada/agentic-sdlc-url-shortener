@@ -1,5 +1,6 @@
 package com.agenticsdlc.shortener.domain;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 
@@ -16,7 +17,8 @@ import org.springframework.data.domain.Persistable;
 /**
  * Stored outcome of a request made with an {@code Idempotency-Key}.
  *
- * <p>A record is first inserted as <em>pending</em> ({@link #PENDING_STATUS}, empty body) to reserve the key, and is
+ * <p>A record is first inserted as <em>pending</em> ({@link #PENDING_STATUS}; the body holds no response, only the
+ * takeover window of the reservation) to reserve the key, and is
  * completed with the response status and JSON body once the request succeeds. Implements {@link Persistable} so that
  * saving a new record always issues an {@code INSERT}: a concurrent reservation of the same key then fails on the
  * primary key instead of being silently merged into the other request's row.
@@ -27,6 +29,9 @@ public class IdempotencyRecord implements Persistable<String> {
 
     /** Status value of a reserved key whose request has not completed yet. */
     public static final int PENDING_STATUS = 0;
+
+    /** Body prefix of a pending record that records its takeover window (milliseconds follow). */
+    static final String TAKEOVER_MARKER = "pending;takeover-after-ms=";
 
     @Id
     @Column(name = "idem_key", length = 128)
@@ -74,6 +79,40 @@ public class IdempotencyRecord implements Persistable<String> {
      */
     public static IdempotencyRecord pending(String idempotencyKey, String fingerprint, Instant createdAt) {
         return new IdempotencyRecord(idempotencyKey, fingerprint, createdAt);
+    }
+
+    /**
+     * Creates a pending reservation that records how long it is protected from a takeover by a retry. The window is
+     * kept in the body of the pending record (which carries no response yet), so the schema is unchanged.
+     *
+     * @param idempotencyKey client supplied key
+     * @param fingerprint    SHA-256 hex of the canonical request
+     * @param createdAt      reservation instant
+     * @param takeoverWindow how long after {@code createdAt} a retry may take the reservation over
+     * @return a new, not yet persisted record
+     */
+    public static IdempotencyRecord pending(String idempotencyKey, String fingerprint, Instant createdAt,
+                                            Duration takeoverWindow) {
+        IdempotencyRecord record = new IdempotencyRecord(idempotencyKey, fingerprint, createdAt);
+        record.body = TAKEOVER_MARKER + Math.max(1L, takeoverWindow.toMillis());
+        return record;
+    }
+
+    /**
+     * Returns how long after its creation this pending reservation is protected from a takeover.
+     *
+     * @param fallback window of a reservation that recorded none (written before windows were recorded)
+     * @return the recorded window, or {@code fallback}
+     */
+    public Duration pendingTakeoverWindow(Duration fallback) {
+        if (isPending() && body.startsWith(TAKEOVER_MARKER)) {
+            try {
+                return Duration.ofMillis(Long.parseLong(body.substring(TAKEOVER_MARKER.length())));
+            } catch (NumberFormatException malformed) {
+                return fallback;
+            }
+        }
+        return fallback;
     }
 
     /** {@return whether the original request is still in flight} */

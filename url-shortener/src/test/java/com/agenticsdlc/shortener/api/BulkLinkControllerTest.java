@@ -67,7 +67,7 @@ class BulkLinkControllerTest {
 
     @BeforeEach
     void resolveClient() {
-        when(clientIpResolver.resolve(anyString(), any())).thenReturn(CLIENT);
+        when(clientIpResolver.rateLimitKey(anyString(), any())).thenReturn(CLIENT);
     }
 
     @Test
@@ -233,7 +233,7 @@ class BulkLinkControllerTest {
     void idempotencyConflictsAreTheSameProblemsAsOnTheSingleEndpoint() {
         when(bulkLinkService.createAll(any(), eq("reused"), eq(CLIENT))).thenThrow(new IdempotencyConflictException());
         when(bulkLinkService.createAll(any(), eq("running"), eq(CLIENT)))
-                .thenThrow(new IdempotencyInProgressException());
+                .thenThrow(new IdempotencyInProgressException(97));
 
         MvcTestResult reused = mvc.post().uri(BulkLinkController.PATH).header(ApiHeaders.IDEMPOTENCY_KEY, "reused")
                 .contentType(MediaType.APPLICATION_JSON).content(TWO_ITEMS).exchange();
@@ -242,7 +242,8 @@ class BulkLinkControllerTest {
 
         assertProblem(reused, HttpStatus.UNPROCESSABLE_CONTENT, "idempotency-key-reused");
         assertProblem(running, HttpStatus.CONFLICT, "idempotency-request-in-progress");
-        assertThat(running).hasHeader(HttpHeaders.RETRY_AFTER, "1");
+        assertThat(running).as("the time left until the reservation in flight may be taken over")
+                .hasHeader(HttpHeaders.RETRY_AFTER, "97");
     }
 
     private MvcTestResult post(String body) {

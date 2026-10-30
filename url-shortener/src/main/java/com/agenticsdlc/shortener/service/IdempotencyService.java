@@ -12,12 +12,15 @@ import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.agenticsdlc.shortener.config.ShortenerProperties;
 import com.agenticsdlc.shortener.domain.IdempotencyRecord;
 import com.agenticsdlc.shortener.repository.IdempotencyRecordRepository;
 import com.agenticsdlc.shortener.service.exception.IdempotencyConflictException;
@@ -39,16 +42,21 @@ import tools.jackson.databind.ObjectMapper;
  *       can retry with the same key (only successful responses are stored).</li>
  *   <li><b>complete</b>: store the response status and JSON body.</li>
  * </ol>
- * Records are replayable for {@value #RETENTION_HOURS} hours. A pending record older than one minute is treated as
- * abandoned (crashed request) and may be taken over. Completion and release act only on the request's own reservation
- * (identified by its creation instant), so a request that was taken over can neither overwrite the response of the
- * request that took over nor release its reservation. Expired records are purged hourly.
+ * Records are replayable for {@value #RETENTION_HOURS} hours. A pending record is protected for its takeover window
+ * ({@link ShortenerProperties.Idempotency}: {@code pending-takeover-after}, default 60 s, plus
+ * {@code pending-takeover-per-item}, default 1 s, per item of a bulk request, at most 10 minutes); the window is
+ * stored with the reservation. While it lasts, a retry gets {@link IdempotencyInProgressException} with the seconds
+ * left; after it the request is presumed crashed and a retry takes the reservation over. Completion and release act
+ * only on the request's own reservation (identified by its creation instant), so a request that was taken over can
+ * neither overwrite the response of the request that took over nor release its reservation. Expired records are
+ * purged hourly.
  */
 @Service
 public class IdempotencyService {
 
     static final long RETENTION_HOURS = 24;
     static final Duration RETENTION = Duration.ofHours(RETENTION_HOURS);
+    /** Takeover window of a single request with the default settings (and of reservations that recorded none). */
     static final Duration PENDING_TIMEOUT = Duration.ofMinutes(1);
 
     private static final Logger log = LoggerFactory.getLogger(IdempotencyService.class);
@@ -57,9 +65,10 @@ public class IdempotencyService {
     private final TransactionTemplate transactions;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final ShortenerProperties.Idempotency settings;
 
     /**
-     * Creates the service.
+     * Creates the service with the default takeover windows ({@link ShortenerProperties.Idempotency#defaults()}).
      *
      * @param records            idempotency record repository
      * @param transactionManager transaction manager for the reservation transaction
@@ -68,10 +77,42 @@ public class IdempotencyService {
      */
     public IdempotencyService(IdempotencyRecordRepository records, PlatformTransactionManager transactionManager,
                               ObjectMapper objectMapper, Clock clock) {
+        this(records, transactionManager, objectMapper, clock, ShortenerProperties.Idempotency.defaults());
+    }
+
+    /**
+     * Creates the service.
+     *
+     * @param records            idempotency record repository
+     * @param transactionManager transaction manager for the reservation transaction
+     * @param objectMapper       serializes request fingerprints and response bodies
+     * @param clock              time source
+     * @param settings           takeover windows of pending reservations
+     */
+    public IdempotencyService(IdempotencyRecordRepository records, PlatformTransactionManager transactionManager,
+                              ObjectMapper objectMapper, Clock clock, ShortenerProperties.Idempotency settings) {
         this.records = records;
         this.transactions = new TransactionTemplate(transactionManager);
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.settings = Objects.requireNonNull(settings, "settings");
+    }
+
+    /**
+     * Creates the service with the {@code shortener.idempotency.*} settings, or the defaults when no
+     * {@link ShortenerProperties} are available (slice tests).
+     *
+     * @param records            idempotency record repository
+     * @param transactionManager transaction manager for the reservation transaction
+     * @param objectMapper       serializes request fingerprints and response bodies
+     * @param clock              time source
+     * @param properties         the shortener properties, if any
+     */
+    @Autowired
+    IdempotencyService(IdempotencyRecordRepository records, PlatformTransactionManager transactionManager,
+                       ObjectMapper objectMapper, Clock clock, ObjectProvider<ShortenerProperties> properties) {
+        this(records, transactionManager, objectMapper, clock, properties.stream().findFirst()
+                .map(ShortenerProperties::idempotency).orElseGet(ShortenerProperties.Idempotency::defaults));
     }
 
     /**
@@ -100,7 +141,28 @@ public class IdempotencyService {
      */
     public <T> IdempotentResult<T> execute(String key, String fingerprint, int status, Class<T> bodyType,
                                            Supplier<T> action) {
-        Reservation reservation = reserve(key, fingerprint);
+        return execute(key, fingerprint, status, bodyType, 0, action);
+    }
+
+    /**
+     * Executes {@code action} at most once per key and fingerprint within the retention window, protecting the
+     * reservation of a bulk request of {@code items} items for its longer takeover window
+     * ({@link ShortenerProperties.Idempotency#takeoverWindow(int)}).
+     *
+     * @param key         client supplied idempotency key
+     * @param fingerprint fingerprint of the request (see {@link #fingerprint})
+     * @param status      response status to record for a successful execution
+     * @param bodyType    type to deserialize a replayed body into
+     * @param items       items of a bulk request, 0 for a single request
+     * @param action      the operation to protect
+     * @param <T>         response body type, must round-trip through JSON
+     * @return the fresh or replayed result
+     * @throws IdempotencyConflictException   when the key was used with a different fingerprint
+     * @throws IdempotencyInProgressException when the key is reserved by a request still in flight
+     */
+    public <T> IdempotentResult<T> execute(String key, String fingerprint, int status, Class<T> bodyType, int items,
+                                           Supplier<T> action) {
+        Reservation reservation = reserve(key, fingerprint, settings.takeoverWindow(items));
         IdempotencyRecord record = reservation.replay();
         if (record != null) {
             log.debug("idempotent replay status={}", record.getStatus());
@@ -127,20 +189,21 @@ public class IdempotencyService {
         }
     }
 
-    private Reservation reserve(String key, String fingerprint) {
+    private Reservation reserve(String key, String fingerprint, Duration takeoverWindow) {
         try {
-            return reserveOnce(key, fingerprint);
+            return reserveOnce(key, fingerprint, takeoverWindow);
         } catch (DataIntegrityViolationException concurrentReservation) {
             // Another request inserted the key between our read and our insert: its record decides the outcome.
-            return reserveOnce(key, fingerprint);
+            return reserveOnce(key, fingerprint, takeoverWindow);
         }
     }
 
-    private Reservation reserveOnce(String key, String fingerprint) {
-        return Objects.requireNonNull(transactions.execute(tx -> reserveInTransaction(key, fingerprint)));
+    private Reservation reserveOnce(String key, String fingerprint, Duration takeoverWindow) {
+        return Objects.requireNonNull(transactions.execute(tx -> reserveInTransaction(key, fingerprint,
+                takeoverWindow)));
     }
 
-    private Reservation reserveInTransaction(String key, String fingerprint) {
+    private Reservation reserveInTransaction(String key, String fingerprint, Duration takeoverWindow) {
         Instant now = clock.instant();
         Optional<IdempotencyRecord> existing = records.findById(key);
         if (existing.isPresent()) {
@@ -150,7 +213,7 @@ public class IdempotencyService {
                     throw new IdempotencyConflictException();
                 }
                 if (record.isPending()) {
-                    throw new IdempotencyInProgressException();
+                    throw new IdempotencyInProgressException(secondsUntilTakeover(record, now));
                 }
                 return new Reservation(record, null);
             }
@@ -158,22 +221,33 @@ public class IdempotencyService {
         }
         // Millisecond precision survives the TIMESTAMP round trip exactly, so the reservation can be matched later.
         Instant reservedAt = now.truncatedTo(ChronoUnit.MILLIS);
-        records.saveAndFlush(IdempotencyRecord.pending(key, fingerprint, reservedAt));
+        records.saveAndFlush(IdempotencyRecord.pending(key, fingerprint, reservedAt, takeoverWindow));
         return new Reservation(null, reservedAt);
     }
 
-    private static boolean isLive(IdempotencyRecord record, Instant now) {
+    private boolean isLive(IdempotencyRecord record, Instant now) {
         boolean expired = record.isCreatedBefore(now.minus(RETENTION));
-        boolean abandoned = record.isPending() && record.isCreatedBefore(now.minus(PENDING_TIMEOUT));
+        boolean abandoned = record.isPending() && record.isCreatedBefore(now.minus(takeoverWindowOf(record)));
         return !expired && !abandoned;
+    }
+
+    /** The takeover window recorded with a pending reservation (the base window for one that recorded none). */
+    private Duration takeoverWindowOf(IdempotencyRecord record) {
+        return record.pendingTakeoverWindow(settings.pendingTakeoverAfter());
+    }
+
+    /** Whole seconds, rounded up, until a pending reservation may be taken over. */
+    private long secondsUntilTakeover(IdempotencyRecord record, Instant now) {
+        Duration left = Duration.between(now, record.getCreatedAt().plus(takeoverWindowOf(record)));
+        return Math.max(1L, (left.toMillis() + 999L) / 1000L);
     }
 
     private void complete(String key, Instant reservedAt, int status, Object body) {
         int updated = records.completeReservation(key, status, objectMapper.writeValueAsString(body),
                 IdempotencyRecord.PENDING_STATUS, reservedAt);
         if (updated == 0) {
-            log.warn("idempotency reservation was no longer pending at completion (taken over after {} or purged); "
-                    + "the response is not replayable", PENDING_TIMEOUT);
+            log.warn("idempotency reservation was no longer pending at completion (taken over after its takeover "
+                    + "window or purged); the response is not replayable");
         }
     }
 
@@ -182,7 +256,7 @@ public class IdempotencyService {
             records.deleteReservation(key, IdempotencyRecord.PENDING_STATUS, reservedAt);
         } catch (RuntimeException releaseFailure) {
             cause.addSuppressed(releaseFailure);
-            log.warn("could not release idempotency reservation; it expires after {}", PENDING_TIMEOUT);
+            log.warn("could not release idempotency reservation; a retry takes it over after its takeover window");
         }
     }
 

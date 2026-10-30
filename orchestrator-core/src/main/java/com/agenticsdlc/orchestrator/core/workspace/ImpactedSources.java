@@ -29,7 +29,8 @@ import com.agenticsdlc.orchestrator.core.util.SecretPatterns;
  * guessing it from the codebase index. Reading is bounded and confined:
  *
  * <ul>
- *   <li>paths are repository-relative; absolute paths, {@code ..} segments, paths that resolve (also through
+ *   <li>paths are repository-relative; absolute paths, {@code ..} segments, segments ending with a dot or a space
+ *       (Windows drops them silently), paths that resolve (also through
  *       symbolic links) outside the workspace root, secret-bearing files ({@link WorkspaceSandbox#isSecretFile})
  *       and files under {@link WorkspaceSandbox#SKIPPED_DIRECTORIES} are refused;</li>
  *   <li>binary files (a NUL byte, or not valid UTF-8) are skipped;</li>
@@ -227,6 +228,10 @@ public final class ImpactedSources {
     private static String refusal(String path) {
         if (path.startsWith("/") || path.matches("^[A-Za-z]:.*") || RepoPaths.hasParentSegment(path)) {
             return "outside the workspace root";
+        }
+        String spelling = WorkspaceSandbox.spellingProblem(path);
+        if (spelling != null) {
+            return "the path " + spelling;
         }
         String[] segments = path.split("/");
         for (int i = 0; i < segments.length - 1; i++) {

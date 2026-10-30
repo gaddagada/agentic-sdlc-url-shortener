@@ -16,15 +16,25 @@ import com.agenticsdlc.orchestrator.core.model.Run;
 public interface RunStore {
 
     /**
-     * Persists the state of a run after a mutation together with the audit events the mutation produced. The
-     * default implementation calls {@link #save(Run)} and then {@link AuditSink#append(List)}, which is not
-     * atomic: when the append fails the run is saved without its events. A transactional store (for example a
-     * JPA store sharing a transaction manager with a JPA audit sink) should override it to persist both in one
-     * transaction, so the run state and the audit trail can never diverge.
+     * Persists the state of a run after a mutation together with the audit events the mutation produced.
      *
-     * <p>When this method throws, the engine propagates the exception to the caller of the command. The engine's
-     * in-memory run keeps the mutation, so it may be ahead of the store until the next successful commit, which
-     * persists the complete current state again (events of the failed commit are not re-sent).</p>
+     * <p><strong>Durability contract:</strong> the engine guarantees that every persisted state change has its audit
+     * events only when this method is atomic: either the run state and all events are persisted, or neither is and
+     * the method throws. {@link InMemoryRunStore} (with an all-or-nothing audit sink such as
+     * {@link com.agenticsdlc.orchestrator.core.audit.InMemoryAuditSink}) and the application's JPA store (one
+     * transaction for the run and its events) are atomic.</p>
+     *
+     * <p>The default implementation is <em>not</em> atomic: it calls {@link #save(Run)} and appends the events with
+     * {@link AuditSink#append(List)} only after the save succeeded, and rolls nothing back. When the append fails, the
+     * store holds the new run state without the events of that mutation; those events are lost (the engine never
+     * re-sends them). The engine then resynchronizes the run's audit chain head with the last event the audit log
+     * holds, so the hash chain continues without a gap, but the audit trail does not record that one mutation.
+     * Override this method in a store that can persist both in one transaction.</p>
+     *
+     * <p>When this method throws, the engine propagates the exception to the caller of the command and restores the
+     * run's audit sequence and chain head to the last committed event. The engine's in-memory run keeps the
+     * mutation, so it may be ahead of the store until the next successful commit, which persists the complete
+     * current state again (events of the failed commit are not re-sent).</p>
      *
      * @param run the run (live aggregate; do not retain)
      * @param events the audit events of the mutation, in sequence order (may be empty)

@@ -78,10 +78,26 @@ class RateLimitFilterTest {
         assertThat(limited.getContentAsString()).contains("\"instance\":\"/api/v1/links/a%20b%25c\"");
     }
 
+    @Test
+    void ipv6ClientsShareTheBucketOfTheirSlash64() throws Exception {
+        MockHttpServletResponse first = post("/api/v1/links", "2001:db8:1:2::10");
+        MockHttpServletResponse otherAddressSameNetwork = post("/api/v1/links", "2001:db8:1:2:ffff:1:2:3");
+        MockHttpServletResponse otherNetwork = post("/api/v1/links", "2001:db8:1:3::10");
+
+        assertThat(first.getStatus()).isEqualTo(200);
+        assertThat(otherAddressSameNetwork.getStatus()).as("a new address of the same /64 is the same client")
+                .isEqualTo(429);
+        assertThat(otherNetwork.getStatus()).isEqualTo(200);
+    }
+
     private MockHttpServletResponse post(String path) throws Exception {
+        return post(path, "192.0.2.10");
+    }
+
+    private MockHttpServletResponse post(String path, String remoteAddress) throws Exception {
         MockHttpServletRequest request = new MockHttpServletRequest("POST", path);
         request.setServletPath(path);
-        request.setRemoteAddr("192.0.2.10");
+        request.setRemoteAddr(remoteAddress);
         MockHttpServletResponse response = new MockHttpServletResponse();
         filter.doFilter(request, response, new MockFilterChain());
         return response;

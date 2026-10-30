@@ -99,6 +99,21 @@ class DependencyInventoryTest {
     }
 
     @Test
+    void buildOutputIdeMetadataAndRuntimeDataAreNeverSearchedForPoms(@TempDir Path root) throws IOException {
+        write(root, "tools/pom.xml", TOOLS_POM);
+        for (String skipped : List.of("data", ".vscode", "build", "out", ".idea", "target", "node_modules",
+                "sandbox")) {
+            write(root, skipped + "/nested/pom.xml", TOOLS_POM.replace("tools", "ignored-" + skipped));
+        }
+
+        DependencyInventory inventory = DependencyInventory.read(root);
+
+        assertThat(inventory.modules()).extracting(DependencyInventory.PomModule::path)
+                .containsExactly("tools/pom.xml");
+        assertThat(DependencyInventory.SKIPPED_DIRECTORIES).contains("data", ".idea", ".vscode", "build", "out");
+    }
+
+    @Test
     void versionPropertiesResolveThroughThePropertiesChainAndUnresolvableOnesAreUnknown(@TempDir Path root)
             throws IOException {
         write(root, "pom.xml", """

@@ -55,6 +55,12 @@ final class RunRegistry {
         volatile boolean dirty;
         /** The lease this node holds on the run, or null. Written under the lock, read by attempt heartbeats. */
         volatile @Nullable RunLease lease;
+        /**
+         * Set while {@link #lease} is kept only because releasing it failed (the run is not executing here): the next
+         * command of this node renews and uses it, and the release is retried at the end of every mutation, by the
+         * engine's maintenance ({@code releasePendingLeases}) and on close. Such a run is never evicted.
+         */
+        volatile boolean releasePending;
 
         RunHolder(Run run) {
             this.run = run;
@@ -218,6 +224,7 @@ final class RunRegistry {
 
     private static boolean idle(RunHolder holder) {
         return !holder.evicted && !holder.discarded && !holder.dirty && holder.committed && holder.lease == null
+                && !holder.releasePending
                 && holder.inFlight.isEmpty() && holder.run.status() != RunStatus.RUNNING;
     }
 

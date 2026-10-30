@@ -16,6 +16,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
+import org.jspecify.annotations.Nullable;
+
 import com.agenticsdlc.orchestrator.core.artifact.ChangeSet;
 import com.agenticsdlc.orchestrator.core.util.RepoPaths;
 
@@ -176,7 +178,9 @@ public final class WorkspaceSandbox {
      *   <li>{@code DELETE} deletes the file; NONE content of a CREATE or MODIFY writes nothing.</li>
      * </ul>
      *
-     * <p>The whole change set is checked, and every diff is applied in memory, before anything is written: a CREATE
+     * <p>The whole change set is checked, and every diff is applied in memory, before anything is written: a path
+     * that is not spelled exactly ({@link #spellingProblem}: a segment ending with a dot or a space, which Windows
+     * drops silently, or a spelling that differs from its normalized form), a CREATE
      * of an existing file, a path outside the {@link #ALLOWED_ROOTS} or outside the sandbox, two changes that name
      * the same file (also when spelled differently, such as {@code a//b} and {@code a/./b}: each diff would be
      * applied to the original file and only the last one would survive), a path that is an existing directory or
@@ -228,6 +232,11 @@ public final class WorkspaceSandbox {
         Map<String, String> patched = new HashMap<>();
         Map<Path, String> targets = new HashMap<>();
         for (ChangeSet.FileChange change : changeSet.changes()) {
+            String spelling = spellingProblem(change.path());
+            if (spelling != null) {
+                problems.add(change.path() + " " + spelling);
+                continue;
+            }
             if (!isAllowedPath(change.path())) {
                 problems.add(change.path() + " is outside the allowed roots (" + String.join(", ", ALLOWED_ROOTS)
                         + ")");
@@ -268,6 +277,30 @@ public final class WorkspaceSandbox {
             throw new ChangeSetRejectedException(problems);
         }
         return patched;
+    }
+
+    /**
+     * Returns why a repository-relative path is not spelled exactly as the file it names, or null when it is: a
+     * segment that ends with a dot or a space (Windows drops them silently, so {@code V1__init.sql.} would write
+     * {@code V1__init.sql} past path-based policy rules such as protected migrations), or a spelling that differs from
+     * its normalized form ({@link RepoPaths#normalize}: backslashes, repeated slashes, {@code ./} segments, surrounding
+     * whitespace).
+     *
+     * @param relative repository-relative path
+     * @return the problem (a phrase that follows the path in a message), or null
+     */
+    static @Nullable String spellingProblem(String relative) {
+        for (String segment : relative.split("[/\\\\]", -1)) {
+            if (!segment.isEmpty() && !segment.equals(".") && !segment.equals("..")
+                    && (segment.endsWith(".") || segment.endsWith(" "))) {
+                return "has the segment '" + segment + "' ending with a dot or a space (Windows drops them silently)";
+            }
+        }
+        String normalized = RepoPaths.normalize(relative);
+        if (!normalized.equals(relative)) {
+            return "is not in normalized form (write '" + normalized + "')";
+        }
+        return null;
     }
 
     /**

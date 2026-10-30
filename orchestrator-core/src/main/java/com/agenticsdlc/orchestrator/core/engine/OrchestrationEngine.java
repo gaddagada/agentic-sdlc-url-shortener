@@ -136,7 +136,11 @@ import com.agenticsdlc.orchestrator.core.workspace.WorkspaceSandbox;
  * throws {@link RunLeasedElsewhereException}; reads never need a lease. When this node acquires a run's lease it
  * first reloads the run if the store holds a newer state (written by another node), and reads of runs that are not
  * executing here are refreshed from the store the same way. Within one node, the per-run lock remains the
- * mechanism.</p>
+ * mechanism. When releasing a lease fails, the node keeps it as a pending release: its own next command on the run
+ * renews and uses it, the run is not evicted, and the release is retried by {@link #releasePendingLeases()} (which
+ * {@link #recoverInterruptedCount()} calls) and once more on close. A node is never refused with its own node id:
+ * when the provider names this node as the holder of a lease it does not hold locally (a restart with a fixed node
+ * id), the lease is reclaimed ({@link RunLeaseProvider#reclaim}).</p>
  *
  * <p>Bounded memory: runs that are not executing on this node are evicted from the in-memory registry after
  * {@link EngineConfig#registryRetention()} without a change, and terminal runs beyond
@@ -344,8 +348,9 @@ public final class OrchestrationEngine implements AutoCloseable {
                     removed.inFlight.clear();
                     RunLease lease = removed.lease;
                     removed.lease = null;
+                    removed.releasePending = false;
                     if (lease != null) {
-                        releaseQuietly(lease);
+                        tryRelease(lease);
                     }
                 } finally {
                     removed.lock.unlock();
@@ -724,7 +729,8 @@ public final class OrchestrationEngine implements AutoCloseable {
             holder.lock.lock();
             try {
                 if (!holder.evicted && !holder.discarded) {
-                    if (holder.lease == null && holder.committed && !holder.run.status().isTerminal()) {
+                    if ((holder.lease == null || holder.releasePending) && holder.committed
+                            && !holder.run.status().isTerminal()) {
                         refreshIfStale(holder);
                     }
                     return holder.run.copy();
@@ -760,7 +766,8 @@ public final class OrchestrationEngine implements AutoCloseable {
                 }
                 Run live = holder.run;
                 Run stored = byId.get(live.id());
-                if (stored == null || holder.lease != null || !newer(stored, live)) {
+                boolean executingHere = holder.lease != null && !holder.releasePending;
+                if (stored == null || executingHere || !newer(stored, live)) {
                     byId.put(live.id(), live.copy());
                 }
             } finally {
@@ -858,18 +865,25 @@ public final class OrchestrationEngine implements AutoCloseable {
      * maintenance passes that find nothing to do stay quiet (runs skipped because a node executes them are logged at
      * DEBUG for the same reason).
      *
+     * <p>It first retries the releases of leases kept after a failed release ({@link #releasePendingLeases()}), so
+     * that a periodic maintenance pass also cleans those up. A RUNNING run whose valid lease names this node while
+     * this engine holds no lease for it (a restart with a fixed node id) is recovered too: its lease is reclaimed
+     * ({@link RunLeaseProvider#reclaim}); when the provider cannot reclaim, the run is skipped until the lease
+     * expires.</p>
+     *
      * @return the number of runs that were safe-stopped with {@link HaltReason#INTERRUPTED_BY_RESTART} by this call
      * @throws IllegalStateException when the engine is closed
      */
     public int recoverInterruptedCount() {
         ensureOpen();
+        releasePendingLeases();
         int recovered = 0;
         for (Run loaded : runStore.loadAll()) {
             if (loaded.status() != RunStatus.RUNNING) {
                 continue;
             }
             Optional<String> owner = leases.holderOf(loaded.id());
-            if (owner.isPresent()) {
+            if (owner.isPresent() && !(nodeId.equals(owner.get()) && !holdsLeaseLocally(loaded.id()))) {
                 LOG.debug("run not recovered: it is executing on node {} runId={}", owner.get(), loaded.id());
                 continue;
             }
@@ -916,6 +930,8 @@ public final class OrchestrationEngine implements AutoCloseable {
                 }
             } catch (RunLeasedElsewhereException e) {
                 LOG.info("run not recovered: node {} acquired it meanwhile runId={}", e.holder(), loaded.id());
+            } catch (InvalidRunStateException e) {
+                LOG.info("run not recovered: {} runId={}", e.getMessage(), loaded.id());
             }
         }
         if (recovered == 0) {
@@ -928,7 +944,8 @@ public final class OrchestrationEngine implements AutoCloseable {
 
     /**
      * Stops accepting commands, cancels in-flight attempts, releases the run leases this node holds (so that other
-     * nodes can recover its runs right away) and shuts down engine-owned executors. Runs that were in progress stay
+     * nodes can recover its runs right away; a failed release is retried once, after which the lease expires on its
+     * own) and shuts down engine-owned executors. Runs that were in progress stay
      * RUNNING in the store and are recovered by {@link #recoverInterrupted()} on the next start (or by another
      * node).
      */
@@ -938,15 +955,32 @@ public final class OrchestrationEngine implements AutoCloseable {
             return;
         }
         closed = true;
+        List<RunRegistry.RunHolder> failedReleases = new ArrayList<>();
         for (RunRegistry.RunHolder holder : registry.all()) {
             holder.lock.lock();
             try {
                 holder.inFlight.values().forEach(f -> f.future().cancel(true));
                 holder.inFlight.clear();
                 RunLease lease = holder.lease;
-                holder.lease = null;
-                if (lease != null) {
-                    releaseQuietly(lease);
+                if (lease != null && !tryRelease(lease)) {
+                    holder.releasePending = true;
+                    failedReleases.add(holder);
+                } else {
+                    holder.lease = null;
+                    holder.releasePending = false;
+                }
+            } finally {
+                holder.lock.unlock();
+            }
+        }
+        for (RunRegistry.RunHolder holder : failedReleases) {
+            // one retry, so that a transient failure does not leave the runs blocked for a whole lease period
+            holder.lock.lock();
+            try {
+                RunLease lease = holder.lease;
+                if (lease != null && tryRelease(lease)) {
+                    holder.lease = null;
+                    holder.releasePending = false;
                 }
             } finally {
                 holder.lock.unlock();
@@ -1046,7 +1080,13 @@ public final class OrchestrationEngine implements AutoCloseable {
      * the run from the store if another node advanced it meanwhile. The refresh happens after the acquisition (even
      * for a run loaded a moment ago), because only then can no other node commit a newer state.
      *
+     * <p>A lease kept after a failed release is renewed and used like any held lease. When no lease is held locally
+     * but the provider names this node as the holder (a restart with a fixed node id), the lease is reclaimed
+     * ({@link RunLeaseProvider#reclaim}): a node is never refused with its own node id.</p>
+     *
      * @throws RunLeasedElsewhereException when another node holds a valid lease
+     * @throws InvalidRunStateException when the previous lease of this node is still valid and the provider cannot
+     *                                  reclaim it
      */
     private void ensureLease(RunRegistry.RunHolder holder) {
         String runId = holder.run.id();
@@ -1056,35 +1096,107 @@ public final class OrchestrationEngine implements AutoCloseable {
                 return;
             }
             holder.lease = null;
+            holder.releasePending = false;
             LOG.warn("run lease lost (expired and taken over or released) runId={} node={}", runId, nodeId);
         }
         Optional<RunLease> acquired = leases.tryAcquire(runId, nodeId, config.leaseTtl());
         if (acquired.isEmpty()) {
-            throw new RunLeasedElsewhereException(runId, leases.holderOf(runId).orElse("unknown"));
+            String owner = leases.holderOf(runId).orElse("unknown");
+            if (!nodeId.equals(owner)) {
+                throw new RunLeasedElsewhereException(runId, owner);
+            }
+            acquired = leases.reclaim(runId, nodeId, config.leaseTtl());
+            if (acquired.isEmpty()) {
+                throw new InvalidRunStateException("run " + runId + " is still leased by this node (" + nodeId
+                        + ") under a lease it no longer holds (a restart with the same node id) and the lease "
+                        + "provider cannot reclaim it; retry once it expires (lease TTL " + config.leaseTtl() + ")");
+            }
+            LOG.info("run lease of this node reclaimed runId={} node={}", runId, nodeId);
         }
         holder.lease = acquired.get();
+        holder.releasePending = false;
         if (holder.committed) {
             refreshIfStale(holder);
         }
     }
 
-    /** Releases the run's lease unless the run keeps executing on this node (RUNNING). Never fails the caller. */
-    private void releaseLeaseUnlessExecuting(RunRegistry.RunHolder holder) {
-        RunLease lease = holder.lease;
-        if (lease == null || (!holder.discarded && holder.run.status() == RunStatus.RUNNING)) {
-            return;
-        }
-        holder.lease = null;
-        releaseQuietly(lease);
+    /** Whether this engine holds a lease on the run locally (also one whose release is pending). */
+    private boolean holdsLeaseLocally(String runId) {
+        RunRegistry.RunHolder holder = registry.find(runId);
+        return holder != null && holder.lease != null;
     }
 
-    private void releaseQuietly(RunLease lease) {
+    /**
+     * Releases the lease of the run unless the run keeps executing on this node (RUNNING). Never fails the caller:
+     * when the release fails, the lease is kept with a pending release (renewed and used by the next command of this
+     * node, released later by {@link #releasePendingLeases()} or on close), so that this node never locks itself out.
+     */
+    private void releaseLeaseUnlessExecuting(RunRegistry.RunHolder holder) {
+        RunLease lease = holder.lease;
+        if (lease == null) {
+            return;
+        }
+        if (!holder.discarded && holder.run.status() == RunStatus.RUNNING) {
+            holder.releasePending = false; // executing here again: the lease is in use
+            return;
+        }
+        if (tryRelease(lease)) {
+            holder.lease = null;
+            holder.releasePending = false;
+        } else {
+            holder.releasePending = true;
+        }
+    }
+
+    /** Releases a lease; returns false (after logging) when the provider failed. */
+    private boolean tryRelease(RunLease lease) {
         try {
             leases.release(lease);
+            return true;
         } catch (RuntimeException e) {
-            LOG.warn("run lease release failed runId={} node={} error={}; it expires after {}", lease.runId(),
-                    nodeId, e.toString(), config.leaseTtl());
+            LOG.warn("run lease release failed runId={} node={} error={}; kept as pending release (retried by "
+                    + "maintenance and on close; otherwise it expires after {})", lease.runId(), nodeId, e.toString(),
+                    config.leaseTtl());
+            return false;
         }
+    }
+
+    /**
+     * Retries the release of every lease this node kept because releasing it failed (the run is not executing here).
+     * {@link #recoverInterruptedCount()} calls it first, so periodic maintenance retries pending releases without
+     * further wiring; adapters may also call it directly.
+     *
+     * @return the number of leases released by this call
+     */
+    public int releasePendingLeases() {
+        int released = 0;
+        for (RunRegistry.RunHolder holder : registry.all()) {
+            if (!holder.releasePending) {
+                continue;
+            }
+            holder.lock.lock();
+            try {
+                RunLease lease = holder.lease;
+                if (!holder.releasePending || lease == null) {
+                    continue;
+                }
+                if (!holder.discarded && holder.run.status() == RunStatus.RUNNING) {
+                    holder.releasePending = false;
+                    continue;
+                }
+                if (tryRelease(lease)) {
+                    holder.lease = null;
+                    holder.releasePending = false;
+                    released++;
+                }
+            } finally {
+                holder.lock.unlock();
+            }
+        }
+        if (released > 0) {
+            LOG.info("pending run lease releases completed count={} node={}", released, nodeId);
+        }
+        return released;
     }
 
     /** Renews the run's lease from an attempt's heartbeat (off the run lock). */

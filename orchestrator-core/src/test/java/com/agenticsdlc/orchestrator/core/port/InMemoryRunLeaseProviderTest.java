@@ -25,6 +25,44 @@ class InMemoryRunLeaseProviderTest {
     private final InMemoryRunLeaseProvider leases = new InMemoryRunLeaseProvider(clock);
 
     @Test
+    void theSameOwnerMayReclaimItsLeaseWhileOthersWaitForExpiry() {
+        RunLease lost = leases.tryAcquire("run-1", "node-a", TTL).orElseThrow();
+
+        assertThat(leases.reclaim("run-1", "node-b", TTL)).as("another owner must wait").isEmpty();
+        RunLease reclaimed = leases.reclaim("run-1", "node-a", TTL).orElseThrow();
+        assertThat(reclaimed.ownerId()).isEqualTo("node-a");
+        assertThat(reclaimed.token()).isNotEqualTo(lost.token());
+        assertThat(leases.renew(lost, TTL)).as("the old token no longer holds the run").isFalse();
+        assertThat(leases.renew(reclaimed, TTL)).isTrue();
+        assertThat(leases.holderOf("run-1")).contains("node-a");
+
+        clock.advance(TTL.plusSeconds(1));
+        assertThat(leases.reclaim("run-1", "node-b", TTL)).as("anyone may reclaim an expired lease").isPresent();
+        assertThat(leases.holderOf("run-1")).contains("node-b");
+        assertThat(leases.reclaim("run-2", "node-c", TTL)).as("a run without a lease").isPresent();
+        assertThat(new RunLeaseProvider() {
+            @Override
+            public java.util.Optional<RunLease> tryAcquire(String runId, String ownerId, Duration ttl) {
+                return java.util.Optional.empty();
+            }
+
+            @Override
+            public boolean renew(RunLease lease, Duration ttl) {
+                return false;
+            }
+
+            @Override
+            public void release(RunLease lease) {
+            }
+
+            @Override
+            public java.util.Optional<String> holderOf(String runId) {
+                return java.util.Optional.empty();
+            }
+        }.reclaim("run-1", "node-a", TTL)).as("providers without support never reclaim").isEmpty();
+    }
+
+    @Test
     void aLeaseIsExclusiveUntilReleased() {
         RunLease lease = leases.tryAcquire("run-1", "node-a", TTL).orElseThrow();
         assertThat(lease.runId()).isEqualTo("run-1");

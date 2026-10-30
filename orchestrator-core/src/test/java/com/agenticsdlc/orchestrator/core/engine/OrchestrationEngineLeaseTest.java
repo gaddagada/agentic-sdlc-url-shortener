@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -33,6 +34,8 @@ import com.agenticsdlc.orchestrator.core.model.RunStatus;
 import com.agenticsdlc.orchestrator.core.model.StageStatus;
 import com.agenticsdlc.orchestrator.core.port.InMemoryRunLeaseProvider;
 import com.agenticsdlc.orchestrator.core.port.InMemoryRunStore;
+import com.agenticsdlc.orchestrator.core.port.RunLease;
+import com.agenticsdlc.orchestrator.core.port.RunLeaseProvider;
 import com.agenticsdlc.orchestrator.core.port.RunStore;
 import com.agenticsdlc.orchestrator.core.testsupport.EngineHarness;
 import com.agenticsdlc.orchestrator.core.testsupport.FakeAgent;
@@ -280,6 +283,182 @@ class OrchestrationEngineLeaseTest {
         return appender.list.stream().filter(e -> e.getLevel() == level)
                 .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
                 .filter(m -> m.startsWith("recovery finished")).toList();
+    }
+
+    /** A lease provider whose releases can fail, be dropped (a crashed node) and whose reclaim can be unsupported. */
+    static final class FlakyLeases implements RunLeaseProvider {
+        final InMemoryRunLeaseProvider delegate;
+        final AtomicInteger failReleases = new AtomicInteger();
+        final AtomicInteger releaseCalls = new AtomicInteger();
+        volatile boolean dropReleases;
+        volatile boolean reclaimSupported = true;
+
+        FlakyLeases(InMemoryRunLeaseProvider delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public Optional<RunLease> tryAcquire(String runId, String ownerId, Duration ttl) {
+            return delegate.tryAcquire(runId, ownerId, ttl);
+        }
+
+        @Override
+        public boolean renew(RunLease lease, Duration ttl) {
+            return delegate.renew(lease, ttl);
+        }
+
+        @Override
+        public void release(RunLease lease) {
+            releaseCalls.incrementAndGet();
+            if (failReleases.getAndUpdate(n -> Math.max(0, n - 1)) > 0) {
+                throw new IllegalStateException("lease table unavailable");
+            }
+            if (!dropReleases) {
+                delegate.release(lease);
+            }
+        }
+
+        @Override
+        public Optional<RunLease> reclaim(String runId, String ownerId, Duration ttl) {
+            return reclaimSupported ? delegate.reclaim(runId, ownerId, ttl) : Optional.empty();
+        }
+
+        @Override
+        public Optional<String> holderOf(String runId) {
+            return delegate.holderOf(runId);
+        }
+    }
+
+    @Test
+    void aFailedReleaseKeepsTheLeasePendingSoTheNodeIsNotLockedOutAndTheRunIsNotEvicted() {
+        FlakyLeases flaky = new FlakyLeases(leases);
+        flaky.failReleases.set(1);
+        try (EngineHarness flakyA = new EngineHarness(store, audit).config(b -> b.nodeId("node-a").clock(clock)
+                .leaseProvider(flaky).leaseTtl(TTL).registryRetention(Duration.ZERO))) {
+            OrchestrationEngine a = flakyA.start();
+            OrchestrationEngine b = nodeB.start();
+            String id = a.start(REQUIREMENT, "pending", RunOptions.defaults()).id();
+            flakyA.awaitApproval(id, DESIGN);
+
+            assertThat(flaky.releaseCalls.get()).as("the release at the design gate failed").isEqualTo(1);
+            assertThat(leases.holderOf(id)).contains("node-a");
+            assertThat(a.evictIdleRuns()).as("a run with a pending release is never evicted").isZero();
+            assertThat(a.isCached(id)).isTrue();
+            assertThatThrownBy(() -> b.stop(id, ALICE, "from b")).isInstanceOfSatisfying(
+                    RunLeasedElsewhereException.class, e -> assertThat(e.holder()).isEqualTo("node-a"));
+
+            a.approve(id, DESIGN, ALICE, "approved on the node that kept the lease");
+            flakyA.awaitApproval(id, RELEASE);
+            assertThat(leases.holderOf(id)).as("released normally at the next gate").isEmpty();
+            a.evictIdleRuns();
+            assertThat(a.isCached(id)).as("evictable again once nothing is pending").isFalse();
+        }
+    }
+
+    @Test
+    void maintenanceRetriesPendingReleasesAndCloseRetriesAFailedReleaseOnce() {
+        FlakyLeases flaky = new FlakyLeases(leases);
+        flaky.failReleases.set(2);
+        try (EngineHarness flakyA = new EngineHarness(store, audit).config(b -> b.nodeId("node-a").clock(clock)
+                .leaseProvider(flaky).leaseTtl(TTL))) {
+            OrchestrationEngine a = flakyA.start();
+            String id = a.start(REQUIREMENT, "maintenance", RunOptions.defaults()).id();
+            flakyA.awaitApproval(id, DESIGN);
+            assertThat(leases.holderOf(id)).contains("node-a");
+
+            assertThat(a.releasePendingLeases()).as("the provider still fails").isZero();
+            assertThat(leases.holderOf(id)).contains("node-a");
+            assertThat(a.recoverInterruptedCount()).as("nothing to recover, but the pending release is retried")
+                    .isZero();
+            assertThat(leases.holderOf(id)).isEmpty();
+            assertThat(a.releasePendingLeases()).isZero();
+            assertThat(flaky.releaseCalls.get()).isEqualTo(3);
+        }
+
+        CountDownLatch slow = new CountDownLatch(1);
+        FlakyLeases closing = new FlakyLeases(leases);
+        try (EngineHarness closingA = new EngineHarness(store, audit).config(b -> b.nodeId("node-c").clock(clock)
+                .leaseProvider(closing).leaseTtl(TTL))) {
+            closingA.agent(blockingImplementation(slow));
+            OrchestrationEngine a = closingA.start();
+            String id = a.start(REQUIREMENT, "close", RunOptions.defaults().withAutonomy(AutonomyLevel.FULL_AUTO))
+                    .id();
+            closingA.awaitStage(id, IMPLEMENT, StageStatus.RUNNING);
+            closing.failReleases.set(1);
+            try {
+                a.close();
+            } finally {
+                slow.countDown();
+            }
+            assertThat(closing.releaseCalls.get()).as("one failed release and one retry").isEqualTo(2);
+            assertThat(leases.holderOf(id)).as("released by the retry").isEmpty();
+        }
+    }
+
+    @Test
+    void aNodeRestartedWithItsNodeIdReclaimsItsOwnLeaseAndIsNeverRefusedWithItsOwnId() {
+        OrchestrationEngine first = nodeA.start();
+        String waiting = first.start(REQUIREMENT, "reclaim", RunOptions.defaults()).id();
+        nodeA.awaitApproval(waiting, DESIGN);
+        first.close();
+        // the previous incarnation of node-a still holds a lease (for example it died between acquiring and releasing)
+        assertThat(leases.tryAcquire(waiting, "node-a", TTL)).isPresent();
+
+        FlakyLeases noReclaim = new FlakyLeases(leases);
+        noReclaim.reclaimSupported = false;
+        try (EngineHarness restarted = new EngineHarness(store, audit).config(b -> b.nodeId("node-a").clock(clock)
+                .leaseProvider(noReclaim).leaseTtl(TTL))) {
+            OrchestrationEngine a = restarted.start();
+            assertThatThrownBy(() -> a.approve(waiting, DESIGN, ALICE, null))
+                    .isInstanceOf(InvalidRunStateException.class).isNotInstanceOf(RunLeasedElsewhereException.class)
+                    .hasMessageContaining("still leased by this node (node-a)");
+        }
+        OrchestrationEngine b = nodeB.start();
+        assertThatThrownBy(() -> b.approve(waiting, DESIGN, ALICE, null))
+                .isInstanceOfSatisfying(RunLeasedElsewhereException.class,
+                        e -> assertThat(e.holder()).isEqualTo("node-a"));
+
+        try (EngineHarness restarted = new EngineHarness(store, audit).config(b2 -> b2.nodeId("node-a").clock(clock)
+                .leaseProvider(leases).leaseTtl(TTL))) {
+            OrchestrationEngine a = restarted.start();
+            a.approve(waiting, DESIGN, ALICE, "approved after the restart");
+            restarted.awaitApproval(waiting, RELEASE);
+            assertThat(leases.holderOf(waiting)).isEmpty();
+        }
+    }
+
+    @Test
+    void aRunningRunOfACrashedNodeIsRecoveredByTheSameNodeIdThroughAReclaim() {
+        CountDownLatch slow = new CountDownLatch(1);
+        FlakyLeases crashing = new FlakyLeases(leases);
+        String id;
+        try (EngineHarness crashed = new EngineHarness(store, audit).config(b -> b.nodeId("node-a").clock(clock)
+                .leaseProvider(crashing).leaseTtl(TTL))) {
+            crashed.agent(blockingImplementation(slow));
+            OrchestrationEngine a = crashed.start();
+            id = a.start(REQUIREMENT, "crash", RunOptions.defaults().withAutonomy(AutonomyLevel.FULL_AUTO)).id();
+            crashed.awaitStage(id, IMPLEMENT, StageStatus.RUNNING);
+            crashing.dropReleases = true; // a crash: the lease is never released
+            try {
+                a.close();
+            } finally {
+                slow.countDown();
+            }
+        }
+        assertThat(leases.holderOf(id)).contains("node-a");
+        assertThat(store.load(id).orElseThrow().status()).isEqualTo(RunStatus.RUNNING);
+
+        assertThat(nodeB.start().recoverInterruptedCount()).as("another node waits for the lease to expire").isZero();
+        try (EngineHarness restarted = new EngineHarness(store, audit).config(b -> b.nodeId("node-a").clock(clock)
+                .leaseProvider(leases).leaseTtl(TTL))) {
+            OrchestrationEngine a = restarted.start();
+            assertThat(a.recoverInterruptedCount()).isEqualTo(1);
+            Run recovered = a.get(id);
+            assertThat(recovered.status()).isEqualTo(RunStatus.SAFE_STOPPED);
+            assertThat(recovered.haltReason()).isEqualTo(HaltReason.INTERRUPTED_BY_RESTART);
+        }
+        ChainVerification chain = AuditChain.verify(events(id));
+        assertThat(chain.valid()).as(chain.summary()).isTrue();
     }
 
     @Test

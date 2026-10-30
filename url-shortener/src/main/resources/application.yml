@@ -76,6 +76,14 @@ shortener:
     # script (configure spring.data.redis.*); if Redis is unreachable requests are allowed (fail open).
     backend: memory
     redis-key-prefix: "shortener:rate-limit:"
+    # IPv6 clients are keyed by this many leading bits (32..128): one subscriber usually holds a whole /64 and could
+    # otherwise get a fresh bucket per address. IPv4 clients are keyed by their address.
+    ipv6-prefix-length: 64
+  idempotency:
+    # How long a request still in flight keeps its Idempotency-Key reservation before a retry may take it over
+    # (the request is then presumed crashed). Bulk requests get pending-takeover-per-item more per item, at most 10m.
+    pending-takeover-after: 60s
+    pending-takeover-per-item: 1s
   analytics:
     # HMAC key of the daily visitor hash. The placeholder is rejected at startup under the postgres/prod profiles.
     ip-salt: change-me-in-production

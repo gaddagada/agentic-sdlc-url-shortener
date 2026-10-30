@@ -151,6 +151,21 @@ class UnifiedDiffTest {
     }
 
     @Test
+    void aFileWithMixedLineEndingsKeepsEveryOriginalLineEnding() {
+        String mixed = "a\r\nb\nc\r\nd\ne\r\n";
+        UnifiedDiff diff = UnifiedDiff.parse("@@ -2,3 +2,4 @@\n-b\n+B\n c\n+c2\n d\n");
+
+        assertThat(diff.apply(mixed, "mixed.txt")).as("B replaces an LF line, c2 follows a CRLF line")
+                .isEqualTo("a\r\nB\nc\r\nc2\r\nd\ne\r\n");
+        assertThat(UnifiedDiff.parse("@@ -0,0 +1 @@\n+top\n").apply("x\ny\r\nz\r\n", "top.txt"))
+                .as("an added first line takes the dominant ending").isEqualTo("top\r\nx\ny\r\nz\r\n");
+        assertThat(UnifiedDiff.parse("@@ -2,1 +2,2 @@\n y\n+z\n").apply("x\r\ny", "tail.txt"))
+                .as("no trailing newline stays so; the former last line gets its neighbour's ending")
+                .isEqualTo("x\r\ny\r\nz");
+        assertThat(UnifiedDiff.parse("@@ -1,1 +1,1 @@\n-x\n+X\n").apply("x\r\n", "one.txt")).isEqualTo("X\r\n");
+    }
+
+    @Test
     void aHunkWithoutLineNumbersWhoseContextMatchesTwiceIsRejectedInsteadOfPatchingTheFirstPlace() {
         String source = "class A {\n    void a() {\n        run();\n    }\n\n    void b() {\n        run();\n    }\n}\n";
         UnifiedDiff ambiguous = UnifiedDiff.parse("@@ @@\n         run();\n+        log();\n     }\n");

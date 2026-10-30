@@ -23,7 +23,9 @@ import java.util.Optional;
  *   <li>{@link #renew} extends the lease identified by its token, also after its expiry as long as no other grant
  *       replaced it; it returns false once the token no longer holds the run;</li>
  *   <li>{@link #release} removes the lease if the token still holds it (otherwise it does nothing);</li>
- *   <li>{@link #holderOf} reports the owner of a valid (unexpired) lease.</li>
+ *   <li>{@link #holderOf} reports the owner of a valid (unexpired) lease;</li>
+ *   <li>{@link #reclaim} (optional) grants a new lease to an owner that already holds the run's valid lease under a
+ *       token it no longer knows (a node restarted with a fixed node id, or a node whose release failed).</li>
  * </ul>
  */
 public interface RunLeaseProvider {
@@ -53,6 +55,26 @@ public interface RunLeaseProvider {
      * @param lease the lease
      */
     void release(RunLease lease);
+
+    /**
+     * Reclaims a run's lease for an owner that lost track of its own lease: grants a new lease (new token, expiry now
+     * plus {@code ttl}) when the run has no valid lease, or when its valid lease belongs to {@code ownerId}; fails
+     * while another owner holds a valid lease. The engine calls it only when {@link #tryAcquire} failed and
+     * {@link #holderOf} names its own node id while it holds no lease locally (for example after a restart with a
+     * fixed node id), so that a node is never refused by a lease of its own. Node ids must therefore be unique per
+     * running engine. The previous token stops holding the run.
+     *
+     * <p>The default implementation does not support reclaiming and returns empty; the engine then reports the run
+     * as still leased by this node until the old lease expires.</p>
+     *
+     * @param runId run id
+     * @param ownerId id of the reclaiming node
+     * @param ttl lease duration (positive)
+     * @return the new lease, or empty when another owner holds a valid lease or reclaiming is not supported
+     */
+    default Optional<RunLease> reclaim(String runId, String ownerId, Duration ttl) {
+        return Optional.empty();
+    }
 
     /**
      * Returns the owner of the run's valid lease.

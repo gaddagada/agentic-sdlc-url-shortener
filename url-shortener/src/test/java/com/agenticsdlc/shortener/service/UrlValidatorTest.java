@@ -105,6 +105,26 @@ class UrlValidatorTest {
                 .hasMessageContaining("non-public");
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+        http://[2001:0:4136:e378:8000:63bf:f7f7:f7f7]/  | true
+        http://[2001:0:4136:e378:8000:63bf:3f57:fefe]/  | false
+        http://[2001:0:4136:e378:8000:63bf:80ff:fffe]/  | false
+        http://[2001:0:a00:1:8000:63bf:f7f7:f7f7]/      | false
+        http://[2001:0:a9fe:a9fe::f7f7:f7f7]/           | false
+        http://[2001:0:7f00:1::f7f7:f7f7]/              | false
+        """)
+    void teredoAddressesAreJudgedByTheirServerAndTheirDeobfuscatedClientIpv4(String url, boolean accepted) {
+        // 2001::/32 (RFC 4380): server 65.54.227.120 / 10.0.0.1 / 169.254.169.254 / 127.0.0.1 in bits 32..63, client
+        // 8.8.8.8 / 192.168.1.1 / 127.0.0.1 inverted in bits 96..127
+        if (accepted) {
+            assertThat(validator.validate(url).toString()).isEqualTo(url);
+        } else {
+            assertThatThrownBy(() -> validator.validate(url)).isInstanceOf(UrlRejectedException.class)
+                    .hasMessageContaining("non-public");
+        }
+    }
+
     @Test
     void rejectsOctalEncodedLoopbackHost() {
         // 0177.0.0.1 is 127.0.0.1 for inet_aton-style parsers (browsers, curl): never accepted.

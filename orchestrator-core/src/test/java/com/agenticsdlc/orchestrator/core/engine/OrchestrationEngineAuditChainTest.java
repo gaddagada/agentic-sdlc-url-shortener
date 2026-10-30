@@ -151,6 +151,54 @@ class OrchestrationEngineAuditChainTest {
     }
 
     @Test
+    void aFailedCommitOfTheAtomicInMemoryStoreLeavesNeitherTheRunChangeNorItsEventsAndRestoresTheChainHead() {
+        AtomicInteger failAppend = new AtomicInteger();
+        harness.storeDecorator(store -> new DelegatingStore(store) {
+            @Override
+            public void commit(Run run, List<AuditEvent> events, AuditSink auditSink) {
+                AuditSink sink = failAppend.getAndSet(0) == 0 ? auditSink : new AuditSink() {
+                    @Override
+                    public void append(List<AuditEvent> batch) {
+                        throw new IllegalStateException("audit log unavailable");
+                    }
+
+                    @Override
+                    public List<AuditEvent> forRun(String runId, long afterSeq) {
+                        return auditSink.forRun(runId, afterSeq);
+                    }
+                };
+                store.commit(run, events, sink); // the in-memory store's own commit
+            }
+        });
+        OrchestrationEngine engine = harness.start();
+        String id = engine.start("Create short links and redirect with HTTP 302.", "atomic", RunOptions.defaults())
+                .id();
+        harness.awaitApproval(id, DESIGN);
+        Run before = harness.store.load(id).orElseThrow();
+        AuditEvent last = harness.audit.lastEvent(id).orElseThrow();
+
+        failAppend.set(1);
+        assertThatThrownBy(() -> engine.stop(id, ALICE, "pause")).hasMessageContaining("audit log unavailable");
+
+        Run stored = harness.store.load(id).orElseThrow();
+        assertThat(stored.status()).as("the run change was rolled back").isEqualTo(RunStatus.WAITING_HUMAN)
+                .isEqualTo(before.status());
+        assertThat(stored.auditSeq()).isEqualTo(last.seq());
+        assertThat(stored.updatedAt()).isEqualTo(before.updatedAt());
+        assertThat(harness.audit.lastEvent(id)).as("no event of the failed commit").contains(last);
+        Run live = engine.get(id);
+        assertThat(live.auditSeq()).as("the chain head is restored").isEqualTo(last.seq());
+        assertThat(live.auditHeadHash()).isEqualTo(last.hash());
+
+        engine.resume(id, ALICE);
+        harness.awaitApproval(id, DESIGN);
+        engine.approve(id, DESIGN, ALICE, null);
+        harness.awaitApproval(id, RELEASE);
+        engine.approve(id, RELEASE, ALICE, null);
+        assertValidChain(harness.events(id), harness.awaitStatus(id, RunStatus.COMPLETED));
+    }
+
+    @Test
     void aSnapshotThatIsAheadOfTheAuditLogIsResynchronizedOnLoad() {
         // the default commit is not atomic: the run is saved, then the append fails
         AtomicInteger failAppend = new AtomicInteger();

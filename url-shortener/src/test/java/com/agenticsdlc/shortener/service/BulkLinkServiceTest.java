@@ -175,9 +175,10 @@ class BulkLinkServiceTest {
         when(linkService.create(commands.get(0), null)).thenReturn(created("aaaa"));
         when(linkService.create(commands.get(1), null)).thenThrow(new UrlRejectedException("private"));
         when(idempotency.fingerprint(anyString(), any())).thenReturn("f".repeat(64));
-        when(idempotency.execute(eq("key-1"), eq("f".repeat(64)), eq(200), eq(BulkCreation.class), any()))
+        // the item count selects the longer takeover window of a bulk reservation
+        when(idempotency.execute(eq("key-1"), eq("f".repeat(64)), eq(200), eq(BulkCreation.class), eq(2), any()))
                 .thenAnswer(invocation -> new IdempotentResult<>(
-                        invocation.<Supplier<BulkCreation>>getArgument(4).get(), 200, false));
+                        invocation.<Supplier<BulkCreation>>getArgument(5).get(), 200, false));
 
         BulkCreationResult result = service(limiter).createAll(commands, "key-1", CLIENT);
 
@@ -193,7 +194,8 @@ class BulkLinkServiceTest {
         RecordingRateLimiter limiter = new RecordingRateLimiter(5, 5);
         BulkCreation stored = new BulkCreation(List.of(Item.created(0, view("aaaa"))));
         when(idempotency.fingerprint(anyString(), any())).thenReturn("f".repeat(64));
-        when(idempotency.<BulkCreation>execute(anyString(), anyString(), anyInt(), eq(BulkCreation.class), any()))
+        when(idempotency.<BulkCreation>execute(anyString(), anyString(), anyInt(), eq(BulkCreation.class), anyInt(),
+                any()))
                 .thenReturn(new IdempotentResult<>(stored, 200, true));
 
         BulkCreationResult result = service(limiter).createAll(List.of(command("https://example.com/1")), "key-1",
@@ -209,7 +211,8 @@ class BulkLinkServiceTest {
     @Test
     void idempotencyFailuresPropagate() {
         when(idempotency.fingerprint(anyString(), any())).thenReturn("f".repeat(64));
-        when(idempotency.<BulkCreation>execute(anyString(), anyString(), anyInt(), eq(BulkCreation.class), any()))
+        when(idempotency.<BulkCreation>execute(anyString(), anyString(), anyInt(), eq(BulkCreation.class), anyInt(),
+                any()))
                 .thenThrow(new IdempotencyConflictException());
 
         assertThatThrownBy(() -> service(null).createAll(List.of(command("https://example.com/1")), "key-1", CLIENT))

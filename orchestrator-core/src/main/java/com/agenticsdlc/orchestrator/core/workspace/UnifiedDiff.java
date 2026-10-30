@@ -24,7 +24,9 @@ import org.jspecify.annotations.Nullable;
  * then a whitespace-insensitive match there (leading/trailing whitespace ignored, inner runs collapsed), then the
  * nearest exact and then whitespace-insensitive match within {@value #SEARCH_WINDOW} lines, and finally a unique
  * exact match anywhere after the previous hunk. Context lines keep the file's own text (whitespace included);
- * the file's line separator (LF or CRLF) and trailing newline are preserved. A hunk that cannot be located fails
+ * line endings are preserved per line (a file that mixes LF and CRLF keeps every original line's ending; an added
+ * line takes the ending of the nearest preceding original line, or the file's dominant ending at the top of the
+ * file) and so is the trailing newline. A hunk that cannot be located fails
  * with a {@link PatchException} naming the hunk, the first expected line that does not match and the nearest
  * mismatch in the file, so the message can be fed back to the agent that wrote the diff.</p>
  *
@@ -429,10 +431,13 @@ public record UnifiedDiff(@Nullable String oldPath, @Nullable String newPath, Li
      */
     public String apply(String original, String fileName) {
         Objects.requireNonNull(original, "original");
-        String separator = original.contains("\r\n") ? "\r\n" : "\n";
         List<String> source = splitLines(original);
+        List<String> endings = lineEndings(original);
+        String dominant = dominantEnding(endings);
         boolean endsWithNewline = original.isEmpty() || original.endsWith("\n");
         List<String> out = new ArrayList<>(source.size() + 16);
+        List<String> outEndings = new ArrayList<>(source.size() + 16);
+        String preceding = dominant; // ending of the nearest preceding original line
         int cursor = 0;
         int offset = 0;
         for (int index = 0; index < hunks.size(); index++) {
@@ -445,13 +450,28 @@ public record UnifiedDiff(@Nullable String oldPath, @Nullable String newPath, Li
                 throw new PatchException(diagnose(source, hunk, index, hunks.size(), target, cursor, fileName),
                         index + 1);
             }
-            out.addAll(source.subList(cursor, position));
+            for (int k = cursor; k < position; k++) {
+                out.add(source.get(k));
+                outEndings.add(endings.get(k));
+                preceding = endingOr(endings.get(k), preceding);
+            }
             int p = position;
             for (Line line : hunk.lines()) {
                 switch (line.kind()) {
-                    case CONTEXT -> out.add(source.get(p++));
-                    case REMOVED -> p++;
-                    case ADDED -> out.add(line.text());
+                    case CONTEXT -> {
+                        out.add(source.get(p));
+                        outEndings.add(endings.get(p));
+                        preceding = endingOr(endings.get(p), preceding);
+                        p++;
+                    }
+                    case REMOVED -> {
+                        preceding = endingOr(endings.get(p), preceding);
+                        p++;
+                    }
+                    case ADDED -> {
+                        out.add(line.text());
+                        outEndings.add(preceding);
+                    }
                 }
             }
             cursor = p;
@@ -466,11 +486,50 @@ public record UnifiedDiff(@Nullable String oldPath, @Nullable String newPath, Li
                 }
             }
         }
-        out.addAll(source.subList(cursor, source.size()));
-        if (out.isEmpty()) {
-            return "";
+        for (int k = cursor; k < source.size(); k++) {
+            out.add(source.get(k));
+            outEndings.add(endings.get(k));
         }
-        return String.join(separator, out) + (endsWithNewline ? separator : "");
+        StringBuilder result = new StringBuilder(original.length() + 256);
+        String previous = dominant;
+        for (int k = 0; k < out.size(); k++) {
+            String ending = outEndings.get(k);
+            if (k == out.size() - 1) {
+                ending = endsWithNewline ? endingOr(ending, previous) : "";
+            } else {
+                ending = endingOr(ending, previous); // a former last line without newline is no longer the last
+            }
+            result.append(out.get(k)).append(ending);
+            previous = endingOr(ending, previous);
+        }
+        return result.toString();
+    }
+
+    /** The ending of every line of {@code text} ({@code ""} for a last line without a terminator). */
+    private static List<String> lineEndings(String text) {
+        List<String> endings = new ArrayList<>();
+        int start = 0;
+        while (start < text.length()) {
+            int newline = text.indexOf('\n', start);
+            if (newline < 0) {
+                endings.add("");
+                break;
+            }
+            endings.add(newline > start && text.charAt(newline - 1) == '\r' ? "\r\n" : "\n");
+            start = newline + 1;
+        }
+        return endings;
+    }
+
+    /** CRLF when at least as many lines end with CRLF as with LF (and some do), else LF. */
+    private static String dominantEnding(List<String> endings) {
+        long crlf = endings.stream().filter("\r\n"::equals).count();
+        long lf = endings.stream().filter("\n"::equals).count();
+        return crlf > 0 && crlf >= lf ? "\r\n" : "\n";
+    }
+
+    private static String endingOr(String ending, String fallback) {
+        return ending.isEmpty() ? fallback : ending;
     }
 
     /** The 0-based index at which the hunk's old lines start according to its header. */

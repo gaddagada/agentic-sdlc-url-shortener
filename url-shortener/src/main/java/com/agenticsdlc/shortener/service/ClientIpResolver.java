@@ -1,5 +1,9 @@
 package com.agenticsdlc.shortener.service;
 
+import java.net.Inet4Address;
+import java.net.Inet6Address;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -16,8 +20,9 @@ import com.agenticsdlc.shortener.config.ShortenerProperties;
  * it is the address appended by the trusted proxy, whereas entries further left are supplied by the client and can
  * be spoofed. Otherwise the socket peer address is used. Some proxies (for example Azure Application Gateway) append
  * the client's source port ({@code 203.0.113.7:51234}, {@code [2001:db8::7]:51234}); the port is removed, because the
- * client chooses it per connection and every new port would otherwise get a fresh rate-limit bucket. Takes plain
- * strings so the service layer stays independent of the Servlet API.
+ * client chooses it per connection and every new port would otherwise get a fresh rate-limit bucket. For the same
+ * reason the rate-limit key of an IPv6 client is its prefix ({@link #rateLimitKey(String)}); visitor hashing uses the
+ * full address ({@link #resolve}). Takes plain strings so the service layer stays independent of the Servlet API.
  */
 @Component
 public class ClientIpResolver {
@@ -30,14 +35,72 @@ public class ClientIpResolver {
     private static final Pattern BRACKETED_IPV6 = Pattern.compile("^\\[([0-9A-Fa-f:.]{2,45})](?::\\d{1,5})?$");
 
     private final boolean trustForwardedHeaders;
+    private final int ipv6PrefixLength;
 
     /**
      * Creates the resolver.
      *
-     * @param properties provides {@code shortener.trust-forwarded-headers}
+     * @param properties provides {@code shortener.trust-forwarded-headers} and
+     *                   {@code shortener.rate-limit.ipv6-prefix-length}
      */
     public ClientIpResolver(ShortenerProperties properties) {
         this.trustForwardedHeaders = properties.trustForwardedHeaders();
+        this.ipv6PrefixLength = properties.rateLimit().ipv6PrefixLength();
+    }
+
+    /**
+     * Resolves the rate-limit key of the caller: the client IP ({@link #resolve}) reduced by
+     * {@link #rateLimitKey(String)}. Used by both rate-limit backends.
+     *
+     * @param remoteAddress socket peer address
+     * @param forwardedFor  value of {@code X-Forwarded-For}, if present
+     * @return the rate-limit key
+     */
+    public String rateLimitKey(String remoteAddress, @Nullable String forwardedFor) {
+        return rateLimitKey(resolve(remoteAddress, forwardedFor));
+    }
+
+    /**
+     * Returns the rate-limit key of a client IP. An IPv4 address is the key as it is. An IPv6 address is reduced to its
+     * first {@code shortener.rate-limit.ipv6-prefix-length} bits (default 64) and written as
+     * {@code <network address>/<prefix length>}, because an IPv6 subscriber usually controls a whole /64 and could
+     * otherwise get a fresh bucket for every address it picks; an IPv4-mapped IPv6 address is keyed by its IPv4
+     * address, and a zone ID is ignored. Anything that is not an IP literal is returned unchanged. No DNS lookup is
+     * ever made.
+     *
+     * @param clientIp the client IP (for example from {@link #resolve})
+     * @return the rate-limit key
+     */
+    public String rateLimitKey(String clientIp) {
+        String literal = clientIp.strip();
+        if (literal.startsWith("[") && literal.endsWith("]")) {
+            literal = literal.substring(1, literal.length() - 1);
+        }
+        int zone = literal.indexOf('%');
+        if (zone >= 0) {
+            literal = literal.substring(0, zone);
+        }
+        if (literal.indexOf(':') < 0 || !IP_CHARACTERS.matcher(literal).matches()) {
+            return clientIp; // IPv4 (unchanged) or not an IP literal
+        }
+        InetAddress address;
+        try {
+            address = InetAddress.ofLiteral(literal);
+        } catch (IllegalArgumentException notALiteral) {
+            return clientIp;
+        }
+        if (address instanceof Inet4Address ipv4) {
+            return ipv4.getHostAddress(); // IPv4-mapped IPv6: the IPv4 client
+        }
+        byte[] bytes = address.getAddress();
+        for (int bit = ipv6PrefixLength; bit < bytes.length * 8; bit++) {
+            bytes[bit / 8] &= (byte) ~(0x80 >>> (bit % 8));
+        }
+        try {
+            return Inet6Address.getByAddress(null, bytes, null).getHostAddress() + "/" + ipv6PrefixLength;
+        } catch (UnknownHostException impossible) {
+            return clientIp; // unreachable for a 16-byte address
+        }
     }
 
     /**

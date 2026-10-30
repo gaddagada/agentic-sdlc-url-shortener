@@ -71,8 +71,13 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
 public record DependencyInventory(List<PomModule> modules, List<DependencyRecord> dependencies,
                                   List<DependencyFlag> flags, List<String> notes) {
 
-    /** Directories that are never searched for POMs. */
-    public static final Set<String> SKIPPED_DIRECTORIES = Set.of("target", ".git", "node_modules", "sandbox", ".idea");
+    /**
+     * Directories that are never searched for POMs: build output ({@code target}, {@code build}, {@code out}), VCS
+     * and IDE metadata ({@code .git}, {@code .idea}, {@code .vscode}), dependencies ({@code node_modules}) and
+     * runtime data ({@code data}, {@code sandbox}).
+     */
+    public static final Set<String> SKIPPED_DIRECTORIES = Set.of("target", ".git", "node_modules", "sandbox", ".idea",
+            ".vscode", "data", "build", "out");
 
     /** Maximum number of POMs read. */
     public static final int MAX_POMS = 500;

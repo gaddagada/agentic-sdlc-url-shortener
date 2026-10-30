@@ -56,6 +56,28 @@ public final class InMemoryRunLeaseProvider implements RunLeaseProvider {
         return Optional.ofNullable(granted.get());
     }
 
+    /**
+     * Grants a new lease to {@code ownerId} when the run has no valid lease or its valid lease belongs to
+     * {@code ownerId} (the old token stops holding the run); fails while another owner holds a valid lease.
+     */
+    @Override
+    public Optional<RunLease> reclaim(String runId, String ownerId, Duration ttl) {
+        Objects.requireNonNull(runId, "runId");
+        Objects.requireNonNull(ownerId, "ownerId");
+        requirePositive(ttl);
+        Instant now = Clocks.now(clock);
+        AtomicReference<RunLease> granted = new AtomicReference<>();
+        leases.compute(runId, (id, current) -> {
+            if (current != null && !current.expiredAt(now) && !current.ownerId().equals(ownerId)) {
+                return current;
+            }
+            RunLease lease = new RunLease(id, ownerId, Ids.newId(), now.plus(ttl));
+            granted.set(lease);
+            return lease;
+        });
+        return Optional.ofNullable(granted.get());
+    }
+
     @Override
     public boolean renew(RunLease lease, Duration ttl) {
         Objects.requireNonNull(lease, "lease");

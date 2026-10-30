@@ -41,7 +41,8 @@ import com.agenticsdlc.shortener.service.exception.UrlRejectedException;
  * non-public. A bracketed IPv6 literal is judged without its zone ID ({@code [fe80::1%25eth0]} is link-local), and a
  * bracketed host that is not an IP literal is rejected. IPv6 addresses that embed an IPv4 address (IPv4-mapped,
  * IPv4-compatible, IPv4-translated {@code ::ffff:0:0/96}, NAT64 {@code 64:ff9b::/96}, 6to4 {@code 2002::/16}) are
- * judged by the embedded address; the local-use NAT64 prefix {@code 64:ff9b:1::/48} is always non-public.
+ * judged by the embedded address; the local-use NAT64 prefix {@code 64:ff9b:1::/48} is always non-public. A Teredo
+ * address ({@code 2001::/32}) is judged by both IPv4 addresses it embeds, the server's and the (bit-inverted) client's.
  *
  * <p><b>Resolve-time check (optional, {@code shortener.resolve-targets=true}).</b> By default host names are not
  * resolved: a public-looking name that resolves to a private address is not detected (the shortener never fetches
@@ -256,6 +257,12 @@ public class UrlValidator {
         }
         if ((b[0] & 0xff) == 0x20 && (b[1] & 0xff) == 0x02) {
             return isNonPublicIpv4(b, 2);                   // 2002::/16 6to4, IPv4 in bits 16..47
+        }
+        if ((b[0] & 0xff) == 0x20 && (b[1] & 0xff) == 0x01 && b[2] == 0 && b[3] == 0) {
+            // 2001::/32 Teredo (RFC 4380): the server IPv4 in bits 32..63, the client IPv4 in bits 96..127 with every
+            // bit inverted ("obfuscated"); a tunnel to either one reaches that IPv4 address
+            byte[] client = {(byte) ~b[12], (byte) ~b[13], (byte) ~b[14], (byte) ~b[15]};
+            return isNonPublicIpv4(b, 4) || isNonPublicIpv4(client, 0);
         }
         boolean ipv4Compatible = allZero(b, 0, 12);         // ::a.b.c.d (deprecated)
         boolean nat64 = nat64Prefix && allZero(b, 4, 12);   // 64:ff9b::/96
