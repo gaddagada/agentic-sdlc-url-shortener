@@ -45,7 +45,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The build stage downloads dependencies from Maven Central inside the container; a transient
+      # 5xx from the repository must not fail the pipeline, so each image build is retried.
       - name: Build url-shortener image
-        run: docker build -f url-shortener/Dockerfile -t url-shortener:ci .
+        run: |
+          for attempt in 1 2 3; do
+            docker build -f url-shortener/Dockerfile -t url-shortener:ci . && exit 0
+            echo "docker build failed (attempt $attempt); retrying in 30 s" >&2
+            sleep 30
+          done
+          exit 1
       - name: Build orchestrator-app image
-        run: docker build -f orchestrator-app/Dockerfile -t orchestrator-app:ci .
+        run: |
+          for attempt in 1 2 3; do
+            docker build -f orchestrator-app/Dockerfile -t orchestrator-app:ci . && exit 0
+            echo "docker build failed (attempt $attempt); retrying in 30 s" >&2
+            sleep 30
+          done
+          exit 1
