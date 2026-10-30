@@ -39,6 +39,10 @@ import com.agenticsdlc.orchestrator.core.port.RunLeaseProvider;
  *   <li>renew: {@code UPDATE ... SET expires_at = ? WHERE run_id = ? AND token = ?} (also after expiry, as long as
  *       nobody took the run over);</li>
  *   <li>release: {@code DELETE ... WHERE run_id = ? AND token = ?};</li>
+ *   <li>reclaim (an owner that lost its token, for example a node restarted with a fixed node id): one conditional
+ *       {@code UPDATE ... SET owner_id = ?, token = <new>, expires_at = ? WHERE run_id = ? AND (owner_id = ? OR
+ *       expires_at <= <now>)}; a valid lease of another owner is never taken, the previous token stops holding the
+ *       run, and a run without a row is not inserted (the caller acquires it normally);</li>
  *   <li>holder: {@code SELECT owner_id ... WHERE run_id = ? AND expires_at > <now>}.</li>
  * </ul>
  *
@@ -107,6 +111,33 @@ public final class JdbcRunLeaseProvider implements RunLeaseProvider {
                         utc(now))
                 .update();
         return updated == 1;
+    }
+
+    /**
+     * Reclaims a run's lease for an owner that no longer knows its token: one conditional {@code UPDATE} gives the
+     * row a new token and expiry when it belongs to {@code ownerId} (valid or expired) or has expired (any previous
+     * owner). A valid lease of another owner is left alone, and a run without a row gets none (no insert:
+     * {@link #tryAcquire} handles free runs). Runs in its own short transaction, like every statement of this
+     * provider.
+     *
+     * @param runId run id
+     * @param ownerId id of the reclaiming node
+     * @param ttl lease duration (positive)
+     * @return the new lease when the row was updated, else empty
+     */
+    @Override
+    public Optional<RunLease> reclaim(String runId, String ownerId, Duration ttl) {
+        Objects.requireNonNull(runId, "runId");
+        Objects.requireNonNull(ownerId, "ownerId");
+        requirePositive(ttl);
+        Instant now = now();
+        RunLease lease = new RunLease(runId, ownerId, UUID.randomUUID().toString(), now.plus(ttl));
+        Integer updated = transactions.execute(status -> jdbc
+                .sql("UPDATE run_leases SET owner_id = ?, token = ?, expires_at = ? "
+                        + "WHERE run_id = ? AND (owner_id = ? OR expires_at <= ?)")
+                .params(lease.ownerId(), lease.token(), utc(lease.expiresAt()), runId, ownerId, utc(now))
+                .update());
+        return updated != null && updated == 1 ? Optional.of(lease) : Optional.empty();
     }
 
     @Override

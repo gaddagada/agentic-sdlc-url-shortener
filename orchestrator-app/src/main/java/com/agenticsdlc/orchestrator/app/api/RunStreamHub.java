@@ -16,6 +16,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongFunction;
 
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -60,7 +61,8 @@ import com.agenticsdlc.orchestrator.core.model.Run;
  * events), every stream buffers at most {@value #MAX_QUEUED_EVENTS} unsent live events (a stream that falls further
  * behind is closed and the client reconnects with {@code Last-Event-ID}); writes run on a bounded
  * executor, at most one write task per stream; streams end after {@code sdlc.console.sse-timeout} and on errors, and
- * every end releases the stream's slot.</p>
+ * every end releases the stream's slot. Ending a stream never waits for its client: a stream ended while a write to
+ * its client is blocked is completed by its writer, and keeps its slot, until that write returns.</p>
  */
 @Component
 public class RunStreamHub implements DisposableBean {
@@ -97,6 +99,7 @@ public class RunStreamHub implements DisposableBean {
     private final @Nullable BoundedSendExecutor ownedExecutor;
     private final Clock clock;
     private final Settings settings;
+    private final LongFunction<SseEmitter> emitters;
     private final AtomicInteger connections = new AtomicInteger();
     private final ConcurrentMap<String, Set<RunStream>> runStreams = new ConcurrentHashMap<>();
     private final Set<ListStream> listStreams = ConcurrentHashMap.newKeySet();
@@ -162,6 +165,28 @@ public class RunStreamHub implements DisposableBean {
     public RunStreamHub(OrchestrationEngine engine, AuditSink auditSink, RunViewMapper mapper, WorkflowGraph graph,
                         JsonCodec codec, RunEventBus bus, TaskScheduler scheduler, Executor sendExecutor,
                         Settings settings, Clock clock) {
+        this(engine, auditSink, mapper, graph, codec, bus, scheduler, sendExecutor, settings, clock, SseEmitter::new);
+    }
+
+    /**
+     * Creates the hub with a given write executor and emitter factory (tests pass emitters whose writes block).
+     *
+     * @param engine the engine
+     * @param auditSink the audit sink
+     * @param mapper run view mapper
+     * @param graph workflow graph
+     * @param codec JSON codec
+     * @param bus the bus of committed changes
+     * @param scheduler schedules the heartbeat
+     * @param sendExecutor runs the write tasks (at most one per stream at a time)
+     * @param settings limits
+     * @param clock clock of the heartbeat data
+     * @param emitters creates the emitter of a stream from its timeout in milliseconds
+     */
+    RunStreamHub(OrchestrationEngine engine, AuditSink auditSink, RunViewMapper mapper, WorkflowGraph graph,
+                 JsonCodec codec, RunEventBus bus, TaskScheduler scheduler, Executor sendExecutor, Settings settings,
+                 Clock clock, LongFunction<SseEmitter> emitters) {
+        this.emitters = emitters;
         this.engine = engine;
         this.auditSink = auditSink;
         this.mapper = mapper;
@@ -380,13 +405,22 @@ public class RunStreamHub implements DisposableBean {
 
     /**
      * A stream with its own queue of unsent events, drained by at most one write task at a time.
+     *
+     * <p>The emitter is only ever completed by a thread that is not in the middle of a write: Spring's
+     * {@link SseEmitter#complete()} waits for the emitter's write lock, which a write to a client that stopped reading
+     * holds until the container's write timeout. A stream ended by another thread (the run event bus on overflow, the
+     * heartbeat, a timeout) while its writer is in a write is therefore only marked closed; the writer completes it
+     * and frees its slot as soon as that write returns, so publishing never waits for a client.</p>
      */
     private abstract class Stream {
 
-        final SseEmitter emitter = new SseEmitter(settings.timeout().toMillis());
+        final SseEmitter emitter = emitters.apply(settings.timeout().toMillis());
         private final ArrayDeque<Item> queue = new ArrayDeque<>();
         private final AtomicBoolean released = new AtomicBoolean();
+        private final AtomicBoolean completed = new AtomicBoolean();
         private boolean draining;
+        /** A write task is inside {@code emitter.send}, holding the emitter's write lock. */
+        private boolean writing;
         /** Backlog items still queued: the live limit applies to the other items only. */
         private int backlogQueued;
         private volatile boolean closed;
@@ -446,40 +480,76 @@ public class RunStreamHub implements DisposableBean {
             while (true) {
                 Item item;
                 synchronized (this) {
-                    item = queue.poll();
-                    if (item == null || closed) {
+                    item = closed ? null : queue.poll();
+                    if (item == null && !closed) {
                         draining = false;
                         return;
                     }
-                    if (item.backlog()) {
-                        backlogQueued--;
+                    if (item != null) {
+                        if (item.backlog()) {
+                            backlogQueued--;
+                        }
+                        writing = item.event() != null;
                     }
                 }
-                if (item.event() == null) {
-                    finish();
+                if (item == null || item.event() == null) {
+                    // the end of the stream, or ended by another thread while this writer was busy
+                    endFromWriter();
                     return;
                 }
+                boolean failed = false;
                 try {
                     emitter.send(item.event());
                 } catch (IOException | RuntimeException e) {
                     LOG.debug("event stream write failed, closing stream={} error={}", this, e.toString());
-                    finish();
+                    failed = true;
+                } finally {
+                    synchronized (this) {
+                        writing = false;
+                    }
+                }
+                if (failed) {
+                    endFromWriter();
                     return;
                 }
             }
         }
 
-        /** Ends the stream now (queued events are dropped) and releases its slot. */
+        /**
+         * Ends the stream now (queued events are dropped). Without a write in progress the emitter is completed and
+         * the slot released right away; otherwise the writer does both when its write returns (this thread never
+         * waits for a client).
+         */
         final void finish() {
             synchronized (this) {
                 closed = true;
                 queue.clear();
                 backlogQueued = 0;
+                if (writing) {
+                    return;
+                }
             }
-            try {
-                emitter.complete();
-            } catch (RuntimeException e) {
-                LOG.debug("event stream could not be completed: {}", e.toString());
+            completeAndRelease();
+        }
+
+        /** Ends the stream from its writer (end of stream, failed write, or a finish requested meanwhile). */
+        private void endFromWriter() {
+            synchronized (this) {
+                closed = true;
+                queue.clear();
+                backlogQueued = 0;
+                draining = false;
+            }
+            completeAndRelease();
+        }
+
+        private void completeAndRelease() {
+            if (completed.compareAndSet(false, true)) {
+                try {
+                    emitter.complete();
+                } catch (RuntimeException e) {
+                    LOG.debug("event stream could not be completed: {}", e.toString());
+                }
             }
             release();
         }

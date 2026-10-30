@@ -8,6 +8,7 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.criteria.CompoundSelection;
 import jakarta.persistence.criteria.CriteriaBuilder;
 import jakarta.persistence.criteria.CriteriaQuery;
+import jakarta.persistence.criteria.Nulls;
 import jakarta.persistence.criteria.Order;
 import jakarta.persistence.criteria.Path;
 import jakarta.persistence.criteria.Predicate;
@@ -21,6 +22,11 @@ import com.agenticsdlc.orchestrator.app.runs.RunListQuery;
  * Criteria API implementation of {@link RunListingQueries}: a constructor projection of the listing columns, the
  * filters as predicates (only those that are set, so no {@code :param IS NULL} tricks that PostgreSQL cannot type),
  * the whitelisted sort field plus the id as tie breaker, and a count query with the same predicates.
+ *
+ * <p>Rows without a value in the sort column (a run that has not ended, a run whose starter is unknown) sort last in
+ * either direction. The order is stated explicitly ({@code NULLS LAST}) because the databases disagree on the
+ * default: PostgreSQL treats NULL as the highest value, H2 as the lowest, so the same request would otherwise return
+ * different pages on the two.</p>
  */
 class RunListingQueriesImpl implements RunListingQueries {
 
@@ -44,7 +50,7 @@ class RunListingQueriesImpl implements RunListingQueries {
         Root<RunEntity> run = select.from(RunEntity.class);
         select.select(projection(cb, run)).where(filters(cb, run, query));
         Path<Object> sortPath = run.get(query.sort().field().apiName());
-        Order primary = query.sort().descending() ? cb.desc(sortPath) : cb.asc(sortPath);
+        Order primary = query.sort().descending() ? cb.desc(sortPath, Nulls.LAST) : cb.asc(sortPath, Nulls.LAST);
         Order tieBreaker = query.sort().descending() ? cb.desc(run.get(ID)) : cb.asc(run.get(ID));
         select.orderBy(primary, tieBreaker);
         List<RunListItem> items = entityManager.createQuery(select)

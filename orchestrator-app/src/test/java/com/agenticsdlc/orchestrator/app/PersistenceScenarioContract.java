@@ -40,10 +40,11 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * What the persistence layer must deliver on any supported database, run against the whole application context:
  * the deterministic greenfield scenario runs to completion through the engine (approved by two operators), and
- * afterwards the Flyway migrations V1 and V2 are applied, the audit trail read back from the database verifies as an
- * intact hash chain through the integrity endpoint, the run row carries the listing columns, a lease row existed
- * while the run executed and none is left, and the release change record is signed with the configured key and
- * verifies. Subclasses choose the database: {@code H2PersistenceScenarioTest} (in-memory H2, every build) and
+ * afterwards the Flyway migrations V1 to V3 are applied, the audit trail read back from the database verifies as an
+ * intact hash chain through the integrity endpoint, the run row carries the listing and progress columns, the paged
+ * runs list (the projection query with a status and starter filter, ordered by end time) returns it, a lease row
+ * existed while the run executed and none is left, and the release change record is signed with the configured key
+ * and verifies. Subclasses choose the database: {@code H2PersistenceScenarioTest} (in-memory H2, every build) and
  * {@code PostgresPersistenceIT} (PostgreSQL in a container, where Docker is available).
  *
  * <p>Nothing here depends on wall-clock ordering: progress is awaited by polling the run's state, and the run is
@@ -91,15 +92,15 @@ abstract class PersistenceScenarioContract {
         Run done = awaitRun(id, r -> r.status() == RunStatus.COMPLETED);
 
         assertThat(flyway.info().applied()).filteredOn(MigrationInfo::isVersioned)
-                .extracting(m -> m.getVersion().getVersion()).contains("1", "2");
+                .extracting(m -> m.getVersion().getVersion()).contains("1", "2", "3");
 
         JsonNode integrity = get("/api/v1/runs/" + id + "/audit/integrity");
         assertThat(integrity.path("valid").asBoolean()).as(integrity.path("summary").asString()).isTrue();
         assertThat(integrity.path("length").asLong()).isEqualTo(done.auditSeq()).isPositive();
 
         Map<String, Object> row = JdbcClient.create(dataSource).sql("SELECT status, autonomy, workspace_mode, "
-                + "started_by, risk_level, node_id, audit_head_hash FROM runs WHERE id = ?").param(id).query()
-                .singleRow();
+                + "started_by, risk_level, node_id, audit_head_hash, pending_actions, stages_succeeded, stages_total "
+                + "FROM runs WHERE id = ?").param(id).query().singleRow();
         assertThat(row.get("status")).isEqualTo("COMPLETED");
         assertThat(row.get("autonomy")).isEqualTo("GUIDED");
         assertThat(row.get("workspace_mode")).isEqualTo("NONE");
@@ -107,6 +108,24 @@ abstract class PersistenceScenarioContract {
         assertThat(row.get("risk_level")).isEqualTo(done.currentRisk().level().name());
         assertThat(row.get("node_id")).isNotNull();
         assertThat(row.get("audit_head_hash")).isEqualTo(done.auditHeadHash()).isNotNull();
+        assertThat(((Number) row.get("pending_actions")).intValue()).isZero();
+        assertThat(((Number) row.get("stages_succeeded")).intValue()).isEqualTo(done.stages().size());
+        assertThat(((Number) row.get("stages_total")).intValue()).isEqualTo(done.stages().size());
+
+        JsonNode page = get("/api/v1/runs?status=completed&startedBy=contract-operator&sort=endedAt,desc&size=200");
+        assertThat(page.path("total").asLong()).isPositive();
+        JsonNode listed = null;
+        for (JsonNode item : page.path("items")) {
+            if (id.equals(item.path("id").asString())) {
+                listed = item;
+            }
+        }
+        assertThat(listed).as("the run in the paged list").isNotNull();
+        assertThat(listed.path("status").asString()).isEqualTo("COMPLETED");
+        assertThat(listed.path("endedAt").isMissingNode() || listed.path("endedAt").isNull()).isFalse();
+        assertThat(listed.path("pendingActions").asInt()).isZero();
+        assertThat(listed.path("progress").path("succeeded").asInt()).isEqualTo(done.stages().size());
+        assertThat(listed.path("progress").path("total").asInt()).isEqualTo(done.stages().size());
 
         assertThat(leases).isInstanceOf(RecordingLeases.class);
         RecordingLeases recorded = (RecordingLeases) leases;

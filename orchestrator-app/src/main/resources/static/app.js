@@ -284,7 +284,9 @@ function startListStream() {
     },
     onState: (state) => {
       renderStreamState();
-      if (state === 'open') loops.runs?.kick(); // catch up with what changed while the stream was down
+      // 'open': catch up with what changed while the stream was down; 'retrying' / 'failed': the stream died, so
+      // the list poll falls back to its 3 s cadence now (its pending timer may have been set for the 30 s safety poll)
+      if (state === 'open' || state === 'retrying' || state === 'failed') loops.runs?.kick();
     },
   }).start();
 }

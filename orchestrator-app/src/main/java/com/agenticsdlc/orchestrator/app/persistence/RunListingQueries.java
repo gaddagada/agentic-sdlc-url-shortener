@@ -14,7 +14,8 @@ import com.agenticsdlc.orchestrator.app.runs.RunListQuery;
 public interface RunListingQueries {
 
     /**
-     * Returns one page of runs matching the query's filters, in the query's order (ties broken by id).
+     * Returns one page of runs matching the query's filters, in the query's order (ties broken by id, rows without
+     * a value in the sort column last in either direction).
      *
      * @param query page, filters and order
      * @return the page with the total number of matching rows

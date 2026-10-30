@@ -29,7 +29,9 @@ import com.agenticsdlc.orchestrator.core.model.WorkspaceMode;
 /**
  * The projection queries of the runs list ({@link RunListingQueries} through {@link JpaRunListing}) on H2 with the
  * Flyway schema: the listing and progress columns become list items, the database cuts the requirement, and paging,
- * the exact-match filters and the whitelisted orders (ties broken by id) behave as documented.
+ * the exact-match filters and the whitelisted orders (ties broken by id, rows without a value last in either
+ * direction) behave as documented. {@link PostgresNullOrderRunListingQueriesTest} repeats every test on H2 with
+ * PostgreSQL's NULL ordering.
  */
 @DataJpaTest
 @Import({JpaRunStore.class, JpaRunListing.class, PersistenceFixtures.class})
@@ -137,6 +139,21 @@ class RunListingQueriesTest {
     }
 
     @Test
+    void runsWithoutAValueSortLastInEitherDirection() {
+        end("r1", T0.plusSeconds(100));
+        end("r4", T0.plusSeconds(50));
+
+        assertThat(ids(new RunListQuery(0, 50, List.of(), null, null,
+                new RunListSort(RunListSort.Field.ENDED_AT, false))))
+                .as("endedAt asc: ended runs first, then the running ones by id")
+                .containsExactly("r4", "r1", "r2", "r3", "r5");
+        assertThat(ids(new RunListQuery(0, 50, List.of(), null, null,
+                new RunListSort(RunListSort.Field.ENDED_AT, true))))
+                .as("endedAt desc: ended runs first, then the running ones by id")
+                .containsExactly("r1", "r4", "r5", "r3", "r2");
+    }
+
+    @Test
     void theProgressColumnsFollowEverySave() {
         Run run = store.load("r3").orElseThrow();
         run.stage("intake").setStatus(com.agenticsdlc.orchestrator.core.model.StageStatus.SUCCEEDED);
@@ -150,6 +167,12 @@ class RunListingQueriesTest {
 
     private List<String> ids(RunListQuery query) {
         return listing.page(query).items().stream().map(RunListItem::id).toList();
+    }
+
+    private void end(String id, Instant endedAt) {
+        Run run = store.load(id).orElseThrow();
+        run.setEndedAt(endedAt);
+        store.save(run);
     }
 
     private static RunListSort created(boolean descending) {

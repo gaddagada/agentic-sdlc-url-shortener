@@ -89,6 +89,31 @@ class PolicyPackFilesTest {
     }
 
     @Test
+    void yamlAliasesAreRejectedInsteadOfBecomingTheAnchorName() {
+        // Jackson reads an alias as the anchor's name: ORG-002 would silently match the text "personal-data"
+        PolicyPackException error = (PolicyPackException) org.assertj.core.api.Assertions.catchThrowable(() ->
+                PolicyPackFiles.parse("""
+                        name: aliases
+                        version: "1"
+                        rules:
+                          - id: ORG-001
+                            phase: RUN_START
+                            when: {type: intentMatches, regexes: [&personal-data "(?i)passport|social security"]}
+                            effect: WARN
+                            message: personal data
+                          - id: ORG-002
+                            phase: EXIT
+                            when: {type: payloadMatches, regexes: [*personal-data]}
+                            effect: REQUIRE_APPROVAL
+                            message: personal data in an artifact
+                        """, true));
+
+        assertThat(error).as("the pack must not load").isNotNull();
+        assertThat(String.join(" | ", error.problems())).contains("$.rules[1].when.regexes[0]")
+                .contains("alias *personal-data").contains("line 11");
+    }
+
+    @Test
     void malformedYamlAndMissingFilesAreClearErrors() {
         assertThatThrownBy(() -> PolicyPackFiles.parse("name: [unclosed", true))
                 .isInstanceOf(PolicyPackException.class).hasMessageContaining("not valid YAML");

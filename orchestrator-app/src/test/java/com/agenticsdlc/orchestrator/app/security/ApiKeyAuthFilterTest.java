@@ -102,6 +102,39 @@ class ApiKeyAuthFilterTest {
     }
 
     @Test
+    void withPrivateDocumentsEverySpellingOfTheDocumentPathsNeedsTheKey() throws Exception {
+        ApiKeyAuthFilter privateDocs = new ApiKeyAuthFilter("s3cret-key", MAPPER, true);
+        for (String uri : new String[] {"/v3/api-docs", "/v3/api-docs.yaml", "/v3/api-docs/swagger-config",
+                "/V3/API-DOCS", "/v3;x=1/api-docs", "//v3//api-docs", "/swagger-ui.html", "/swagger-ui/index.html",
+                "/static/../swagger-ui/index.html", "/%73wagger-ui/index.html", "/api/v1/runs"}) {
+            MockFilterChain chain = new MockFilterChain();
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            privateDocs.doFilter(request(uri, null), response, chain);
+
+            assertThat(chain.getRequest()).as(uri).isNull();
+            assertThat(response.getStatus()).as(uri).isEqualTo(401);
+            assertThat(response.getContentAsString()).as(uri).contains("API documentation");
+        }
+        MockFilterChain withKey = new MockFilterChain();
+        privateDocs.doFilter(request("/v3/api-docs", "s3cret-key"), new MockHttpServletResponse(), withKey);
+        assertThat(withKey.getRequest()).isNotNull();
+    }
+
+    @Test
+    void withPrivateDocumentsTheConsoleHealthAndLookalikesStayPublic() throws Exception {
+        ApiKeyAuthFilter privateDocs = new ApiKeyAuthFilter("s3cret-key", MAPPER, true);
+        for (String uri : new String[] {"/", "/index.html", "/js/api.js", "/actuator/health", "/v3/api-docsx",
+                "/swagger-uix"}) {
+            MockFilterChain chain = new MockFilterChain();
+
+            privateDocs.doFilter(request(uri, null), new MockHttpServletResponse(), chain);
+
+            assertThat(chain.getRequest()).as(uri).isNotNull();
+        }
+    }
+
+    @Test
     void normalizationStripsParametersDuplicateSlashesAndDotSegments() {
         assertThat(ApiKeyAuthFilter.normalize("/api;x=1/v1;y=2/runs")).isEqualTo("/api/v1/runs");
         assertThat(ApiKeyAuthFilter.normalize("//api///v1//runs")).isEqualTo("/api/v1/runs");

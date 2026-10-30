@@ -30,8 +30,8 @@ import com.agenticsdlc.orchestrator.core.port.RunLease;
 
 /**
  * {@link JdbcRunLeaseProvider} on H2 with the Flyway schema: acquisition, contention (also concurrent), expiry and
- * takeover, renewal by token (also after expiry), release by token and the holder query, all judged with the
- * provider's clock.
+ * takeover, renewal by token (also after expiry), release by token, reclaiming by the owner that lost its token and
+ * the holder query, all judged with the provider's clock.
  */
 @DataJpaTest
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
@@ -111,6 +111,56 @@ class JdbcRunLeaseProviderTest {
         assertThat(leases.holderOf("run-1")).contains("node-a");
         assertThat(leases.current("run-1").orElseThrow().expiresAt()).isEqualTo(clock.instant().plus(TTL));
         assertThat(leases.renew(new RunLease("run-9", "node-a", lease.token(), lease.expiresAt()), TTL)).isFalse();
+    }
+
+    @Test
+    void theOwnerReclaimsItsLiveLeaseUnderANewTokenAndTheOldTokenStopsHoldingTheRun() {
+        RunLease lost = leases.tryAcquire("run-1", "node-a", TTL).orElseThrow();
+        clock.advance(Duration.ofSeconds(10));
+
+        RunLease reclaimed = leases.reclaim("run-1", "node-a", TTL).orElseThrow();
+
+        assertThat(reclaimed.runId()).isEqualTo("run-1");
+        assertThat(reclaimed.ownerId()).isEqualTo("node-a");
+        assertThat(reclaimed.token()).isNotEqualTo(lost.token()).isNotBlank().hasSizeLessThanOrEqualTo(64);
+        assertThat(reclaimed.expiresAt()).isEqualTo(clock.instant().plus(TTL));
+        assertThat(leases.current("run-1")).contains(reclaimed);
+        assertThat(leases.renew(lost, TTL)).as("the lost token no longer holds the run").isFalse();
+        leases.release(lost);
+        assertThat(leases.holderOf("run-1")).as("releasing the lost token does nothing").contains("node-a");
+        assertThat(leases.renew(reclaimed, TTL)).isTrue();
+    }
+
+    @Test
+    void anotherOwnerCannotReclaimALiveLease() {
+        RunLease held = leases.tryAcquire("run-1", "node-a", TTL).orElseThrow();
+        clock.advance(TTL.minusMillis(1));
+
+        assertThat(leases.reclaim("run-1", "node-b", TTL)).isEmpty();
+
+        assertThat(leases.current("run-1")).contains(held);
+        assertThat(leases.renew(held, TTL)).as("the holder keeps its lease").isTrue();
+    }
+
+    @Test
+    void anExpiredLeaseIsReclaimableByAnyOwner() {
+        RunLease stale = leases.tryAcquire("run-1", "node-a", TTL).orElseThrow();
+        clock.advance(TTL);
+
+        RunLease taken = leases.reclaim("run-1", "node-b", TTL).orElseThrow();
+
+        assertThat(taken.ownerId()).isEqualTo("node-b");
+        assertThat(leases.holderOf("run-1")).contains("node-b");
+        assertThat(leases.renew(stale, TTL)).isFalse();
+    }
+
+    @Test
+    void aRunWithoutALeaseRowIsNotReclaimedButAcquired() {
+        assertThat(leases.reclaim("run-1", "node-a", TTL)).as("no row is inserted").isEmpty();
+        assertThat(leases.current("run-1")).isEmpty();
+        assertThat(leases.tryAcquire("run-1", "node-a", TTL)).isPresent();
+        assertThatThrownBy(() -> leases.reclaim("run-1", "node-a", Duration.ZERO))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

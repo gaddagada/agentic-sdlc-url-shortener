@@ -19,10 +19,10 @@ import org.testcontainers.utility.DockerImageName;
 
 /**
  * The {@link PersistenceScenarioContract} on PostgreSQL ({@code postgres:17-alpine} via Testcontainers): the Flyway
- * migrations V1 and V2 run on PostgreSQL (the {@code postgres} profile, with the container's connection details),
+ * migrations V1 to V3 run on PostgreSQL (the {@code postgres} profile, with the container's connection details),
  * Hibernate validates the schema, the deterministic greenfield run completes, its audit chain verifies after the
- * round trip through PostgreSQL, the run row carries the listing columns, the JDBC run lease was created and
- * released, and the release change record signature verifies.
+ * round trip through PostgreSQL, the run row carries the listing and progress columns, the paged runs list query
+ * returns it, the JDBC run lease was created and released, and the release change record signature verifies.
  *
  * <p>Run by failsafe in {@code verify}; skipped (not failed) where Docker is unavailable.</p>
  */

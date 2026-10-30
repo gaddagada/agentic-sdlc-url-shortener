@@ -116,8 +116,10 @@ public class RunController {
                     + "not saved since the column was added. Filters are exact matches combined with AND: status "
                     + "(RUNNING, WAITING_HUMAN, SAFE_STOPPED, COMPLETED, ABORTED; repeatable or comma separated), "
                     + "scenario, startedBy. sort is <field>[,asc|desc] with field one of createdAt, updatedAt, "
-                    + "endedAt, status, scenario, startedBy (ties broken by id); any other field is a 400. size is "
-                    + "1..200. Breaking change: this operation returned a bare array before the paged envelope.")
+                    + "endedAt, status, scenario, startedBy (ties broken by id; runs without a value, such as the "
+                    + "endedAt of a run that has not ended, come last in either direction); any other field is a "
+                    + "400. size is 1..200. Breaking change: this operation returned a bare array before the paged "
+                    + "envelope.")
     @ProblemResponses(400)
     public RunPageView list(@RequestParam(defaultValue = "0") @Min(0) int page,
                             @RequestParam(defaultValue = "" + RunListQuery.DEFAULT_SIZE) @Min(1)

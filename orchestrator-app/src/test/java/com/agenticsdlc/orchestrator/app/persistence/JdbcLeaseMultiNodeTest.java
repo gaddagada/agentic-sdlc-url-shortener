@@ -51,13 +51,16 @@ import com.agenticsdlc.orchestrator.core.model.RunOptions;
 import com.agenticsdlc.orchestrator.core.model.RunStatus;
 import com.agenticsdlc.orchestrator.core.model.StageStatus;
 import com.agenticsdlc.orchestrator.core.policy.PolicyEngine;
+import com.agenticsdlc.orchestrator.core.port.RunLease;
 
 /**
  * Two engines ("nodes" {@code node-a} and {@code node-b}) share one H2 database through the JPA run store, the JPA
  * audit sink and the {@link JdbcRunLeaseProvider} (the core's {@code OrchestrationEngineLeaseTest}, through the
  * database): a run is executed by the node holding its lease, the other node's commands are refused with the holder
  * named while it runs, either node continues a run that waits for a human, and a run of a node that closed or died
- * is recovered by the other node once its lease is released or expired. The audit chain stays intact throughout.
+ * is recovered by the other node once its lease is released or expired. A node that died without releasing its
+ * leases and restarts with the same fixed node id reclaims its own leases at once (commands and recovery do not wait
+ * for the old lease to expire). The audit chain stays intact throughout.
  */
 @DataJpaTest
 @Import({JpaRunStore.class, JpaAuditSink.class, PersistenceFixtures.class})
@@ -229,6 +232,44 @@ class JdbcLeaseMultiNodeTest {
         assertThat(recovered.haltReason()).isEqualTo(HaltReason.INTERRUPTED_BY_RESTART);
         assertThat(recovered.stage(IMPLEMENT).status()).isIn(StageStatus.PENDING, StageStatus.STALE);
         assertThat(leases.holderOf(id)).as("recovery released the lease it took").isEmpty();
+    }
+
+    @Test
+    void aNodeRestartedWithItsFixedNodeIdTakesItsRunBackWithoutWaitingForTheOldLeaseToExpire() {
+        a = node("node-fixed", slowImplementation);
+        String id = a.start(REQUIREMENT, "restart", RunOptions.defaults().withAutonomy(AutonomyLevel.FULL_AUTO)).id();
+        awaitRun(a, id, r -> r.stage(IMPLEMENT).status() == StageStatus.RUNNING);
+        RunLease lost = leases.current(id).orElseThrow();
+        // the node dies without releasing its lease (the engine is dropped, its attempt stays blocked) and a new
+        // engine starts with the same fixed node id on the same database; the clock does not move: the lease is valid
+        b = node("node-fixed", null);
+        assertThat(leases.holderOf(id)).contains("node-fixed");
+
+        Run stopped = b.stop(id, ALICE, "taken back after the restart");
+
+        assertThat(stopped.status()).isEqualTo(RunStatus.SAFE_STOPPED);
+        assertThat(stopped.haltReason()).isEqualTo(HaltReason.OPERATOR_STOP);
+        assertThat(leases.renew(lost, TTL)).as("the dead engine's token lost the run").isFalse();
+        b.resume(id, ALICE);
+        Run waiting = awaitRun(b, id, r -> r.stage(RELEASE).status() == StageStatus.AWAITING_APPROVAL);
+        assertValidChain(audit.forRun(id, 0), waiting);
+        assertThat(nodesOf(audit.forRun(id, 0), AuditEventType.STAGE_STARTED, IMPLEMENT))
+                .containsExactly("node-fixed", "node-fixed");
+    }
+
+    @Test
+    void recoveryOnARestartWithTheFixedNodeIdInterruptsItsRunAtOnce() {
+        a = node("node-fixed", slowImplementation);
+        String id = a.start(REQUIREMENT, "restart", RunOptions.defaults().withAutonomy(AutonomyLevel.FULL_AUTO)).id();
+        awaitRun(a, id, r -> r.stage(IMPLEMENT).status() == StageStatus.RUNNING);
+        b = node("node-fixed", null);
+
+        b.recoverInterrupted(); // what StartupRecovery does on the restarted node
+
+        Run recovered = b.get(id);
+        assertThat(recovered.status()).isEqualTo(RunStatus.SAFE_STOPPED);
+        assertThat(recovered.haltReason()).isEqualTo(HaltReason.INTERRUPTED_BY_RESTART);
+        assertThat(leases.holderOf(id)).as("recovery released the lease it reclaimed").isEmpty();
     }
 
     private OrchestrationEngine node(String nodeId, @Nullable CountDownLatch implementationGate) {

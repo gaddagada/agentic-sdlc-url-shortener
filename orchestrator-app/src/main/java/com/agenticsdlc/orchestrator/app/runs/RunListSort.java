@@ -9,7 +9,8 @@ import org.jspecify.annotations.Nullable;
 
 /**
  * The sort order of the runs list: one whitelisted field and a direction ({@code updatedAt,desc} by default). Ties
- * are broken by the run id, so pages are stable.
+ * are broken by the run id, so pages are stable; rows without a value in the field ({@code endedAt} of a run that has
+ * not ended, an unknown {@code startedBy}) come last in either direction, on every database.
  *
  * @param field the field
  * @param descending whether the order is descending

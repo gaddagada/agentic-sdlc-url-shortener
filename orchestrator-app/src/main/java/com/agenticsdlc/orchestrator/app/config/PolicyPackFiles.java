@@ -5,6 +5,9 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
 
@@ -15,11 +18,14 @@ import com.agenticsdlc.orchestrator.core.policy.pack.PolicyPackException;
 import com.agenticsdlc.orchestrator.core.policy.pack.PolicyPackLoader;
 
 import tools.jackson.core.JacksonException;
+import tools.jackson.core.JsonParser;
 import tools.jackson.core.StreamReadFeature;
+import tools.jackson.core.TokenStreamContext;
 import tools.jackson.databind.DeserializationFeature;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.dataformat.yaml.YAMLMapper;
+import tools.jackson.dataformat.yaml.YAMLParser;
 
 /**
  * Reads the policy pack named by {@code sdlc.policy.pack}: a JSON file, or a YAML file (name ending in {@code .yaml}
@@ -28,7 +34,10 @@ import tools.jackson.dataformat.yaml.YAMLMapper;
  * duplicate ids, protected built-in rules). Duplicate keys are rejected in both forms.
  *
  * <p>In YAML, quote values that must stay strings but look like numbers or booleans (for example
- * {@code version: "1.0"}); the loader reports an unquoted {@code 1.0} as a problem.</p>
+ * {@code version: "1.0"}); the loader reports an unquoted {@code 1.0} as a problem. YAML aliases ({@code *name},
+ * including merge keys {@code <<: *name}) are rejected with their path and line: Jackson's YAML reader returns an
+ * alias as the text of the anchor's name, not as the anchored value, so a pack using them would load with different
+ * rules than written.</p>
  */
 public final class PolicyPackFiles {
 
@@ -70,6 +79,10 @@ public final class PolicyPackFiles {
         }
         JsonNode tree;
         try {
+            List<String> aliases = aliases(text);
+            if (!aliases.isEmpty()) {
+                throw new PolicyPackException(aliases);
+            }
             tree = YAML.readTree(text);
         } catch (JacksonException e) {
             throw new PolicyPackException(List.of("$: not valid YAML: " + e.getOriginalMessage()));
@@ -78,6 +91,38 @@ public final class PolicyPackFiles {
             throw new PolicyPackException(List.of("$: the policy pack file is empty"));
         }
         return PolicyPackLoader.fromJson(JSON.writeValueAsString(tree));
+    }
+
+    /**
+     * Returns a problem for every YAML alias of a document (Jackson would read each one as the anchor's name).
+     *
+     * @param text the YAML document
+     * @return one problem per alias, with its path and line, empty when the document has none
+     * @throws JacksonException when the document is not valid YAML
+     */
+    private static List<String> aliases(String text) {
+        List<String> problems = new ArrayList<>();
+        try (JsonParser parser = YAML.createParser(text)) {
+            while (parser.nextToken() != null) {
+                if (parser instanceof YAMLParser yaml && yaml.isCurrentAlias()) {
+                    String anchor = parser.getString();
+                    problems.add(path(parser.streamReadContext()) + ": YAML alias *" + anchor + " (line "
+                            + parser.currentTokenLocation().getLineNr() + ") is not supported: it would be read as "
+                            + "the text '" + anchor + "', not as the anchored value; repeat the value instead");
+                }
+            }
+        }
+        return problems;
+    }
+
+    /** Renders a parser context as a JSON path in the loader's notation, for example {@code $.rules[1].when}. */
+    private static String path(TokenStreamContext context) {
+        Deque<String> segments = new ArrayDeque<>();
+        for (TokenStreamContext current = context; current != null && !current.inRoot();
+             current = current.getParent()) {
+            segments.push(current.inArray() ? "[" + current.getCurrentIndex() + "]" : "." + current.currentName());
+        }
+        return "$" + String.join("", segments);
     }
 
     /**

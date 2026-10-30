@@ -304,7 +304,7 @@ public record OrchestratorProperties(
      * JWT resource-server settings of {@code oidc} mode. {@code issuerUri} (signing keys discovered from the
      * issuer's OpenID configuration on first use, {@code iss} validated) or {@code jwkSetUri} (keys fetched from
      * this URL) is required; when both are set the keys come from {@code jwkSetUri} and {@code iss} is still
-     * validated against {@code issuerUri}. Tokens must be RS256-signed.
+     * validated against {@code issuerUri}. Tokens must be RS256-signed and carry an {@code exp} claim.
      *
      * @param issuerUri OIDC issuer, for example {@code https://idp.example.com/realms/sdlc}
      * @param jwkSetUri JWK set URL of the issuer
@@ -313,7 +313,7 @@ public record OrchestratorProperties(
      *                   claims) or a dotted path into nested objects such as {@code realm_access.roles}; its value
      *                   is a list of strings or one space or comma separated string
      * @param identityClaim top-level claim used as the operator id ({@code sub}, often {@code preferred_username});
-     *                      tokens without it are rejected
+     *                      tokens without it, or with a value that is not a string, are rejected
      * @param roleMapping claim values granting each control-plane role
      */
     public record Oidc(

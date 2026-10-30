@@ -1,12 +1,15 @@
 package com.agenticsdlc.orchestrator.app.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -16,10 +19,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.TaskScheduler;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import com.agenticsdlc.orchestrator.app.events.RunCommitted;
 import com.agenticsdlc.orchestrator.app.events.RunEventBus;
@@ -38,7 +44,9 @@ import com.agenticsdlc.orchestrator.core.model.RunOptions;
 /**
  * {@link RunStreamHub} with a write executor that runs its tasks only when the test says so, the way a slow client
  * makes writes lag: a backlog longer than the live event limit is still delivered completely, while a stream whose
- * live events pile up beyond the limit is closed (its client reconnects with Last-Event-ID) and frees its slot.
+ * live events pile up beyond the limit is closed (its client reconnects with Last-Event-ID) and frees its slot. A
+ * stream whose write is blocked (a client that stopped reading) is closed without the publishing thread ever waiting
+ * for that write.
  */
 class RunStreamHubTest {
 
@@ -86,9 +94,66 @@ class RunStreamHubTest {
         assertThat(hub.openStreams()).isZero();
     }
 
+    @Test
+    void closingAStreamWhoseWriteIsBlockedNeverBlocksThePublisher() throws Exception {
+        BlockingEmitter emitter = new BlockingEmitter();
+        RunStreamHub blocking = new RunStreamHub(engine, auditSink, new RunViewMapper(GRAPH, CLOCK), GRAPH,
+                JsonCodec.standard(), bus, mock(TaskScheduler.class), new BoundedSendExecutor(5),
+                new RunStreamHub.Settings(5, Duration.ofSeconds(15), Duration.ofMinutes(5)), CLOCK, timeout -> emitter);
+        Run run = Run.create("busy", GRAPH, "custom", "Build a URL shortener.", RunOptions.defaults(), NOW);
+        try {
+            blocking.openList(); // its first event starts a write that never returns: the client stopped reading
+            assertThat(emitter.writing.await(10, TimeUnit.SECONDS)).isTrue();
+
+            // the bus delivers on this thread (as its dispatcher thread would): the overflow closes the stream
+            assertTimeoutPreemptively(Duration.ofSeconds(10), () -> {
+                for (int seq = 1; seq <= RunStreamHub.MAX_QUEUED_EVENTS + 1; seq++) {
+                    bus.committed(new RunCommitted(item(run), run.toSnapshot(), List.of(event(seq))));
+                }
+            }, "the publisher waited for the blocked write");
+            assertThat(emitter.completed).as("completed by the writer once its write returns").isFalse();
+        } finally {
+            emitter.release.countDown();
+        }
+
+        await().atMost(Duration.ofSeconds(10)).until(() -> emitter.completed && blocking.openStreams() == 0);
+        blocking.destroy();
+    }
+
     private void drainWrites() {
         while (!pendingWrites.isEmpty()) {
             pendingWrites.poll().run();
+        }
+    }
+
+    /**
+     * An emitter whose writes block until released, holding the emitter's write lock like Spring's own send does
+     * while it writes to a client that does not read (so {@link SseEmitter#complete()} waits for it).
+     */
+    private static final class BlockingEmitter extends SseEmitter {
+
+        final CountDownLatch writing = new CountDownLatch(1);
+        final CountDownLatch release = new CountDownLatch(1);
+        volatile boolean completed;
+
+        @Override
+        public void send(SseEventBuilder builder) throws IOException {
+            writeLock.lock();
+            try {
+                writing.countDown();
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("interrupted", e);
+            } finally {
+                writeLock.unlock();
+            }
+        }
+
+        @Override
+        public void complete() {
+            super.complete();
+            completed = true;
         }
     }
 

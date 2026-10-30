@@ -22,8 +22,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $headers = @{ "X-Operator-Id" = $Operator }
-# When the control plane runs with sdlc.security.api-key set, define SDLC_API_KEY to authenticate.
-if ($env:SDLC_API_KEY) { $headers["X-Api-Key"] = $env:SDLC_API_KEY }
+# When the control plane runs in api-key mode, define SDLC_API_KEY (or SDLC_SECURITY_API_KEY, the variable
+# docker-compose.yml passes to the control plane) to authenticate.
+$apiKey = if ($env:SDLC_API_KEY) { $env:SDLC_API_KEY } else { $env:SDLC_SECURITY_API_KEY }
+if ($apiKey) { $headers["X-Api-Key"] = $apiKey }
 
 function Invoke-Api {
   param([string]$Method, [string]$Path, $Body = $null)

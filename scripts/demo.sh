@@ -14,6 +14,8 @@
 #   OPERATOR          operator identity sent as X-Operator-Id (default demo-operator)
 #   PROVIDER          deterministic | anthropic | ollama (default: server default)
 #   TIMEOUT_SECONDS   how long to drive the run before giving up (default 300)
+#   SDLC_API_KEY      X-Api-Key of a control plane in api-key mode (default: SDLC_SECURITY_API_KEY, the variable
+#                     docker-compose.yml passes to the control plane, so one exported key serves both)
 
 set -euo pipefail
 
@@ -39,8 +41,8 @@ fi
 # tr strips the carriage returns a Windows Python writes to stdout, which would otherwise break URLs built from ids.
 json() { "$PY" -c "import sys, json; d = json.load(sys.stdin); $1" | tr -d '\r'; }
 
-# When the control plane runs with sdlc.security.api-key set, export SDLC_API_KEY to authenticate.
-API_KEY="${SDLC_API_KEY:-}"
+# When the control plane runs in api-key mode, export SDLC_API_KEY (or SDLC_SECURITY_API_KEY) to authenticate.
+API_KEY="${SDLC_API_KEY:-${SDLC_SECURITY_API_KEY:-}}"
 
 api() {
   local method="$1" path="$2" body="${3:-}"

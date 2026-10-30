@@ -32,8 +32,9 @@ import tools.jackson.databind.json.JsonMapper;
  *   <li>{@code open} (default without a key): no authentication; Spring Security's anonymous principal holds every
  *       role, so the authorization rules never deny. The operator id comes from {@code X-Operator-Id}.</li>
  *   <li>{@code api-key} (default when {@code sdlc.security.api-key} is set): the {@link ApiKeyAuthFilter} servlet
- *       filter, unchanged, guards the normalized {@code /api/**} paths in front of Spring Security; a request that
- *       passes it holds every role. The operator id comes from {@code X-Operator-Id}.</li>
+ *       filter guards the normalized {@code /api/**} paths (and the API documents unless they are public) in front
+ *       of Spring Security; a request that passes it holds every role. The operator id comes from
+ *       {@code X-Operator-Id}.</li>
  *   <li>{@code oidc}: an OAuth 2.0 resource server inside the Spring Security filter chain verifies bearer JWTs
  *       ({@link OidcTokens}); roles come from the roles claim ({@link OidcRoleMapper}) and the operator id from the
  *       identity claim ({@link SecurityContextOperatorIdentity}).</li>
@@ -77,7 +78,8 @@ public class SecurityConfig {
 
     /**
      * Registers the API-key filter for every path in {@code api-key} mode; it filters only requests whose
-     * normalized path is under {@code /api}.
+     * normalized path is under {@code /api}, and the OpenAPI document and Swagger UI when
+     * {@code sdlc.security.public-docs=false}.
      *
      * @param properties configuration
      * @param mapper JSON mapper
@@ -89,7 +91,7 @@ public class SecurityConfig {
                                                                            JsonMapper mapper) {
         SecurityPostureValidator.requireUsable(properties.security());
         FilterRegistrationBean<ApiKeyAuthFilter> registration = new FilterRegistrationBean<>(
-                new ApiKeyAuthFilter(properties.security().apiKey(), mapper));
+                new ApiKeyAuthFilter(properties.security().apiKey(), mapper, !properties.security().publicDocs()));
         registration.setName("apiKeyAuthFilter");
         registration.addUrlPatterns("/*");
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
