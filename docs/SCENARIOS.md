@@ -465,7 +465,43 @@ Opus-class model on this pipeline: the default budget is now 600 000 and every p
 stage's direct predecessors (other upstream artifacts are summarized), with `budget.maxLlmTokens` on `POST /runs`
 still available as an override. Second, a complete change set did not fit in 16 000 output tokens: the Anthropic
 adapter now streams up to 32 000 tokens, stage timeouts are tripled for LLM attempts, and the implementation prompt
-asks for diffs of changed hunks rather than whole files. This run
-executed on a build that predates the enum-typed artifact fields: the current code sends `enum` constraints in the
-structured-output schema and parses enum values case-insensitively, which targets the first two failures above
-(category and component type). It has not been re-run on that build at the time of writing.
+asks for diffs of changed hunks rather than whole files.
+
+### Follow-up runs on the hardened build
+
+The same requirement was run twice more with the Anthropic provider after the hardening passes (enum-typed
+artifact fields, trimmed prompt context, 600 000-token budget, streamed outputs). Both runs are persisted in the
+demo database (`fc88e41f` and `d93ca72d`) and can be inspected in the console.
+
+<p align="center"><img src="images/screenshots/console-llm-run.png" width="100%" alt="Claude-backed brownfield run that safe-stopped after two verification feedback loops: pipeline with anthropic agents, verification failed, documentation and security review stale, metrics tab with LLM token usage."></p>
+
+| | Run 2 (`fc88e41f`) | Run 3 (`d93ca72d`) |
+|---|---|---|
+| Analysis and design stages (`intake`, `decompose`, `impact`, `design`, `test-design`) | all first attempt, 28 to 54 s each | all first attempt, 20 to 39 s each |
+| Design gate | GOV-001, risk HIGH (shared validation, alias and rate-limit paths) | GOV-001, risk HIGH |
+| First change set | 19 539 output tokens, full files | 13 155 output tokens, 17 files (11 new, 6 diffs) |
+| Verification (Claude) | failed, 8 to 12 findings per loop | failed, 8 then 17 findings |
+| Rework | truncated at 32 000 output tokens twice, deterministic fallback produced skeleton plans, which the LLM verifier rejected | completed at 40 157 and 51 535 streamed output tokens, no truncation |
+| End state | `SAFE_STOPPED` / `AGENT_FAILURE_EXHAUSTED` after 2 feedback loops; 23 agent calls, 16 LLM calls, 279 445 tokens | `SAFE_STOPPED` / `AGENT_FAILURE_EXHAUSTED` after 2 feedback loops; 17 agent calls, 15 LLM calls, 525 138 tokens |
+
+**What the verifier objected to (run 3, final report).** Traceability was complete (13 of 13 requirements) and
+no skeleton content remained, but eight checks failed: the `DIFF` hunks for `TokenBucketRateLimiter`,
+`LinkService` and `LinkController` were written without the real source in view (wrong hunk headers, assumed field
+and constructor names), the OpenAPI snapshot used by `OpenApiContractTest` was not updated, three planned test
+cases (unique-violation recovery, idempotency, OpenAPI contract) had no test, the rate-limit test was
+non-deterministic, and a performance test sat in the default build. The implementation agent itself listed the
+same uncertainty in its `risks` ("hunks are written without visible source ... must be confirmed and rebased").
+
+**What this demonstrates and what it implies.**
+
+- The non-linear execution model worked end to end with a real model: verification routed findings back to
+  implementation, the loop was bounded (2), and the engine safe-stopped instead of releasing unverified code.
+  `document` and `security-scan` were correctly invalidated (`STALE`) each time the change set changed.
+- Two engineering changes followed from run 2: implementation outputs are streamed with a 64 000-token limit, and a
+  skeleton plan (the deterministic fallback) is verified structurally instead of by an LLM, because an LLM verifier
+  rejects a plan on every loop and the run can never converge.
+- The remaining gap is a context gap, not a governance gap: the implementation agent only sees the codebase
+  index (types, paths, endpoints), not the source of the files it modifies, so it cannot author correct diffs for
+  `MODIFY` changes. Giving it the source of the directly impacted files (bounded by size) is the next step; until
+  then, LLM runs on brownfield changes are expected to end at the verification gate for a human decision, while
+  the deterministic path remains the reproducible baseline.

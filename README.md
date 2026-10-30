@@ -232,10 +232,12 @@ same roles, produce the same typed artifacts and pass the same validation and ga
 - **Fallback:** a provider error is classified (rate limits, 5xx and timeouts retryable; refusals and other 4xx
   not), retried with backoff, and after the stage's attempts the deterministic agent takes over that stage only.
   Provenance then shows `fallback:deterministic`; usage, model and prompt hash are recorded for every LLM attempt.
-- **Observed:** a live Claude-backed brownfield run produced a specification with 9 functional and 6 non-functional
-  requirements and 4 open product questions, a 16-task plan, a code-grounded impact analysis and a design with four
-  evaluated alternatives, and was then safe-stopped by the token budget (220 615 of the then-default 200 000 tokens; the default is now 600 000 and prompts summarize non-adjacent upstream artifacts). Ollama on a CPU took about 100 s for one intake
-  call and can hit stage timeouts, after which the deterministic fallback takes over. See
+- **Observed:** three live Claude-backed brownfield runs. Every analysis and design stage (requirements, task plan,
+  code-grounded impact analysis, design with evaluated alternatives, test plan) succeeded on the first attempt in
+  20 to 54 s each. The first run hit the then-default 200 000-token budget; the next two produced complete change
+  sets (up to 51 000 streamed output tokens), had them rejected by the Claude verifier (the diffs were written
+  without the source of the modified files in view), and safe-stopped after the bounded two feedback loops for a
+  human decision instead of releasing unverified code. Ollama on a CPU took about 100 s for one intake call. See
   [docs/SCENARIOS.md](docs/SCENARIOS.md#the-same-scenario-with-an-llm-provider).
 
 ---

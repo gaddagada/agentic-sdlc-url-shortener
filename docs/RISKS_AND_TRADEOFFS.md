@@ -184,7 +184,11 @@ What "controlled autonomy" guarantees structurally with the default workflow and
 ## 6. Known limitations
 
 1. Deterministic implementation output is skeleton code, so even a clean deterministic run ends
-   `GO_WITH_CONDITIONS` with "Code complete" waived. It demonstrates the pipeline, not a shippable feature.
+   `GO_WITH_CONDITIONS` with the checklist item "Code complete (skeleton plan)" marked not applicable and an
+   explicit condition to complete and build before merge. It demonstrates the pipeline, not a shippable feature.
+   LLM-backed brownfield runs produced complete change sets but did not pass the Claude verifier within the two
+   default feedback loops (diffs were written without the modified files' source in view) and safe-stopped for a
+   human decision; see `docs/SCENARIOS.md`.
 2. In LLM mode compilation is not proven unless the sandbox and its build are enabled; both are off by default,
    and the sandbox is not an isolation boundary (R-13).
 3. Policy rules and ambiguity scoring are keyword heuristics with known false positives and negatives (R-04,

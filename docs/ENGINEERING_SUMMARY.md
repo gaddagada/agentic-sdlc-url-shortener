@@ -166,9 +166,10 @@ Stated plainly, with the production path in [RISKS_AND_TRADEOFFS.md](RISKS_AND_T
   identity on the control plane (API key optional).
 - A failed store commit leaves the in-memory run ahead of the store.
 - The console polls; Ollama on a CPU is slow and can hit stage timeouts, after which the fallback takes over.
-- The first full Claude-backed run exhausted the then-default 200 000-token budget and a complete change set
-  overflowed 16 000 output tokens; the defaults are now 600 000 tokens and 32 000 streamed output tokens, and
-  prompts summarize non-adjacent upstream artifacts. LLM runs remain more expensive and slower than deterministic ones.
+- LLM-backed brownfield runs did not converge to a verified change set within the default two feedback loops:
+  the Claude verifier rejected diffs that the implementation agent wrote without the modified files' source in
+  view, and the engine safe-stopped as designed. The deterministic path is the reproducible baseline; the
+  defaults are now 600 000 tokens and 64 000 streamed output tokens, and prompts summarize non-adjacent artifacts.
 
 ## 9. With more time
 
@@ -179,9 +180,11 @@ In order of value for a bank's delivery organization:
    the artifact under review; the console should show that hash and send the id of the approval the operator read.
 2. **Real verification:** run the sandbox build in an ephemeral container without credentials or egress, add static
    analysis and dependency scanning as stages, and make "Code complete" a checked item instead of a waiver.
-3. **LLM operations:** per-provider budgets and a cross-stage circuit breaker; split implementation into one change
-   set per task to fit output limits; prompt-injection hardening by delimiting untrusted text; pin verification and
-   security review to deterministic agents in regulated runs; an evaluation set that scores artifacts per role.
+3. **LLM operations:** give the implementation agent the source of the directly impacted files (bounded by size)
+   so `MODIFY` diffs are authored against real code; per-provider budgets and a cross-stage circuit breaker; split
+   implementation into one change set per task; prompt-injection hardening by delimiting untrusted text; pin
+   verification and security review to deterministic agents in regulated runs; an evaluation set that scores
+   artifacts per role.
 4. **Persistence and scale:** PostgreSQL for the control plane with snapshot and audit in one transaction, a
    hash-chained audit log, and a work queue or workflow engine for multi-node execution.
 5. **Operations:** OpenTelemetry traces across API, engine and provider calls; dashboards and alerts on the
