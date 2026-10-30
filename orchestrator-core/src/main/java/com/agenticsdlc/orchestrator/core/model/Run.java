@@ -44,7 +44,7 @@ public final class Run {
     private final String scenarioKey;
     private final String requirement;
     private final RunOptions options;
-    private final RunBudget budget;
+    private RunBudget budget;
     private final Instant createdAt;
 
     private String activeRequirement;
@@ -679,6 +679,28 @@ public final class Run {
      */
     public void addArtifact(Artifact artifact) {
         artifacts.add(artifact);
+    }
+
+    /**
+     * Removes an artifact from the history. Used when an exit gate denies an artifact (for example because it
+     * contains a credential) so that the denied content is never persisted or shown; the audit log keeps the
+     * reference and hash.
+     *
+     * @param artifactId artifact id
+     * @return whether an artifact was removed
+     */
+    public boolean removeArtifact(String artifactId) {
+        return artifacts.removeIf(a -> a.id().equals(artifactId));
+    }
+
+    /**
+     * Replaces the effective budget. Used when a human resumes a run that exhausted its budget: the explicit
+     * resume is the authorization to spend more.
+     *
+     * @param budget the new budget
+     */
+    public void setBudget(RunBudget budget) {
+        this.budget = Objects.requireNonNull(budget, "budget");
     }
 
     /**

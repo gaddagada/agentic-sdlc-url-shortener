@@ -195,7 +195,24 @@ public final class OrchestrationEngine implements AutoCloseable {
      * @throws InvalidCommandException for a blank requirement, an unknown provider or faults for unknown stages
      */
     public Run start(String requirement, String scenarioKey, RunOptions options) {
+        return start(requirement, scenarioKey, options, Actor.system());
+    }
+
+    /**
+     * Starts a run on behalf of an identified requester. Identical to {@link #start(String, String, RunOptions)}
+     * except that the RUN_CREATED audit event is attributed to {@code requestedBy} (normally the human operator
+     * identified by the control plane) instead of the system actor.
+     *
+     * @param requirement requirement text (not blank)
+     * @param scenarioKey scenario key (blank becomes {@code custom})
+     * @param options run options
+     * @param requestedBy the actor on whose behalf the run is created
+     * @return a snapshot copy of the run
+     * @throws InvalidCommandException for a blank requirement, an unknown provider or faults for unknown stages
+     */
+    public Run start(String requirement, String scenarioKey, RunOptions options, Actor requestedBy) {
         ensureOpen();
+        Objects.requireNonNull(requestedBy, "requestedBy");
         if (requirement == null || requirement.isBlank()) {
             throw new InvalidCommandException("requirement must not be blank");
         }
@@ -215,9 +232,10 @@ public final class OrchestrationEngine implements AutoCloseable {
                 options.autonomy(), providerLabel(options.providerId()), options.workspace());
         LOG.debug("run requirement runId={} requirement={}", run.id(), run.requirement());
         return mutate(run.id(), tx -> {
-            tx.audit(AuditEventType.RUN_CREATED, null, Actor.system(), "run created for scenario " + scenario,
+            tx.audit(AuditEventType.RUN_CREATED, null, requestedBy, "run created for scenario " + scenario,
                     RunMutation.data("scenario", scenario, "autonomy", options.autonomy(), "provider",
                             providerLabel(options.providerId()), "workspace", options.workspace(),
+                            "requestedBy", requestedBy.id(),
                             "requirementChars", run.requirement().length(), "faults",
                             options.faults().stream().map(f -> f.stageId() + ":" + f.kind() + "x" + f.failTimes())
                                     .toList()));
@@ -479,11 +497,18 @@ public final class OrchestrationEngine implements AutoCloseable {
                 }
             }
             HaltReason previous = run.haltReason();
+            boolean budgetExtended = false;
+            if (previous == HaltReason.BUDGET_EXCEEDED) {
+                // The explicit human resume is the authorization to spend one more default allowance.
+                run.setBudget(run.budget().extended());
+                budgetExtended = true;
+            }
             run.setHalt(null, null);
             run.setStatus(RunStatus.RUNNING);
             run.markStarted(tx.now);
             tx.audit(AuditEventType.RUN_RESUMED, null, actor, "run resumed by " + actor.id(),
-                    RunMutation.data("previousHaltReason", previous, "resetStages", reset));
+                    RunMutation.data("previousHaltReason", previous, "resetStages", reset, "budgetExtended",
+                            budgetExtended, "budget", run.budget()));
             for (StageExecution exec : run.stages()) {
                 StageExecution live = run.stage(exec.stageId());
                 if (live.status() == StageStatus.RETRY_SCHEDULED) {
@@ -913,9 +938,15 @@ public final class OrchestrationEngine implements AutoCloseable {
         auditGate(tx, def.id(), GatePhase.EXIT, gate);
         switch (gate.verdict()) {
             case DENY -> {
+                // A denied artifact (for example one that embeds a credential) must never be persisted or shown:
+                // drop it from the history and restore the previously accepted version; the audit log keeps the
+                // reference, hash and rule ids as evidence.
+                run.removeArtifact(artifact.id());
+                run.restoreAccepted(def.id(), previous == null ? null : previous.version());
                 tx.audit(AuditEventType.POLICY_DENIED, def.id(), Actor.system(), "artifact " + artifact.reference()
-                        + " denied: " + gate.reasonText(), RunMutation.data("phase", GatePhase.EXIT, "rules",
-                        gate.ruleIds()));
+                        + " denied and removed from history: " + gate.reasonText(),
+                        RunMutation.data("phase", GatePhase.EXIT, "rules", gate.ruleIds(), "artifactId",
+                                artifact.id(), "hash", artifact.hash(), "removed", true));
                 failStage(tx, exec, "exit gate denied: " + gate.reasonText(), HaltReason.POLICY_DENIED);
             }
             case REQUIRE_APPROVAL -> requestApproval(tx, exec, ApprovalKind.EXIT, gate, artifact.version(),

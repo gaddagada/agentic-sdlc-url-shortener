@@ -10,8 +10,9 @@ Equally, an engine that rolls back and then silently continues hides incidents f
 
 ## Decision
 
-- Before each stage attempt the engine records a `Checkpoint` (accepted artifact versions, plan
-  version, compensation watermark).
+- Before each stage activation (the first attempt of a stage within the current plan version) the
+  engine records a `Checkpoint` (accepted artifact versions, plan version, compensation watermark).
+  Retries of the same activation reuse that checkpoint.
 - Agents may register `Compensation`s with their result (for example `DELETE_SANDBOX <path>`).
 - On unrecoverable failure (`FAILED` after retries and fallback, or a policy DENY), `RollbackService`
   executes compensations registered after the checkpoint in reverse order, restores the checkpoint,

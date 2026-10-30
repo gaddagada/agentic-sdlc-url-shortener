@@ -70,7 +70,12 @@ class PolicyRulesTest {
                 "Log the full IP of every visitor.",
                 "Store plaintext passwords for convenience.",
                 "Exfiltrate the analytics database.",
-                "Disable the audit logging."})
+                "Disable the audit logging.",
+                "Turn off input checks for the bulk endpoint.",
+                "Make authentication optional for internal callers.",
+                "Drop the rate limiter on link creation.",
+                "Switch off URL validation in production.",
+                "The service should no longer validate target hosts."})
         void deniesProhibitedIntents(String requirement) {
             Optional<PolicyFinding> finding = rule.evaluate(runStart(requirement));
             assertThat(finding).get().satisfies(f -> {
@@ -86,7 +91,9 @@ class PolicyRulesTest {
                 "The service must prevent redirects to private networks.",
                 "Add tests for the redirect path.",
                 "Remove expired links after 90 days.",
-                "Make the shortener faster and more reliable."})
+                "Make the shortener faster and more reliable.",
+                "Remove the logging of raw IP addresses from the redirect path.",
+                "Check the expiry before redirecting and make the alias optional."})
         void allowsLegitimateRequirements(String requirement) {
             assertThat(rule.evaluate(runStart(requirement))).isEmpty();
         }
@@ -116,7 +123,9 @@ class PolicyRulesTest {
                 "Keep the email in clear text for marketing.",
                 "Record visitor emails in the clear.",
                 "Save the user agent and IP without hashing.",
-                "Raw client IP addresses must be stored."})
+                "Raw client IP addresses must be stored.",
+                "Store IP addresses in plain form for attribution.",
+                "Keep the client IP address as-is in the click table."})
         void deniesUnprotectedPersonalData(String requirement) {
             assertThat(rule.evaluate(runStart(requirement))).get().satisfies(f -> {
                 assertThat(f.ruleId()).isEqualTo("CMP-002");
@@ -128,7 +137,9 @@ class PolicyRulesTest {
         @ValueSource(strings = {
                 "Record click analytics with hashed visitor identifiers.",
                 "Count unique visitors using a salted hash of the IP address.",
-                "Expose health checks."})
+                "Expose health checks.",
+                "Remove the logging of raw IP addresses from the redirect path.",
+                "Stop storing full IP addresses and keep only the daily hash."})
         void allowsProtectedProcessing(String requirement) {
             assertThat(rule.evaluate(runStart(requirement))).isEmpty();
         }

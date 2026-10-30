@@ -437,7 +437,8 @@ class OrchestrationEngineTest {
         assertThat(stopped.stage(IMPLEMENT).status()).isEqualTo(StageStatus.FAILED);
         assertThat(stopped.stage(IMPLEMENT).lastError()).contains("SEC-002");
         assertThat(stopped.acceptedVersions()).doesNotContainKey(IMPLEMENT);
-        assertThat(stopped.artifacts().stream().filter(a -> a.stageId().equals(IMPLEMENT))).hasSize(1);
+        assertThat(stopped.artifacts().stream().filter(a -> a.stageId().equals(IMPLEMENT)))
+                .as("a denied artifact is removed from the history so the secret is never persisted").isEmpty();
         assertThat(stopped.haltDetail()).doesNotContain("AKIAABCDEFGHIJKLMNOP");
     }
 
@@ -598,8 +599,16 @@ class OrchestrationEngineTest {
         assertThat(harness.eventTypes(id)).contains(AuditEventType.BUDGET_EXCEEDED);
 
         Run resumed = engine.resume(id, ALICE);
-        assertThat(resumed.status()).as("the budget is still exhausted").isEqualTo(RunStatus.SAFE_STOPPED);
-        assertThat(resumed.haltReason()).isEqualTo(HaltReason.BUDGET_EXCEEDED);
+        assertThat(resumed.status()).as("an explicit human resume extends the exhausted budget")
+                .isIn(RunStatus.RUNNING, RunStatus.WAITING_HUMAN);
+        assertThat(resumed.haltReason()).isNull();
+        assertThat(resumed.budget().maxAgentCalls()).isEqualTo(3 + RunBudget.DEFAULT.maxAgentCalls());
+        assertThat(harness.events(id)).anySatisfy(e -> {
+            assertThat(e.type()).isEqualTo(AuditEventType.RUN_RESUMED);
+            assertThat(e.data()).containsEntry("budgetExtended", true);
+        });
+        Run atRelease = harness.awaitApproval(id, RELEASE);
+        assertThat(atRelease.counters().agentCalls()).isGreaterThan(3);
     }
 
     @Test

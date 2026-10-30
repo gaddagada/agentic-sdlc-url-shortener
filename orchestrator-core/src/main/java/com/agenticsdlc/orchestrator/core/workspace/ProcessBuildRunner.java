@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Deque;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -54,6 +55,19 @@ public final class ProcessBuildRunner implements BuildRunner {
         this.windows = windows;
     }
 
+    /** Environment variable names that must never reach a sandboxed build (provider keys, tokens, passwords). */
+    static final Pattern SENSITIVE_ENV = Pattern.compile("(?i)(key|token|secret|password|passwd|credential|auth)");
+
+    /**
+     * Removes credential-like variables from a child process environment. Generated code and build plugins run
+     * inside the sandbox; they must not be able to read the engine's API keys.
+     *
+     * @param environment the mutable environment of a {@link ProcessBuilder}
+     */
+    static void sanitizeEnvironment(Map<String, String> environment) {
+        environment.keySet().removeIf(name -> SENSITIVE_ENV.matcher(name).find());
+    }
+
     @Override
     public BuildResult run(Path workingDirectory, String command, Duration timeout) throws InterruptedException {
         Path dir = workingDirectory.toAbsolutePath().normalize();
@@ -61,7 +75,9 @@ public final class ProcessBuildRunner implements BuildRunner {
         long start = System.nanoTime();
         Process process;
         try {
-            process = new ProcessBuilder(commandLine).directory(dir.toFile()).redirectErrorStream(true).start();
+            ProcessBuilder builder = new ProcessBuilder(commandLine).directory(dir.toFile()).redirectErrorStream(true);
+            sanitizeEnvironment(builder.environment());
+            process = builder.start();
         } catch (IOException e) {
             return BuildResult.notExecuted(command, "could not start build: " + e.getMessage());
         }

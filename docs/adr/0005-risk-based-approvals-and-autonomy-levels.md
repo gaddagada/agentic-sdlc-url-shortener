@@ -12,7 +12,10 @@ need a knob to tighten or relax autonomy per run.
 
 - Each run has an `AutonomyLevel`: `FULL_AUTO` (only the release gate), `GUIDED` (default: design
   approval when the assessed risk is MEDIUM or higher, release approval always), `STRICT` (approval
-  before every stage).
+  before every stage after `intake`, whose own human gate is the clarification check).
+- In `GUIDED`, a risk level that a human has already accepted within the current plan version is not
+  re-approved at a later risk-based gate; a re-plan starts a new plan version and revokes that
+  acceptance.
 - Risk is assessed by the design stage (`RiskAssessment`) from concrete factors: schema changes,
   breaking API changes, security-relevant changes, PII handling.
 - Policy rules can raise additional approvals (protected paths, large change sets, PII without a

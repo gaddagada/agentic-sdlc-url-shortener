@@ -7,7 +7,13 @@ import java.util.regex.Pattern;
 
 /**
  * Secret detection patterns shared by the {@code SEC-002} policy rule and the verification agent: AWS access
- * key ids, Anthropic API keys, GitHub personal access tokens and password assignments.
+ * key ids, Anthropic API keys, GitHub tokens, literal password assignments, PEM private key blocks, Slack tokens
+ * and JSON web tokens.
+ *
+ * <p>The password pattern deliberately ignores configuration placeholders ({@code ${ENV}}, {@code {{template}}},
+ * {@code <redacted>}, {@code ***}, {@code change-me}) and bare identifiers such as {@code this.password = password;}:
+ * a literal password must contain at least one digit or symbol. This is a heuristic; it reduces, not eliminates,
+ * false positives and negatives.
  */
 public final class SecretPatterns {
 
@@ -15,11 +21,16 @@ public final class SecretPatterns {
     public static final List<Pattern> PATTERNS = List.of(
             Pattern.compile("AKIA[0-9A-Z]{16}"),
             Pattern.compile("sk-ant-[A-Za-z0-9_-]{10,}"),
-            Pattern.compile("ghp_[A-Za-z0-9]{20,}"),
-            Pattern.compile("(?i)password\\s*[:=]\\s*\\S+"));
+            Pattern.compile("gh[pousr]_[A-Za-z0-9]{20,}"),
+            Pattern.compile("(?i)(?<![a-z0-9])password\\s*[:=]\\s*[\"']?(?!\\$\\{|\\{\\{|<|\\*{3}|redacted\\b|change[-_ ]?me\\b)"
+                    + "(?=[A-Za-z0-9!@#%^&*_+=\\-]*[0-9!@#%^&*+=])[A-Za-z0-9!@#%^&*_+=\\-]{6,}"),
+            Pattern.compile("-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+            Pattern.compile("xox[abprs]-[A-Za-z0-9-]{10,}"),
+            Pattern.compile("eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}"));
 
     private static final List<String> LABELS = List.of(
-            "AWS access key id", "Anthropic API key", "GitHub token", "password assignment");
+            "AWS access key id", "Anthropic API key", "GitHub token", "password assignment", "private key block",
+            "Slack token", "JSON web token");
 
     private SecretPatterns() {
     }

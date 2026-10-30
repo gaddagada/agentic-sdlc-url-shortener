@@ -89,4 +89,16 @@ public record RunBudget(int maxFeedbackLoops, int maxReplans, int maxAgentCalls,
     public RunBudget withMaxActiveDuration(Duration value) {
         return new RunBudget(maxFeedbackLoops, maxReplans, maxAgentCalls, maxLlmTokens, value);
     }
+
+    /**
+     * Returns this budget extended by one default allowance of every limit. Used when a human explicitly resumes a
+     * run that safe-stopped with {@code BUDGET_EXCEEDED}: the resume is the authorization to spend more.
+     *
+     * @return the extended budget
+     */
+    public RunBudget extended() {
+        return new RunBudget(maxFeedbackLoops + DEFAULT.maxFeedbackLoops, maxReplans + DEFAULT.maxReplans,
+                maxAgentCalls + DEFAULT.maxAgentCalls, maxLlmTokens + DEFAULT.maxLlmTokens,
+                maxActiveDuration.plus(DEFAULT.maxActiveDuration));
+    }
 }

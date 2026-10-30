@@ -35,7 +35,16 @@ public final class PiiProhibitedRule implements PolicyRule {
                     + "|kept|logged|recorded|retained)"),
             Pattern.compile("\\be-?mails?(\\s+address(es)?)?\\s+in\\s+(the\\s+)?clear\\b"),
             Pattern.compile("\\b(clear|plain)[- ]?text\\s+e-?mails?\\b"),
-            Pattern.compile("\\bwithout\\s+(any\\s+)?(hashing|hash|masking|anonymi[sz]ation|pseudonymi[sz]ation)\\b"));
+            Pattern.compile("\\bwithout\\s+(any\\s+)?(hashing|hash|masking|anonymi[sz]ation|pseudonymi[sz]ation)\\b"),
+            Pattern.compile("\\b(store|stores|storing|persist|persists|persisting|save|saves|saving|keep|keeps"
+                    + "|keeping|log|logs|logging|record|records|recording|retain|retains|retaining)\\s+(the\\s+)?"
+                    + IP + "\\s+(as[- ]is|unencrypted|unhashed|unmasked|in\\s+(plain|clear)[- ]?(form|text)"
+                    + "|in\\s+the\\s+clear)\\b"));
+    /** Sentences that stop collecting personal data are privacy improvements, not violations. */
+    private static final Pattern PRIVACY_IMPROVEMENT = Pattern.compile(
+            "\\b(remove|removes|removing|stop|stops|stopping|disable|disables|disabling|delete|deletes|deleting"
+                    + "|eliminate|eliminates|eliminating|drop|drops|dropping)\\s+(the\\s+|all\\s+)?(logging|storage"
+                    + "|storing|recording|collection|collecting|retention|capture|capturing|persistence)\\b");
 
     /**
      * Creates the rule.
@@ -76,6 +85,9 @@ public final class PiiProhibitedRule implements PolicyRule {
     static Set<String> findProhibited(String text) {
         Set<String> matches = new LinkedHashSet<>();
         for (String sentence : RuleText.sentences(text)) {
+            if (PRIVACY_IMPROVEMENT.matcher(sentence).find()) {
+                continue;
+            }
             for (Pattern pattern : PATTERNS) {
                 Matcher m = pattern.matcher(sentence);
                 if (m.find()) {
