@@ -1,0 +1,29 @@
+# Build output
+target/
+*.class
+*.log
+
+# Local runtime state (H2 files, sandboxes)
+data/
+sandbox/
+*.mv.db
+*.trace.db
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.classpath
+.project
+.settings/
+.factorypath
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets - never commit credentials
+.env
+.env.*
+*.pem
