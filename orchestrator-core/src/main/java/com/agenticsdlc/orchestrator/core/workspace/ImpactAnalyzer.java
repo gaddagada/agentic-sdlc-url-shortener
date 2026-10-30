@@ -14,6 +14,7 @@ import java.util.TreeSet;
 
 import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis;
 import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis.ChangeNature;
+import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis.ComponentType;
 import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis.DataFlow;
 import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis.ImpactedComponent;
 import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis.ImpactedEndpoint;
@@ -367,7 +368,7 @@ public final class ImpactAnalyzer {
                 .map(e -> new ImpactedEndpoint(e.method(), e.path(), e.controller())).toList();
         List<String> entities = new ArrayList<>();
         for (ImpactedComponent c : sorted) {
-            if ("ENTITY".equals(c.type())) {
+            if (c.type() == ComponentType.ENTITY) {
                 index.find(c.name()).ifPresent(t -> entities.add(t.simpleName()
                         + (t.table() == null ? "" : " (" + t.table() + ")")));
             }
@@ -589,13 +590,13 @@ public final class ImpactAnalyzer {
         List<String> tests = new ArrayList<>();
         for (NounGroup group : groups) {
             String reason = "proposed for the " + group.label() + " requirements";
-            components.add(proposed(group.controller(), "CONTROLLER", "api", reason));
+            components.add(proposed(group.controller(), ComponentType.CONTROLLER, "api", reason));
             if (group.redirectController() != null && tokens.stream().anyMatch(t -> t.startsWith("redirect"))) {
-                components.add(proposed(group.redirectController(), "CONTROLLER", "api", reason));
+                components.add(proposed(group.redirectController(), ComponentType.CONTROLLER, "api", reason));
             }
-            components.add(proposed(group.service(), "SERVICE", "service", reason));
-            components.add(proposed(group.repository(), "REPOSITORY", "repository", reason));
-            components.add(proposed(group.entity(), "ENTITY", "domain", reason));
+            components.add(proposed(group.service(), ComponentType.SERVICE, "service", reason));
+            components.add(proposed(group.repository(), ComponentType.REPOSITORY, "repository", reason));
+            components.add(proposed(group.entity(), ComponentType.ENTITY, "domain", reason));
             entities.add(group.entity() + " (" + group.table() + ")");
             flows.add(new DataFlow(group.controller(), group.table(), group.service() + " -> " + group.repository()));
             tests.add("new: " + group.controller() + "Test");
@@ -613,7 +614,7 @@ public final class ImpactAnalyzer {
                         + String.join(", ", groups.stream().map(NounGroup::label).toList()) + ").");
     }
 
-    private static ImpactedComponent proposed(String name, String type, String layer, String reason) {
+    private static ImpactedComponent proposed(String name, ComponentType type, String layer, String reason) {
         return new ImpactedComponent(name, type, BASE_SOURCE + layer + "/" + name + ".java", 0.8, List.of(reason),
                 ChangeNature.NEW);
     }

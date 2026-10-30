@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -18,6 +20,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmException;
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmRequest;
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmResponse;
+import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.TestPlan;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.anthropic.core.JsonValue;
@@ -59,6 +62,21 @@ class AnthropicLlmClientTest {
                         "preconditions": "none", "steps": ["post"], "expected": "201", "traces": ["FR-1"]}],
              "coverageMatrix": [{"key": "FR-1", "value": "TC-1"}, {"key": "NFR-1", "value": "TC-1"}],
              "risksNotCovered": []}
+            """;
+    /** A requirement spec as a model returned it in a live call: valid structure, lower-case enum constants. */
+    private static final String LOWER_CASE_SPEC_JSON = """
+            {"normalizedStatement": "Add a QR code endpoint.", "intent": "Add a QR code endpoint",
+             "classification": "brownfield", "scopeIn": ["QR codes"], "scopeOut": [],
+             "functional": [{"id": "FR-1", "text": "Return a PNG QR code of the short URL", "priority": "MUST",
+                             "category": "functional", "measurable": false}],
+             "nonFunctional": [{"id": "NFR-1", "text": "Respond within 200 ms at p95", "priority": "should",
+                                "category": "performance", "measurable": true}],
+             "acceptanceCriteria": [{"id": "AC-1", "given": "an existing short link",
+                                     "when": "the QR code is requested", "then": "a PNG image is returned",
+                                     "traces": ["FR-1", "NFR-1"]}],
+             "assumptions": [], "openQuestions": [],
+             "ambiguity": {"score": 0.1, "findings": [], "questions": []},
+             "preliminaryRisk": {"level": "low", "factors": []}}
             """;
 
     @Test
@@ -122,6 +140,34 @@ class AnthropicLlmClientTest {
         JsonNode coverage = format.path("schema").path("properties").path("coverageMatrix");
         assertThat(coverage.path("type").asString()).isEqualTo("array");
         assertThat(coverage.path("items").path("additionalProperties").asBoolean(true)).isFalse();
+    }
+
+    @Test
+    void lowerCaseEnumValuesAreParsedAndTheSchemaConstrainsThemToUpperCaseConstants() throws Exception {
+        AtomicReference<MessageCreateParams> sent = new AtomicReference<>();
+        AnthropicLlmClient client = client(settings(true, "sk-test"), params -> {
+            sent.set(params);
+            return message(LOWER_CASE_SPEC_JSON, StopReason.END_TURN);
+        });
+
+        RequirementSpec spec = client.complete(REQUEST, RequirementSpec.class).output();
+
+        spec.validate();
+        assertThat(spec.nonFunctional()).singleElement().satisfies(r -> {
+            assertThat(r.category()).isEqualTo(RequirementSpec.Category.PERFORMANCE);
+            assertThat(r.priority()).isEqualTo(RequirementSpec.Priority.SHOULD);
+        });
+        assertThat(spec.functional().getFirst().category()).isEqualTo(RequirementSpec.Category.FUNCTIONAL);
+        assertThat(spec.classification()).isEqualTo(RequirementSpec.Classification.BROWNFIELD);
+        assertThat(CODEC.toJson(spec)).contains("\"category\":\"PERFORMANCE\"").doesNotContain("performance");
+
+        JsonNode body = CODEC.readTree(ObjectMappers.jsonMapper().writeValueAsString(sent.get()._body()));
+        JsonNode category = body.path("output_config").path("format").path("schema").path("properties")
+                .path("nonFunctional").path("items").path("properties").path("category");
+        assertThat(category.path("type").asString()).isEqualTo("string");
+        List<String> allowed = new ArrayList<>();
+        category.path("enum").forEach(value -> allowed.add(value.asString()));
+        assertThat(allowed).isEqualTo(Arrays.stream(RequirementSpec.Category.values()).map(Enum::name).toList());
     }
 
     @Test

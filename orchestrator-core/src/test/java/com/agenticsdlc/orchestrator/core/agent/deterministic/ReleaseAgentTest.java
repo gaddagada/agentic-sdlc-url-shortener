@@ -12,6 +12,7 @@ import com.agenticsdlc.orchestrator.core.artifact.DesignSpec;
 import com.agenticsdlc.orchestrator.core.artifact.DocumentationBundle;
 import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
+import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness.ChecklistStatus;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness.GoNoGo;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.SecurityReview;
@@ -48,7 +49,7 @@ class ReleaseAgentTest {
                 .contains("Verification passed", "Security review passed", "Documentation present",
                         "Traceability complete", "Rollback plan present", "Design approval (when required)");
         assertThat(release.checklist()).filteredOn(i -> i.item().startsWith("Design approval"))
-                .singleElement().satisfies(i -> assertThat(i.status()).isEqualTo("PASS"));
+                .singleElement().satisfies(i -> assertThat(i.status()).isEqualTo(ChecklistStatus.PASS));
         assertThat(release.changeRecord().approvals()).as("filled by the engine at completion").isEmpty();
         assertThat(release.changeRecord().artifactIds()).containsExactly("a1", "a2");
         assertThat(release.changeRecord().riskLevel()).isEqualTo(design.risk().level());
@@ -82,6 +83,6 @@ class ReleaseAgentTest {
         assertThat(release.decision()).isEqualTo(GoNoGo.GO_WITH_CONDITIONS);
         assertThat(agent.assess(spec, design, changeSet, verification, security, docs, AutonomyLevel.FULL_AUTO, false,
                 List.of()).checklist()).filteredOn(i -> i.item().startsWith("Design approval"))
-                .singleElement().satisfies(i -> assertThat(i.status()).isEqualTo("N_A"));
+                .singleElement().satisfies(i -> assertThat(i.status()).isEqualTo(ChecklistStatus.N_A));
     }
 }

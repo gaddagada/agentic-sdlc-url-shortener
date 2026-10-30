@@ -1,7 +1,6 @@
 package com.agenticsdlc.orchestrator.core.artifact;
 
 import java.util.List;
-import java.util.Set;
 
 import com.agenticsdlc.orchestrator.core.util.Immutables;
 
@@ -18,13 +17,6 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
 public record SecurityReview(List<Threat> threats, List<Check> checks, List<Finding> findings,
                              List<String> complianceNotes, boolean passed) implements ArtifactPayload {
 
-    /** STRIDE categories. */
-    public static final Set<String> STRIDE = Set.of("SPOOFING", "TAMPERING", "REPUDIATION", "INFORMATION_DISCLOSURE",
-            "DENIAL_OF_SERVICE", "ELEVATION_OF_PRIVILEGE");
-
-    /** Threat statuses. */
-    public static final Set<String> THREAT_STATUSES = Set.of("MITIGATED", "ACCEPTED", "OPEN");
-
     /**
      * Normalizes collections.
      */
@@ -33,6 +25,32 @@ public record SecurityReview(List<Threat> threats, List<Check> checks, List<Find
         checks = Immutables.list(checks);
         findings = Immutables.list(findings);
         complianceNotes = Immutables.list(complianceNotes);
+    }
+
+    /** STRIDE threat category. */
+    public enum StrideCategory {
+        /** Impersonating a user or system. */
+        SPOOFING,
+        /** Modifying data or code. */
+        TAMPERING,
+        /** Denying an action without the system being able to prove otherwise. */
+        REPUDIATION,
+        /** Exposing information to unauthorized parties. */
+        INFORMATION_DISCLOSURE,
+        /** Degrading or denying service. */
+        DENIAL_OF_SERVICE,
+        /** Gaining capabilities without authorization. */
+        ELEVATION_OF_PRIVILEGE
+    }
+
+    /** Treatment status of a threat. */
+    public enum ThreatStatus {
+        /** A control mitigates the threat. */
+        MITIGATED,
+        /** The residual risk is accepted. */
+        ACCEPTED,
+        /** The threat is not addressed. */
+        OPEN
     }
 
     /**
@@ -44,16 +62,15 @@ public record SecurityReview(List<Threat> threats, List<Check> checks, List<Find
      * @param mitigation mitigation
      * @param status MITIGATED, ACCEPTED or OPEN
      */
-    public record Threat(String id, String category, String description, String mitigation, String status) {
+    public record Threat(String id, StrideCategory category, String description, String mitigation,
+                         ThreatStatus status) {
         /**
          * Normalizes text.
          */
         public Threat {
             id = Immutables.text(id);
-            category = Immutables.text(category);
             description = Immutables.text(description);
             mitigation = Immutables.text(mitigation);
-            status = Immutables.text(status);
         }
     }
 
@@ -94,10 +111,8 @@ public record SecurityReview(List<Threat> threats, List<Check> checks, List<Find
         Problems p = new Problems("SecurityReview");
         p.requireNonEmpty(checks, "checks");
         for (Threat t : threats) {
-            p.require(STRIDE.contains(t.category()), "threat " + t.id() + " category '" + t.category()
-                    + "' must be one of " + STRIDE);
-            p.require(THREAT_STATUSES.contains(t.status()), "threat " + t.id() + " status '" + t.status()
-                    + "' must be one of " + THREAT_STATUSES);
+            p.requireNonNull(t.category(), "threat " + t.id() + " category");
+            p.requireNonNull(t.status(), "threat " + t.id() + " status");
         }
         for (Finding f : findings) {
             p.requireNonNull(f.severity(), "finding severity");
@@ -112,8 +127,8 @@ public record SecurityReview(List<Threat> threats, List<Check> checks, List<Find
     public String markdown() {
         Markdown md = new Markdown().heading(2, "Security review").field("Result", passed ? "PASSED" : "FAILED");
         md.heading(3, "Threat model (STRIDE)").table(List.of("ID", "Category", "Threat", "Mitigation", "Status"),
-                threats.stream().map(t -> List.of(t.id(), t.category(), t.description(), t.mitigation(), t.status()))
-                        .toList());
+                threats.stream().map(t -> List.of(t.id(), String.valueOf(t.category()), t.description(), t.mitigation(),
+                        String.valueOf(t.status()))).toList());
         md.heading(3, "Checks").table(List.of("Check", "Result", "Details"),
                 checks.stream().map(c -> List.of(c.name(), c.passed() ? "pass" : "FAIL", c.details())).toList());
         md.heading(3, "Findings").table(List.of("Severity", "Finding", "Recommendation"),

@@ -26,6 +26,7 @@ import com.agenticsdlc.orchestrator.core.artifact.DesignSpec.Decision;
 import com.agenticsdlc.orchestrator.core.artifact.DesignSpec.NfrStrategy;
 import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis;
 import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis.ChangeNature;
+import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis.ComponentType;
 import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis.ImpactedComponent;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.RiskAssessment;
@@ -91,7 +92,7 @@ public final class ArchitectureAgent implements StageAgent {
         Map<String, Component> components = new LinkedHashMap<>();
         List<String> deferred = new ArrayList<>();
         for (ImpactedComponent c : impact.components()) {
-            if (c.nature() == ChangeNature.REGRESSION_RISK || "TEST".equals(c.type())) {
+            if (c.nature() == ChangeNature.REGRESSION_RISK || c.type() == ComponentType.TEST) {
                 continue;
             }
             if (components.size() >= MAX_COMPONENTS) {
@@ -99,7 +100,7 @@ public final class ArchitectureAgent implements StageAgent {
                 continue;
             }
             components.put(c.name(), new Component(c.name(), responsibility(c.type(), c.name(), c.nature()),
-                    c.type(), c.nature() == ChangeNature.NEW));
+                    c.type().name(), c.nature() == ChangeNature.NEW));
         }
         boolean hasController = components.values().stream().anyMatch(c -> "CONTROLLER".equals(c.type()));
         if (!apiChanges.isEmpty() && !hasController) {
@@ -229,7 +230,7 @@ public final class ArchitectureAgent implements StageAgent {
             return changes;
         }
         for (ImpactedComponent c : impact.components()) {
-            if (!"ENTITY".equals(c.type()) || c.nature() == ChangeNature.REGRESSION_RISK) {
+            if (c.type() != ComponentType.ENTITY || c.nature() == ChangeNature.REGRESSION_RISK) {
                 continue;
             }
             String table = impact.entities().stream().filter(e -> e.startsWith(c.name() + " ("))
@@ -260,20 +261,20 @@ public final class ArchitectureAgent implements StageAgent {
         return "metadata";
     }
 
-    private static String responsibility(String type, String name, ChangeNature nature) {
+    private static String responsibility(ComponentType type, String name, ChangeNature nature) {
         String verb = switch (nature) {
             case NEW -> "New: ";
             case EXTEND -> "Extend: ";
             default -> "Modify: ";
         };
         return verb + switch (type) {
-            case "CONTROLLER" -> "HTTP endpoints, request validation and error mapping (" + name + ")";
-            case "SERVICE" -> "business rules and transactions (" + name + ")";
-            case "REPOSITORY" -> "persistence queries (" + name + ")";
-            case "ENTITY" -> "persistent state and invariants (" + name + ")";
-            case "CONFIG" -> "configuration (" + name + ")";
-            case "FILTER" -> "request filtering such as rate limiting (" + name + ")";
-            default -> "supporting logic (" + name + ")";
+            case CONTROLLER -> "HTTP endpoints, request validation and error mapping (" + name + ")";
+            case SERVICE -> "business rules and transactions (" + name + ")";
+            case REPOSITORY -> "persistence queries (" + name + ")";
+            case ENTITY -> "persistent state and invariants (" + name + ")";
+            case CONFIG -> "configuration (" + name + ")";
+            case FILTER -> "request filtering such as rate limiting (" + name + ")";
+            case null, default -> "supporting logic (" + name + ")";
         };
     }
 
@@ -330,17 +331,17 @@ public final class ArchitectureAgent implements StageAgent {
         List<NfrStrategy> strategies = new ArrayList<>();
         for (RequirementSpec.Requirement nfr : spec.nonFunctional()) {
             String strategy = switch (nfr.category()) {
-                case "PERFORMANCE" -> "Cache link lookups on the redirect path (Caffeine, short TTL), record clicks "
+                case PERFORMANCE -> "Cache link lookups on the redirect path (Caffeine, short TTL), record clicks "
                         + "asynchronously, index lookup columns, and verify with a load test against the target";
-                case "RELIABILITY" -> "Health checks and readiness probes, timeouts on outbound calls, bounded "
+                case RELIABILITY -> "Health checks and readiness probes, timeouts on outbound calls, bounded "
                         + "retries with backoff and idempotency keys for create operations";
-                case "SECURITY" -> "Strict input validation (scheme allow-list, length limits), SSRF guard blocking "
+                case SECURITY -> "Strict input validation (scheme allow-list, length limits), SSRF guard blocking "
                         + "private, loopback and link-local targets, per-client rate limiting on create endpoints";
-                case "COMPLIANCE" -> "Hash personal data with a rotating salt, enforce a retention period and audit "
+                case COMPLIANCE -> "Hash personal data with a rotating salt, enforce a retention period and audit "
                         + "access to analytics";
-                case "OPERABILITY" -> "Expose health, info and metrics endpoints, structured logging, dashboards and "
+                case OPERABILITY -> "Expose health, info and metrics endpoints, structured logging, dashboards and "
                         + "alerts on error rate and latency";
-                default -> "Document the behaviour and validate it with acceptance tests";
+                case null, default -> "Document the behaviour and validate it with acceptance tests";
             };
             strategies.add(new NfrStrategy(nfr.id(), strategy));
         }

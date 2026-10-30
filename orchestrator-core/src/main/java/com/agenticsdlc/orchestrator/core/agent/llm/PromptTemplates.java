@@ -21,6 +21,10 @@ public final class PromptTemplates {
     public static final String GOVERNANCE = "You operate inside a governed SDLC pipeline. Only reference files that "
             + "appear in the provided codebase index. Never include secrets. Respond only with the requested JSON.";
 
+    /** Output format rule for enum fields, included in every system prompt. */
+    public static final String ENUM_VALUES = "Every enum field must use exactly one of the upper-case values listed "
+            + "in its schema \"enum\" array (for example PERFORMANCE, not performance).";
+
     /** Maximum characters of one upstream artifact in a prompt. */
     static final int MAX_ARTIFACT_CHARS = 60_000;
 
@@ -37,7 +41,7 @@ public final class PromptTemplates {
      * @return the system prompt
      */
     public static String system(AgentRole role) {
-        return "You are the " + role.description() + ".\n" + GOVERNANCE + "\n" + guidance(role);
+        return "You are the " + role.description() + ".\n" + GOVERNANCE + "\n" + ENUM_VALUES + "\n" + guidance(role);
     }
 
     private static String guidance(AgentRole role) {

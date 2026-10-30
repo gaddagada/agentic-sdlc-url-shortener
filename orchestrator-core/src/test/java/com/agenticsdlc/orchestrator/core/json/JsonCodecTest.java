@@ -15,7 +15,10 @@ import com.agenticsdlc.orchestrator.core.agent.AgentRole;
 import com.agenticsdlc.orchestrator.core.artifact.ArtifactKind;
 import com.agenticsdlc.orchestrator.core.artifact.ArtifactPayload;
 import com.agenticsdlc.orchestrator.core.artifact.DesignSpec;
+import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
+import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.RiskLevel;
+import com.agenticsdlc.orchestrator.core.artifact.SecurityReview;
 import com.agenticsdlc.orchestrator.core.model.RunBudget;
 import com.agenticsdlc.orchestrator.core.testsupport.Payloads;
 import com.agenticsdlc.orchestrator.core.util.Hashes;
@@ -71,6 +74,30 @@ class JsonCodecTest {
                 + "\"maxLlmTokens\":10,\"maxActiveDuration\":\"PT1M\",\"somethingNew\":true}", RunBudget.class);
         assertThat(parsed.maxActiveDuration()).isEqualTo(Duration.ofMinutes(1));
         assertThat(codec.toPrettyJson(Map.of("a", 1))).contains("\n");
+    }
+
+    @Test
+    void enumValuesAreReadCaseInsensitivelyAndWrittenInUpperCase() {
+        String llmOutput = """
+                {"id": "NFR-1", "text": "p95 under 50 ms", "priority": "must", "category": "performance",
+                 "measurable": true}
+                """;
+
+        RequirementSpec.Requirement viaText = codec.fromJson(llmOutput, RequirementSpec.Requirement.class);
+        RequirementSpec.Requirement viaTree = codec.mapper().treeToValue(codec.readTree(llmOutput),
+                RequirementSpec.Requirement.class);
+
+        assertThat(viaText.category()).isEqualTo(RequirementSpec.Category.PERFORMANCE);
+        assertThat(viaText.priority()).isEqualTo(RequirementSpec.Priority.MUST);
+        assertThat(viaTree).isEqualTo(viaText);
+        assertThat(codec.toJson(viaText)).contains("\"category\":\"PERFORMANCE\"")
+                .contains("\"priority\":\"MUST\"");
+        assertThat(codec.fromJson("\"Denial_Of_Service\"", SecurityReview.StrideCategory.class))
+                .isEqualTo(SecurityReview.StrideCategory.DENIAL_OF_SERVICE);
+        assertThat(codec.fromJson("\"n_a\"", ReleaseReadiness.ChecklistStatus.class))
+                .isEqualTo(ReleaseReadiness.ChecklistStatus.N_A);
+        assertThatThrownBy(() -> codec.fromJson("\"latency\"", RequirementSpec.Category.class))
+                .as("values outside the enum are still rejected").isInstanceOf(JacksonException.class);
     }
 
     @Test

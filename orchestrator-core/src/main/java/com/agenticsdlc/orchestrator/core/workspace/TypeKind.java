@@ -1,5 +1,7 @@
 package com.agenticsdlc.orchestrator.core.workspace;
 
+import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis.ComponentType;
+
 /**
  * Kind of an indexed source entry.
  */
@@ -24,11 +26,21 @@ public enum TypeKind {
     RESOURCE;
 
     /**
-     * Returns the component type name used in impact analyses ({@code COMPONENT} maps to {@code OTHER}).
+     * Returns the component type used in impact analyses ({@code COMPONENT} maps to {@code OTHER}).
      *
      * @return the component type
      */
-    public String componentType() {
-        return this == COMPONENT ? "OTHER" : name();
+    public ComponentType componentType() {
+        return switch (this) {
+            case CONTROLLER -> ComponentType.CONTROLLER;
+            case SERVICE -> ComponentType.SERVICE;
+            case REPOSITORY -> ComponentType.REPOSITORY;
+            case ENTITY -> ComponentType.ENTITY;
+            case CONFIG -> ComponentType.CONFIG;
+            case FILTER -> ComponentType.FILTER;
+            case TEST -> ComponentType.TEST;
+            case RESOURCE -> ComponentType.RESOURCE;
+            case COMPONENT -> ComponentType.OTHER;
+        };
     }
 }

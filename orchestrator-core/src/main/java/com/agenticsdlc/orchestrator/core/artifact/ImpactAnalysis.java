@@ -2,7 +2,6 @@ package com.agenticsdlc.orchestrator.core.artifact;
 
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 
 import com.agenticsdlc.orchestrator.core.util.Immutables;
 
@@ -34,10 +33,6 @@ public record ImpactAnalysis(
         List<String> suggestedTests,
         String summary) implements ArtifactPayload {
 
-    /** Allowed component types. */
-    public static final Set<String> COMPONENT_TYPES = Set.of(
-            "CONTROLLER", "SERVICE", "REPOSITORY", "ENTITY", "CONFIG", "FILTER", "TEST", "RESOURCE", "OTHER");
-
     /**
      * Normalizes collections and text.
      */
@@ -51,6 +46,28 @@ public record ImpactAnalysis(
         riskFactors = Immutables.list(riskFactors);
         suggestedTests = Immutables.list(suggestedTests);
         summary = Immutables.text(summary);
+    }
+
+    /** Type of an impacted component. */
+    public enum ComponentType {
+        /** HTTP controller. */
+        CONTROLLER,
+        /** Service with business logic. */
+        SERVICE,
+        /** Persistence repository. */
+        REPOSITORY,
+        /** Persistent entity. */
+        ENTITY,
+        /** Configuration class. */
+        CONFIG,
+        /** Servlet filter. */
+        FILTER,
+        /** Test class. */
+        TEST,
+        /** Resource file such as a migration or configuration file. */
+        RESOURCE,
+        /** Any other type. */
+        OTHER
     }
 
     /** Nature of the impact on a component. */
@@ -69,20 +86,19 @@ public record ImpactAnalysis(
      * An impacted component.
      *
      * @param name simple type name
-     * @param type one of {@link #COMPONENT_TYPES}
+     * @param type component type
      * @param path repository-relative path (forward slashes)
      * @param confidence 0..1
      * @param reasons why the component is impacted
      * @param nature nature of the impact
      */
-    public record ImpactedComponent(String name, String type, String path, double confidence, List<String> reasons,
-                                    ChangeNature nature) {
+    public record ImpactedComponent(String name, ComponentType type, String path, double confidence,
+                                    List<String> reasons, ChangeNature nature) {
         /**
          * Normalizes fields.
          */
         public ImpactedComponent {
             name = Immutables.text(name);
-            type = Immutables.text(type);
             path = Immutables.text(path);
             reasons = Immutables.list(reasons);
         }
@@ -137,8 +153,7 @@ public record ImpactAnalysis(
         p.require(indexedFiles >= 0, "indexedFiles must not be negative");
         for (ImpactedComponent c : components) {
             p.requireText(c.name(), "component name");
-            p.require(COMPONENT_TYPES.contains(c.type()),
-                    "component " + c.name() + " type '" + c.type() + "' must be one of " + COMPONENT_TYPES);
+            p.requireNonNull(c.type(), "component " + c.name() + " type");
             p.require(c.confidence() >= 0.0 && c.confidence() <= 1.0,
                     "component " + c.name() + " confidence must be within 0..1");
             p.requireNonNull(c.nature(), "component " + c.name() + " nature");
@@ -155,7 +170,7 @@ public record ImpactAnalysis(
                 .field("Existing codebase", existingCodebase ? "yes (" + indexedFiles + " files indexed)" : "no")
                 .paragraph(summary);
         md.heading(3, "Components").table(List.of("Component", "Type", "Nature", "Confidence", "Path", "Reasons"),
-                components.stream().map(c -> List.of(c.name(), c.type(), String.valueOf(c.nature()),
+                components.stream().map(c -> List.of(c.name(), String.valueOf(c.type()), String.valueOf(c.nature()),
                         String.format(Locale.ROOT, "%.2f", c.confidence()), c.path(),
                         String.join("; ", c.reasons()))).toList());
         md.heading(3, "Endpoints").table(List.of("Method", "Path", "Controller"),

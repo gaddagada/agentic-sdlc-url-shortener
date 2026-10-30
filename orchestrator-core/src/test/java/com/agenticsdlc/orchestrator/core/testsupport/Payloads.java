@@ -45,7 +45,7 @@ public final class Payloads {
     public static RequirementSpec requirementSpec(RiskLevel risk) {
         return new RequirementSpec("Create short links.", "Create short links", RequirementSpec.Classification.GREENFIELD,
                 List.of("Links"), List.of(), List.of(new RequirementSpec.Requirement("FR-1", "Create short links",
-                RequirementSpec.Priority.MUST, RequirementSpec.FUNCTIONAL_CATEGORY, false)), List.of(),
+                RequirementSpec.Priority.MUST, RequirementSpec.Category.FUNCTIONAL, false)), List.of(),
                 List.of(new RequirementSpec.AcceptanceCriterion("AC-1", "a client", "it creates a link",
                         "the link exists", List.of("FR-1"))), List.of(), List.of(),
                 new RequirementSpec.AmbiguityReport(0.0, List.of(), List.of()), new RiskAssessment(risk, List.of()));
@@ -106,7 +106,8 @@ public final class Payloads {
     }
 
     public static ReleaseReadiness release(ReleaseReadiness.GoNoGo decision) {
-        return new ReleaseReadiness(List.of(new ReleaseReadiness.ChecklistItem("Verification passed", "PASS", "ok")),
+        return new ReleaseReadiness(List.of(new ReleaseReadiness.ChecklistItem("Verification passed",
+                ReleaseReadiness.ChecklistStatus.PASS, "ok")),
                 decision, decision == ReleaseReadiness.GoNoGo.GO_WITH_CONDITIONS ? List.of("condition") : List.of(),
                 new ReleaseReadiness.ChangeRecord("summary", RiskLevel.LOW, "Revert the commit", List.of(), List.of(),
                         "pending"), "notes");

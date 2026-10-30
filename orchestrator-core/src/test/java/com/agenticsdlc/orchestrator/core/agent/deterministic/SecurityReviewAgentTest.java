@@ -13,6 +13,8 @@ import com.agenticsdlc.orchestrator.core.artifact.DesignSpec;
 import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.SecurityReview;
+import com.agenticsdlc.orchestrator.core.artifact.SecurityReview.StrideCategory;
+import com.agenticsdlc.orchestrator.core.artifact.SecurityReview.ThreatStatus;
 import com.agenticsdlc.orchestrator.core.artifact.Severity;
 import com.agenticsdlc.orchestrator.core.model.WorkspaceMode;
 import com.agenticsdlc.orchestrator.core.workspace.ImpactAnalyzer;
@@ -42,8 +44,8 @@ class SecurityReviewAgentTest {
                 "ssrf-open-redirect-guard", "no-raw-pii", "rate-limiting-on-public-create", "no-secrets-in-change-set",
                 "mutating-endpoints-auth-note");
         assertThat(review.checks()).allSatisfy(c -> assertThat(c.passed()).isTrue());
-        assertThat(review.threats()).extracting(SecurityReview.Threat::category).contains("SPOOFING", "TAMPERING",
-                "REPUDIATION", "INFORMATION_DISCLOSURE", "DENIAL_OF_SERVICE", "ELEVATION_OF_PRIVILEGE");
+        assertThat(review.threats()).extracting(SecurityReview.Threat::category)
+                .contains(StrideCategory.values());
         assertThat(review.findings()).singleElement().satisfies(f -> assertThat(f.severity()).isEqualTo(Severity.LOW));
         assertThat(review.complianceNotes()).anySatisfy(n -> assertThat(n).contains("client IP address"));
     }
@@ -57,7 +59,7 @@ class SecurityReviewAgentTest {
         assertThat(review.passed()).isFalse();
         assertThat(review.findings()).extracting(SecurityReview.Finding::severity)
                 .contains(Severity.HIGH, Severity.MEDIUM, Severity.LOW);
-        assertThat(review.threats()).anySatisfy(t -> assertThat(t.status()).isEqualTo("OPEN"));
+        assertThat(review.threats()).anySatisfy(t -> assertThat(t.status()).isEqualTo(ThreatStatus.OPEN));
         assertThat(review.checks()).filteredOn(c -> !c.passed()).extracting(Check::name).contains(
                 "input-validation-in-design", "ssrf-open-redirect-guard", "no-raw-pii", "rate-limiting-on-public-create",
                 "mutating-endpoints-auth-note");

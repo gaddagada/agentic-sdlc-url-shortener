@@ -18,7 +18,9 @@ import tools.jackson.databind.json.JsonMapper;
  * <p>The underlying mapper sorts properties alphabetically and orders map entries by key, so
  * {@link #toJson(Object)} output is already canonical: equal values always produce byte-identical JSON.
  * Instants and durations are written as ISO-8601 strings. Unknown properties are tolerated when reading
- * (tolerant reader for older snapshots and LLM outputs).</p>
+ * (tolerant reader for older snapshots and LLM outputs), and enum values are read case-insensitively (models
+ * sometimes answer {@code "performance"} for {@code PERFORMANCE}); enums are always written by their exact
+ * upper-case constant name, so canonical JSON and hashes are unaffected.</p>
  *
  * <p>All methods throw the unchecked {@link JacksonException} on malformed input.</p>
  */
@@ -64,6 +66,8 @@ public final class JsonCodec {
                 .enable(MapperFeature.SORT_PROPERTIES_ALPHABETICALLY)
                 // records are creator-based: without this, their properties keep declaration order
                 .disable(MapperFeature.SORT_CREATOR_PROPERTIES_FIRST)
+                // tolerant reader: LLM outputs may spell enum constants in lower or mixed case
+                .enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS)
                 .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
                 .disable(DateTimeFeature.WRITE_DATES_AS_TIMESTAMPS)
                 .disable(DateTimeFeature.WRITE_DURATIONS_AS_TIMESTAMPS)

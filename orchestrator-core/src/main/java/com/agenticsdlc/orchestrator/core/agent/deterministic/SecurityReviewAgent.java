@@ -15,7 +15,9 @@ import com.agenticsdlc.orchestrator.core.artifact.Check;
 import com.agenticsdlc.orchestrator.core.artifact.DesignSpec;
 import com.agenticsdlc.orchestrator.core.artifact.SecurityReview;
 import com.agenticsdlc.orchestrator.core.artifact.SecurityReview.Finding;
+import com.agenticsdlc.orchestrator.core.artifact.SecurityReview.StrideCategory;
 import com.agenticsdlc.orchestrator.core.artifact.SecurityReview.Threat;
+import com.agenticsdlc.orchestrator.core.artifact.SecurityReview.ThreatStatus;
 import com.agenticsdlc.orchestrator.core.artifact.Severity;
 import com.agenticsdlc.orchestrator.core.util.SecretPatterns;
 
@@ -77,29 +79,29 @@ public final class SecurityReviewAgent implements StageAgent {
 
         List<Threat> threats = new ArrayList<>();
         if (mutating) {
-            threats.add(new Threat("T-1", "SPOOFING", "Unauthenticated clients call mutating endpoints",
+            threats.add(new Threat("T-1", StrideCategory.SPOOFING, "Unauthenticated clients call mutating endpoints",
                     "Authentication (API key or OIDC) in production; per-client rate limiting",
-                    authNote ? "ACCEPTED" : "OPEN"));
+                    authNote ? ThreatStatus.ACCEPTED : ThreatStatus.OPEN));
         }
-        threats.add(new Threat("T-" + (threats.size() + 1), "TAMPERING", "Malformed or oversized input",
-                "Input validation and length limits", validation ? "MITIGATED" : "OPEN"));
-        threats.add(new Threat("T-" + (threats.size() + 1), "REPUDIATION", "Changes cannot be attributed",
-                "Audit trail of governance actions and structured request logs", "ACCEPTED"));
+        threats.add(new Threat("T-" + (threats.size() + 1), StrideCategory.TAMPERING, "Malformed or oversized input",
+                "Input validation and length limits", mitigated(validation)));
+        threats.add(new Threat("T-" + (threats.size() + 1), StrideCategory.REPUDIATION, "Changes cannot be attributed",
+                "Audit trail of governance actions and structured request logs", ThreatStatus.ACCEPTED));
         if (pii) {
-            threats.add(new Threat("T-" + (threats.size() + 1), "INFORMATION_DISCLOSURE",
+            threats.add(new Threat("T-" + (threats.size() + 1), StrideCategory.INFORMATION_DISCLOSURE,
                     "Exposure of visitor data (" + String.join(", ", data.piiFields()) + ")",
                     data.protection().isBlank() ? "none defined" : data.protection(),
-                    piiProtected ? "MITIGATED" : "OPEN"));
+                    mitigated(piiProtected)));
         }
         if (publicCreate || handlesUrls) {
-            threats.add(new Threat("T-" + (threats.size() + 1), "DENIAL_OF_SERVICE", "Request floods on public "
-                    + "endpoints", "Token bucket rate limiting and caching", rateLimit ? "MITIGATED" : "OPEN"));
+            threats.add(new Threat("T-" + (threats.size() + 1), StrideCategory.DENIAL_OF_SERVICE, "Request floods on "
+                    + "public endpoints", "Token bucket rate limiting and caching", mitigated(rateLimit)));
         }
         if (handlesUrls) {
-            threats.add(new Threat("T-" + (threats.size() + 1), "ELEVATION_OF_PRIVILEGE",
+            threats.add(new Threat("T-" + (threats.size() + 1), StrideCategory.ELEVATION_OF_PRIVILEGE,
                     "SSRF or open redirect through user-supplied URLs reaching internal networks",
                     "Block loopback, private, link-local and metadata targets; scheme allow-list",
-                    ssrfGuard ? "MITIGATED" : "OPEN"));
+                    mitigated(ssrfGuard)));
         }
 
         List<Check> checks = new ArrayList<>();
@@ -147,5 +149,9 @@ public final class SecurityReviewAgent implements StageAgent {
         if (!ok) {
             findings.add(new Finding(severity, problem, recommendation));
         }
+    }
+
+    private static ThreatStatus mitigated(boolean control) {
+        return control ? ThreatStatus.MITIGATED : ThreatStatus.OPEN;
     }
 }

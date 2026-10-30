@@ -16,6 +16,7 @@ import com.agenticsdlc.orchestrator.core.agent.StageResult;
 import com.agenticsdlc.orchestrator.core.artifact.DesignSpec;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.AcceptanceCriterion;
+import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.Category;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.Requirement;
 import com.agenticsdlc.orchestrator.core.artifact.TestPlan;
 import com.agenticsdlc.orchestrator.core.artifact.TestPlan.CaseType;
@@ -79,9 +80,9 @@ public final class TestDesignAgent implements StageAgent {
             levels.add(new TestLevel(Level.CONTRACT, "API contract of the changed endpoints",
                     "OpenAPI contract assertions"));
         }
-        boolean performance = spec.nonFunctional().stream().anyMatch(n -> n.category().equals("PERFORMANCE"));
+        boolean performance = spec.nonFunctional().stream().anyMatch(n -> n.category() == Category.PERFORMANCE);
         boolean security = spec.nonFunctional().stream()
-                .anyMatch(n -> n.category().equals("SECURITY") || n.category().equals("COMPLIANCE"))
+                .anyMatch(n -> n.category() == Category.SECURITY || n.category() == Category.COMPLIANCE)
                 || (design != null && !design.securityConsiderations().isEmpty());
         if (performance) {
             levels.add(new TestLevel(Level.PERFORMANCE, "latency and throughput targets", "k6 or Gatling load test"));
@@ -107,25 +108,25 @@ public final class TestDesignAgent implements StageAgent {
         for (Requirement nfr : spec.nonFunctional()) {
             List<String> traces = List.of(nfr.id());
             switch (nfr.category()) {
-                case "PERFORMANCE" -> cases.add(new TestCase(next(cases), nfr.id() + " load test", Level.PERFORMANCE,
+                case PERFORMANCE -> cases.add(new TestCase(next(cases), nfr.id() + " load test", Level.PERFORMANCE,
                         CaseType.BOUNDARY, "production-like data set and environment",
                         List.of("Warm up the service", "Run the load profile from " + nfr.id(),
                                 "Collect latency percentiles"), "the target of " + nfr.id() + " is met: "
                         + nfr.text(), traces));
-                case "SECURITY", "COMPLIANCE" -> cases.add(new TestCase(next(cases), nfr.id() + " security check",
+                case SECURITY, COMPLIANCE -> cases.add(new TestCase(next(cases), nfr.id() + " security check",
                         Level.SECURITY, CaseType.SECURITY, "the service is running",
                         List.of("Send malicious or policy-violating input for " + nfr.id(),
                                 "Inspect responses, stored data and logs"),
                         "the control of " + nfr.id() + " holds: " + nfr.text(), traces));
-                case "RELIABILITY" -> cases.add(new TestCase(next(cases), nfr.id() + " failure and recovery",
+                case RELIABILITY -> cases.add(new TestCase(next(cases), nfr.id() + " failure and recovery",
                         Level.INTEGRATION, CaseType.RECOVERY, "the service is running with its dependencies",
                         List.of("Inject a dependency failure", "Observe behaviour and recovery"),
                         "the service degrades gracefully and recovers: " + nfr.text(), traces));
-                case "OPERABILITY" -> cases.add(new TestCase(next(cases), nfr.id() + " operational endpoints",
+                case OPERABILITY -> cases.add(new TestCase(next(cases), nfr.id() + " operational endpoints",
                         Level.INTEGRATION, CaseType.POSITIVE, "the service is running",
                         List.of("Call the health and metrics endpoints"), "the endpoints report the expected state: "
                         + nfr.text(), traces));
-                default -> {
+                case null, default -> {
                     // USABILITY and OTHER: covered by acceptance criteria if measurable, else listed as risk
                 }
             }

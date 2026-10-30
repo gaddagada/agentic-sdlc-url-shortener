@@ -1,7 +1,6 @@
 package com.agenticsdlc.orchestrator.core.artifact;
 
 import java.util.List;
-import java.util.Set;
 
 import com.agenticsdlc.orchestrator.core.util.Immutables;
 
@@ -18,9 +17,6 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  */
 public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, List<String> conditions,
                                ChangeRecord changeRecord, String releaseNotes) implements ArtifactPayload {
-
-    /** Allowed checklist statuses. */
-    public static final Set<String> CHECKLIST_STATUSES = Set.of("PASS", "FAIL", "WAIVED", "N_A");
 
     /**
      * Normalizes fields.
@@ -41,6 +37,18 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
         NO_GO
     }
 
+    /** Status of a checklist item. */
+    public enum ChecklistStatus {
+        /** The item is satisfied. */
+        PASS,
+        /** The item is not satisfied. */
+        FAIL,
+        /** The item is not satisfied but explicitly waived (becomes a release condition). */
+        WAIVED,
+        /** The item does not apply. */
+        N_A
+    }
+
     /**
      * A checklist item.
      *
@@ -48,13 +56,12 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
      * @param status PASS, FAIL, WAIVED or N_A
      * @param evidence evidence
      */
-    public record ChecklistItem(String item, String status, String evidence) {
+    public record ChecklistItem(String item, ChecklistStatus status, String evidence) {
         /**
          * Normalizes text.
          */
         public ChecklistItem {
             item = Immutables.text(item);
-            status = Immutables.text(status);
             evidence = Immutables.text(evidence);
         }
     }
@@ -126,8 +133,7 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
         p.requireNonNull(changeRecord, "changeRecord");
         for (ChecklistItem item : checklist) {
             p.requireText(item.item(), "checklist item");
-            p.require(CHECKLIST_STATUSES.contains(item.status()), "checklist item '" + item.item() + "' status '"
-                    + item.status() + "' must be one of " + CHECKLIST_STATUSES);
+            p.requireNonNull(item.status(), "checklist item '" + item.item() + "' status");
         }
         if (changeRecord != null) {
             p.requireText(changeRecord.summary(), "changeRecord.summary");
@@ -143,7 +149,7 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
     public String markdown() {
         Markdown md = new Markdown().heading(2, "Release readiness").field("Decision", decision);
         md.heading(3, "Checklist").table(List.of("Item", "Status", "Evidence"),
-                checklist.stream().map(i -> List.of(i.item(), i.status(), i.evidence())).toList());
+                checklist.stream().map(i -> List.of(i.item(), String.valueOf(i.status()), i.evidence())).toList());
         md.heading(3, "Conditions").bullets(conditions);
         if (changeRecord != null) {
             md.heading(3, "Change record")

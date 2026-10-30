@@ -18,6 +18,7 @@ import com.agenticsdlc.orchestrator.core.artifact.DocumentationBundle;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness.ChangeRecord;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness.ChecklistItem;
+import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness.ChecklistStatus;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness.GoNoGo;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.RiskLevel;
@@ -90,30 +91,30 @@ public final class ReleaseAgent implements StageAgent {
                                    List<String> artifactIds) {
         List<ChecklistItem> checklist = new ArrayList<>();
         boolean verified = verification != null && verification.passed();
-        checklist.add(new ChecklistItem("Verification passed", verified ? "PASS" : "FAIL", verification == null
+        checklist.add(new ChecklistItem("Verification passed", status(verified), verification == null
                 ? "no verification report" : verification.structuralChecks().stream().filter(c -> c.passed()).count()
                 + "/" + verification.structuralChecks().size() + " checks passed"));
         boolean secure = security != null && security.passed();
-        checklist.add(new ChecklistItem("Security review passed", secure ? "PASS" : "FAIL", security == null
+        checklist.add(new ChecklistItem("Security review passed", status(secure), security == null
                 ? "no security review" : security.findings().size() + " findings"));
-        checklist.add(new ChecklistItem("Documentation present", docs != null ? "PASS" : "FAIL",
+        checklist.add(new ChecklistItem("Documentation present", status(docs != null),
                 docs != null ? "README, API reference, runbook and changelog generated" : "missing"));
         boolean traced = verification != null && verification.traceability().uncovered().isEmpty();
-        checklist.add(new ChecklistItem("Traceability complete", traced ? "PASS" : "FAIL", verification == null
+        checklist.add(new ChecklistItem("Traceability complete", status(traced), verification == null
                 ? "unknown" : verification.traceability().requirementsCovered() + "/"
                 + verification.traceability().requirementsTotal() + " functional requirements traced"));
-        checklist.add(new ChecklistItem("Rollback plan present", changeSet.rollbackPlan().isBlank() ? "FAIL" : "PASS",
+        checklist.add(new ChecklistItem("Rollback plan present", status(!changeSet.rollbackPlan().isBlank()),
                 changeSet.rollbackPlan().isBlank() ? "missing" : "documented in the change set"));
         boolean approvalRequired = autonomy == AutonomyLevel.STRICT
                 || (autonomy == AutonomyLevel.GUIDED && design.risk() != null
                 && design.risk().level().atLeast(RiskLevel.MEDIUM));
-        checklist.add(new ChecklistItem("Design approval (when required)", !approvalRequired ? "N_A"
-                : designApproved ? "PASS" : "FAIL", approvalRequired ? "required by autonomy " + autonomy
+        checklist.add(new ChecklistItem("Design approval (when required)", !approvalRequired ? ChecklistStatus.N_A
+                : status(designApproved), approvalRequired ? "required by autonomy " + autonomy
                 + " and design risk" : "not required in " + autonomy + " autonomy"));
         boolean skeleton = changeSet.changes().stream()
                 .anyMatch(c -> c.contentKind() == ChangeSet.ContentKind.SKELETON);
         if (skeleton) {
-            checklist.add(new ChecklistItem("Code complete", "WAIVED",
+            checklist.add(new ChecklistItem("Code complete", ChecklistStatus.WAIVED,
                     "skeleton code; TODO markers must be completed before production deployment"));
         }
 
@@ -132,9 +133,9 @@ public final class ReleaseAgent implements StageAgent {
                 security.findings().stream().filter(f -> f.severity() == Severity.MEDIUM)
                         .forEach(f -> conditions.add("Address: " + f.title()));
             }
-            checklist.stream().filter(i -> i.status().equals("WAIVED"))
+            checklist.stream().filter(i -> i.status() == ChecklistStatus.WAIVED)
                     .forEach(i -> conditions.add("Waived: " + i.item() + " (" + i.evidence() + ")"));
-            checklist.stream().filter(i -> i.status().equals("FAIL"))
+            checklist.stream().filter(i -> i.status() == ChecklistStatus.FAIL)
                     .forEach(i -> conditions.add("Resolve: " + i.item()));
             decision = conditions.isEmpty() ? GoNoGo.GO : GoNoGo.GO_WITH_CONDITIONS;
         }
@@ -145,5 +146,9 @@ public final class ReleaseAgent implements StageAgent {
                 + " functional requirements, " + design.apiChanges().size() + " API changes, "
                 + design.dataModelChanges().size() + " data model changes. Decision: " + decision + ".";
         return new ReleaseReadiness(checklist, decision, conditions, record, notes);
+    }
+
+    private static ChecklistStatus status(boolean satisfied) {
+        return satisfied ? ChecklistStatus.PASS : ChecklistStatus.FAIL;
     }
 }

@@ -20,6 +20,7 @@ import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.AcceptanceCriterion;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.AmbiguityFinding;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.AmbiguityReport;
+import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.Category;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.Classification;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.Priority;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.Requirement;
@@ -66,17 +67,17 @@ public final class RequirementsAgent implements StageAgent {
     private static final List<String> PRESERVATION = List.of("unchanged", "keep working", "keeps working",
             "continue to work", "backward compatible", "must not change", "must not break");
 
-    private static final List<Map.Entry<String, List<String>>> CATEGORIES = List.of(
-            Map.entry("SECURITY", List.of("private", "ssrf", "auth*", "validat*", "secur*", "injection", "xss",
+    private static final List<Map.Entry<Category, List<String>>> CATEGORIES = List.of(
+            Map.entry(Category.SECURITY, List.of("private", "ssrf", "auth*", "validat*", "secur*", "injection", "xss",
                     "encrypt*", "ratelimit*", "throttl*")),
-            Map.entry("COMPLIANCE", List.of("pii", "retention", "audit*", "gdpr", "compliance", "privacy")),
-            Map.entry("PERFORMANCE", List.of("latency", "rps", "throughput", "p95", "p99", "p50", "fast", "faster",
-                    "speed", "performance", "performant")),
-            Map.entry("RELIABILITY", List.of("availab*", "uptime", "downtime", "retry", "retries", "failover",
+            Map.entry(Category.COMPLIANCE, List.of("pii", "retention", "audit*", "gdpr", "compliance", "privacy")),
+            Map.entry(Category.PERFORMANCE, List.of("latency", "rps", "throughput", "p95", "p99", "p50", "fast",
+                    "faster", "speed", "performance", "performant")),
+            Map.entry(Category.RELIABILITY, List.of("availab*", "uptime", "downtime", "retry", "retries", "failover",
                     "fault*", "resilien*", "reliab*", "durab*", "recover*")),
-            Map.entry("OPERABILITY", List.of("health", "metric*", "log", "logs", "logging", "monitor*", "alert*",
+            Map.entry(Category.OPERABILITY, List.of("health", "metric*", "log", "logs", "logging", "monitor*", "alert*",
                     "observab*", "tracing")),
-            Map.entry("USABILITY", List.of("usab*", "ui", "ux", "accessib*")));
+            Map.entry(Category.USABILITY, List.of("usab*", "ui", "ux", "accessib*")));
     private static final List<String> SECURITY_RISK = List.of("private", "ssrf", "auth*", "secur*", "pii",
             "personal", "retention", "gdpr", "password*", "encrypt*", "validat*", "compliance", "privacy");
     private static final List<String> SCHEMA_RISK = List.of("schema", "table", "column*", "migration*", "database",
@@ -145,11 +146,11 @@ public final class RequirementsAgent implements StageAgent {
         List<Requirement> nonFunctional = new ArrayList<>();
         for (Candidate candidate : candidates(original, answerTexts)) {
             List<String> tokens = Text.tokens(candidate.text());
-            String category = category(tokens, candidate.text());
+            Category category = category(tokens, candidate.text());
             boolean measurable = Text.hasDigit(candidate.text());
             if (category == null) {
                 functional.add(new Requirement("FR-" + (functional.size() + 1), candidate.text(),
-                        candidate.priority(), RequirementSpec.FUNCTIONAL_CATEGORY, measurable));
+                        candidate.priority(), Category.FUNCTIONAL, measurable));
             } else {
                 nonFunctional.add(new Requirement("NFR-" + (nonFunctional.size() + 1), candidate.text(),
                         candidate.priority(), category, measurable));
@@ -157,7 +158,7 @@ public final class RequirementsAgent implements StageAgent {
         }
         if (functional.isEmpty()) {
             functional.add(new Requirement("FR-1", Text.stripTrailingPunctuation(original), Priority.MUST,
-                    RequirementSpec.FUNCTIONAL_CATEGORY, Text.hasDigit(original)));
+                    Category.FUNCTIONAL, Text.hasDigit(original)));
         }
         List<AcceptanceCriterion> criteria = acceptanceCriteria(functional, nonFunctional);
         List<String> assumptions = new ArrayList<>(List.of("Single-region deployment",
@@ -409,21 +410,21 @@ public final class RequirementsAgent implements StageAgent {
         return depth > 0;
     }
 
-    private static @Nullable String category(List<String> tokens, String text) {
+    private static @Nullable Category category(List<String> tokens, String text) {
         String lower = text.toLowerCase(Locale.ROOT);
-        for (Map.Entry<String, List<String>> entry : CATEGORIES) {
+        for (Map.Entry<Category, List<String>> entry : CATEGORIES) {
             if (Text.anyToken(tokens, entry.getValue())) {
                 return entry.getKey();
             }
-            if (entry.getKey().equals("SECURITY") && lower.contains("rate limit")) {
-                return "SECURITY";
+            if (entry.getKey() == Category.SECURITY && lower.contains("rate limit")) {
+                return Category.SECURITY;
             }
-            if (entry.getKey().equals("PERFORMANCE") && (lower.contains("response time")
+            if (entry.getKey() == Category.PERFORMANCE && (lower.contains("response time")
                     || lower.contains("requests per second"))) {
-                return "PERFORMANCE";
+                return Category.PERFORMANCE;
             }
-            if (entry.getKey().equals("COMPLIANCE") && lower.contains("personal data")) {
-                return "COMPLIANCE";
+            if (entry.getKey() == Category.COMPLIANCE && lower.contains("personal data")) {
+                return Category.COMPLIANCE;
             }
         }
         return null;

@@ -38,13 +38,6 @@ public record RequirementSpec(
         AmbiguityReport ambiguity,
         RiskAssessment preliminaryRisk) implements ArtifactPayload {
 
-    /** Allowed non-functional categories. */
-    public static final Set<String> NFR_CATEGORIES = Set.of(
-            "PERFORMANCE", "RELIABILITY", "SECURITY", "COMPLIANCE", "OPERABILITY", "USABILITY", "OTHER");
-
-    /** Category used for functional requirements. */
-    public static final String FUNCTIONAL_CATEGORY = "FUNCTIONAL";
-
     /**
      * Normalizes collections and text.
      */
@@ -81,22 +74,53 @@ public record RequirementSpec(
     }
 
     /**
+     * Requirement category: {@link #FUNCTIONAL} for functional requirements, any other value for non-functional
+     * requirements.
+     */
+    public enum Category {
+        /** Functional requirement. */
+        FUNCTIONAL,
+        /** Latency, throughput and capacity. */
+        PERFORMANCE,
+        /** Availability, fault tolerance and recovery. */
+        RELIABILITY,
+        /** Input validation, abuse protection and access control. */
+        SECURITY,
+        /** Privacy, retention and audit obligations. */
+        COMPLIANCE,
+        /** Health, metrics, logging and alerting. */
+        OPERABILITY,
+        /** User experience and accessibility. */
+        USABILITY,
+        /** Any other quality attribute. */
+        OTHER;
+
+        /**
+         * Returns whether this is a non-functional category (anything but {@link #FUNCTIONAL}).
+         *
+         * @return true for non-functional categories
+         */
+        public boolean nonFunctional() {
+            return this != FUNCTIONAL;
+        }
+    }
+
+    /**
      * A single requirement.
      *
      * @param id {@code FR-n} or {@code NFR-n}
      * @param text requirement text
      * @param priority priority
-     * @param category {@code FUNCTIONAL} for functional requirements, otherwise one of {@link #NFR_CATEGORIES}
+     * @param category {@link Category#FUNCTIONAL} for functional requirements, otherwise a non-functional category
      * @param measurable whether the requirement carries a measurable target
      */
-    public record Requirement(String id, String text, Priority priority, String category, boolean measurable) {
+    public record Requirement(String id, String text, Priority priority, Category category, boolean measurable) {
         /**
          * Normalizes text.
          */
         public Requirement {
             id = Immutables.text(id);
             text = Immutables.text(text);
-            category = Immutables.text(category);
         }
     }
 
@@ -192,8 +216,9 @@ public record RequirementSpec(
             p.requirePattern(r.id(), "NFR-\\d+", "non-functional requirement id");
             p.requireText(r.text(), "requirement " + r.id() + " text");
             p.requireNonNull(r.priority(), "requirement " + r.id() + " priority");
-            p.require(NFR_CATEGORIES.contains(r.category()),
-                    "requirement " + r.id() + " category '" + r.category() + "' must be one of " + NFR_CATEGORIES);
+            p.requireNonNull(r.category(), "requirement " + r.id() + " category");
+            p.require(r.category() == null || r.category().nonFunctional(), "non-functional requirement " + r.id()
+                    + " must not have category " + Category.FUNCTIONAL);
             ids.add(r.id());
         }
         p.requireUnique(allRequirements(), Requirement::id, "requirements");
@@ -229,8 +254,8 @@ public record RequirementSpec(
                         r.measurable() ? "yes" : "no")).toList());
         md.heading(3, "Non-functional requirements").table(List.of("ID", "Category", "Priority", "Requirement",
                         "Measurable"),
-                nonFunctional.stream().map(r -> List.of(r.id(), r.category(), String.valueOf(r.priority()), r.text(),
-                        r.measurable() ? "yes" : "no")).toList());
+                nonFunctional.stream().map(r -> List.of(r.id(), String.valueOf(r.category()),
+                        String.valueOf(r.priority()), r.text(), r.measurable() ? "yes" : "no")).toList());
         md.heading(3, "Acceptance criteria").table(List.of("ID", "Given", "When", "Then", "Traces"),
                 acceptanceCriteria.stream().map(a -> List.of(a.id(), a.given(), a.when(), a.then(),
                         Markdown.join(a.traces()))).toList());

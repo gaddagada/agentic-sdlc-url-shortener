@@ -85,7 +85,8 @@ class LlmStageAgentTest {
             assertThat(s.llm().promptHash()).hasSize(64);
         });
         LlmRequest request = client.requests.getFirst();
-        assertThat(request.system()).contains(PromptTemplates.GOVERNANCE).contains("software architect");
+        assertThat(request.system()).contains(PromptTemplates.GOVERNANCE).contains(PromptTemplates.ENUM_VALUES)
+                .contains("software architect");
         assertThat(request.user()).contains("## Requirement\nCreate short links.").contains("### intake (REQUIREMENT_SPEC v1)")
                 .contains("\"normalizedStatement\"").contains("JSON schema").contains("\"alternativesConsidered\"");
         assertThat(request.maxOutputTokens()).isEqualTo(4000);
@@ -141,6 +142,44 @@ class LlmStageAgentTest {
                 .isInstanceOfSatisfying(StageResult.NeedsClarification.class, c -> {
                     assertThat(c.questions()).extracting(ClarificationQuestion::id).containsExactly("q1");
                     assertThat(c.llm()).isNotNull();
+                });
+    }
+
+    @Test
+    void lowerCaseEnumValuesInModelOutputAreAcceptedAndUnknownValuesAreInvalidOutput() throws Exception {
+        RequirementSpec base = Payloads.requirementSpec(RiskLevel.LOW);
+        RequirementSpec withNfr = new RequirementSpec(base.normalizedStatement(), base.intent(), base.classification(),
+                base.scopeIn(), base.scopeOut(), base.functional(), List.of(new RequirementSpec.Requirement("NFR-1",
+                "p95 redirect latency under 50 ms", RequirementSpec.Priority.MUST, RequirementSpec.Category.PERFORMANCE,
+                true)), base.acceptanceCriteria(), base.assumptions(), base.openQuestions(), base.ambiguity(),
+                base.preliminaryRisk());
+        // what a model returned in a live call: correct structure, lower-case enum constants
+        String output = codec.toJson(withNfr).replace("\"category\":\"PERFORMANCE\"", "\"category\":\"performance\"")
+                .replace("\"category\":\"FUNCTIONAL\"", "\"category\":\"functional\"")
+                .replace("\"classification\":\"GREENFIELD\"", "\"classification\":\"Greenfield\"");
+        assertThat(output).contains("\"category\":\"performance\"").contains("\"category\":\"functional\"");
+        // the Anthropic and Ollama clients parse the model text with the shared codec
+        client.answer = r -> codec.mapper().treeToValue(codec.readTree(output), RequirementSpec.class);
+        StageAgent agent = LlmStageAgent.forRole(AgentRole.REQUIREMENTS, client, codec, 4000, Duration.ofSeconds(30));
+
+        StageResult result = agent.execute(Contexts.of(AgentRole.REQUIREMENTS, "Create short links."));
+
+        assertThat(result).isInstanceOfSatisfying(StageResult.Success.class, s -> {
+            RequirementSpec spec = (RequirementSpec) s.payload();
+            assertThat(spec.nonFunctional()).singleElement().satisfies(r ->
+                    assertThat(r.category()).isEqualTo(RequirementSpec.Category.PERFORMANCE));
+            assertThat(spec.functional().getFirst().category()).isEqualTo(RequirementSpec.Category.FUNCTIONAL);
+            assertThat(spec.classification()).isEqualTo(RequirementSpec.Classification.GREENFIELD);
+            assertThat(spec).isEqualTo(withNfr);
+        });
+
+        client.answer = r -> codec.mapper().treeToValue(codec.readTree(output.replace("\"performance\"",
+                "\"latency\"")), RequirementSpec.class);
+        assertThatThrownBy(() -> agent.execute(Contexts.of(AgentRole.REQUIREMENTS, "Create short links.")))
+                .isInstanceOfSatisfying(StageFailure.class, f -> {
+                    assertThat(f.kind()).isEqualTo(FailureKind.INVALID_OUTPUT);
+                    assertThat(f.retryable()).isTrue();
+                    assertThat(f.getMessage()).startsWith("output could not be parsed").contains("latency");
                 });
     }
 

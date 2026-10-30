@@ -98,11 +98,11 @@ public final class PlanningAgent implements StageAgent {
         for (Requirement nfr : spec.nonFunctional()) {
             String title = Text.shorten(nfr.text(), 60);
             switch (nfr.category()) {
-                case "PERFORMANCE", "RELIABILITY", "OPERABILITY" -> {
+                case PERFORMANCE, RELIABILITY, OPERABILITY -> {
                     String id = next(tasks);
                     String kind = switch (nfr.category()) {
-                        case "PERFORMANCE" -> "Load test and observability";
-                        case "RELIABILITY" -> "Resilience and failure testing";
+                        case PERFORMANCE -> "Load test and observability";
+                        case RELIABILITY -> "Resilience and failure testing";
                         default -> "Health checks and monitoring";
                     };
                     tasks.add(new Task(id, kind + ": " + title, "Verify " + nfr.id() + ": " + nfr.text(),
@@ -110,15 +110,16 @@ public final class PlanningAgent implements StageAgent {
                             nfr.id() + " is verified with evidence"));
                     sinkIds.add(id);
                 }
-                case "SECURITY", "COMPLIANCE" -> {
+                case SECURITY, COMPLIANCE -> {
                     String id = next(tasks);
-                    tasks.add(new Task(id, "Review: " + title, "Human " + nfr.category().toLowerCase(java.util.Locale.ROOT)
-                            + " review of " + nfr.id() + ": " + nfr.text(), TaskType.GOVERNANCE,
+                    tasks.add(new Task(id, "Review: " + title, "Human "
+                            + nfr.category().name().toLowerCase(java.util.Locale.ROOT) + " review of " + nfr.id()
+                            + ": " + nfr.text(), TaskType.GOVERNANCE,
                             List.copyOf(implementIds), Estimate.S, Owner.HUMAN, List.of(nfr.id()),
                             nfr.id() + " is reviewed and signed off"));
                     reviewIds.add(id);
                 }
-                default -> {
+                case null, default -> {
                     String id = next(tasks);
                     tasks.add(new Task(id, "Validate: " + title, "Validate " + nfr.id() + ": " + nfr.text(),
                             TaskType.TEST, List.copyOf(implementIds), Estimate.S, Owner.AGENT, List.of(nfr.id()),
