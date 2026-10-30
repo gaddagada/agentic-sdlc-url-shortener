@@ -89,8 +89,14 @@ class LlmStageAgentTest {
         LlmRequest request = client.requests.getFirst();
         assertThat(request.system()).contains(PromptTemplates.GOVERNANCE).contains(PromptTemplates.ENUM_VALUES)
                 .contains("software architect");
-        assertThat(request.user()).contains("## Requirement\nCreate short links.").contains("### intake (REQUIREMENT_SPEC v1)")
-                .contains("\"normalizedStatement\"").contains("JSON schema").contains("\"alternativesConsidered\"");
+        assertThat(request.stableContext()).contains("## Requirement\nCreate short links.")
+                .contains("### intake (REQUIREMENT_SPEC v1)").contains("\"normalizedStatement\"");
+        assertThat(request.user()).contains("JSON schema").contains("\"alternativesConsidered\"")
+                .contains("### impact (IMPACT_ANALYSIS v1)").doesNotContain("\"normalizedStatement\"")
+                .doesNotContain("## Requirement");
+        assertThat(result).isInstanceOfSatisfying(StageResult.Success.class, s -> assertThat(s.llm().promptHash())
+                .isEqualTo(com.agenticsdlc.orchestrator.core.util.Hashes.sha256Hex(request.system() + "\n\n"
+                        + request.stableContext() + "\n\n" + request.user())));
         assertThat(request.maxOutputTokens()).isEqualTo(4000);
         assertThat(request.timeout()).isEqualTo(Duration.ofSeconds(30));
     }
@@ -243,7 +249,7 @@ class LlmStageAgentTest {
         client.requests.clear();
         client.answer = r -> answer;
         LlmStageAgent.forRole(role, client, codec, 4000, Duration.ofSeconds(30)).execute(context);
-        return client.requests.getFirst().user();
+        return client.requests.getFirst().userWithContext();
     }
 
     private static String full(String stage, String kind) {
@@ -373,13 +379,134 @@ class LlmStageAgentTest {
                 List.of(), 1, 1, null, index, base.options(), List.of(), base.settings());
         LlmStageAgent.forRole(AgentRole.CODEBASE_ANALYSIS, client, codec, 4000, Duration.ofSeconds(30))
                 .execute(context);
-        String user = client.requests.getFirst().user();
+        String user = client.requests.getFirst().stableContext();
+        assertThat(client.requests.getFirst().user()).doesNotContain("## Codebase index")
+                .doesNotContain("## Clarification answers");
         assertThat(user).contains("## Clarification answers (authoritative)").contains("Answer: p95 under 50 ms")
                 .contains("## Codebase index").contains("api/LinkController.java [CONTROLLER] endpoints: POST "
                         + "/api/v1/links").contains("migrations: url-shortener/src/main/resources/db/migration/V1__init.sql");
         client.requests.clear();
         LlmStageAgent.forRole(AgentRole.DOCUMENTATION, client, codec, 4000, Duration.ofSeconds(30)).id();
         assertThat(PromptTemplates.system(AgentRole.RELEASE)).contains("Leave changeRecord.approvals empty");
+    }
+
+    // ------------------------------------------------------------------ impacted sources and the prompt split
+
+    private static final String SOURCE_PATH = "url-shortener/src/main/java/com/agenticsdlc/shortener/service/"
+            + "LinkService.java";
+    private static final String SOURCE_TEXT = "public class LinkService {\n"
+            + "    private final LinkRepository linkRepository;\n"
+            + "    // a ``` fence inside the source\n"
+            + "}\n";
+
+    private static StageContext withSources(StageContext base) {
+        return base.withImpactedSources(java.util.Map.of(SOURCE_PATH, SOURCE_TEXT), List.of(
+                "url-shortener/src/main/java/com/agenticsdlc/shortener/api/LinkController.java: truncated to 20000 "
+                        + "of 31000 characters (per-file limit of 20000 characters)"));
+    }
+
+    @Test
+    void implementationPromptShowsTheImpactedSourcesAndTheIntakePromptDoesNot() throws Exception {
+        StageContext implement = withSources(Contexts.of(AgentRole.IMPLEMENTATION, "Add bulk creation",
+                Payloads.requirementSpec(RiskLevel.LOW), Payloads.design(RiskLevel.MEDIUM)));
+
+        String user = promptFor(AgentRole.IMPLEMENTATION, Payloads.forRole(AgentRole.IMPLEMENTATION), implement);
+
+        assertThat(client.requests.getFirst().user()).contains(PromptTemplates.SOURCES_HEADING);
+        assertThat(user).contains("## Source of impacted files (authoritative; write diffs against exactly this "
+                        + "text)")
+                .contains("### " + SOURCE_PATH + " (4 lines)\n````java\n" + SOURCE_TEXT + "````\n")
+                .contains("Write every DIFF hunk against exactly these lines")
+                .contains("Not shown in full:\n- url-shortener/src/main/java/com/agenticsdlc/shortener/api/"
+                        + "LinkController.java: truncated to 20000");
+        assertThat(client.requests.getFirst().stableContext()).doesNotContain(SOURCE_TEXT);
+        assertThat(client.requests.getFirst().system()).contains(PromptTemplates.DIFF_RULES)
+                .contains("\"@@ -a,b +c,d @@\"").contains("three unchanged context lines")
+                .contains("Use contentKind FULL (operation CREATE) for new files");
+
+        StageContext intake = withSources(Contexts.of(AgentRole.REQUIREMENTS, "Add bulk creation"));
+        String intakePrompt = promptFor(AgentRole.REQUIREMENTS, Payloads.requirementSpec(RiskLevel.LOW), intake);
+        assertThat(intakePrompt).doesNotContain(PromptTemplates.SOURCES_HEADING).doesNotContain(SOURCE_TEXT);
+        assertThat(client.requests.getFirst().system()).doesNotContain(PromptTemplates.DIFF_RULES);
+    }
+
+    @Test
+    void verifierPromptComparesDiffsWithTheSourceAndSeparatesBlockingFromAdvisoryFindings() throws Exception {
+        StageContext verify = withSources(Contexts.of(AgentRole.VERIFICATION, "Add bulk creation",
+                Payloads.requirementSpec(RiskLevel.LOW), Payloads.changeSet(SOURCE_PATH, "class X {}")));
+
+        String prompt = promptFor(AgentRole.VERIFICATION, Payloads.verification(true), verify);
+
+        assertThat(prompt).contains(PromptTemplates.SOURCES_HEADING).contains(SOURCE_TEXT)
+                .contains("Compare every DIFF hunk of the change set with it");
+        assertThat(client.requests.getFirst().system()).contains(PromptTemplates.BLOCKING_RULES)
+                .contains("blocking=false (advisory) for style, test placement")
+                .contains("advisory failures never fail verification")
+                .contains("compare every DIFF hunk with it").contains("prefix feedback for an advisory finding");
+        assertThat(PromptTemplates.system(AgentRole.SECURITY_REVIEW)).contains("source of impacted files");
+    }
+
+    @Test
+    void thePromptIsSplitIntoSystemRunStableContextAndStageSpecificUserContent(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) throws Exception {
+        com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex index =
+                new com.agenticsdlc.orchestrator.core.workspace.CodebaseIndexer()
+                        .index(com.agenticsdlc.orchestrator.core.testsupport.SyntheticWorkspace.create(dir));
+        ArtifactPayload[] all = pipelinePayloads();
+        StageContext base = Contexts.of(AgentRole.IMPLEMENTATION, "Add bulk creation",
+                com.agenticsdlc.orchestrator.core.model.RunOptions.defaults(), index, List.of(), all[0], all[1],
+                all[2], all[3]);
+        List<ClarificationQuestion> questions = List.of(new ClarificationQuestion("q1", "Batch size?", "why",
+                List.of()));
+        StageContext first = new StageContext(base.runId(), base.stageId(), base.role(), base.requirement(),
+                base.originalRequirement(), java.util.Map.of("q1", "at most 100"), questions, base.upstream(),
+                List.of(), 1, 1, null, index, base.options(), List.of(), base.settings(), Set.of("design"));
+        StageContext rework = withSources(new StageContext(first.runId(), first.stageId(), first.role(),
+                first.requirement(), first.originalRequirement(), first.clarificationAnswers(),
+                first.clarificationQuestions(), first.upstream(), List.of("[verify@v1] Add tests for: Feature"), 2,
+                1, "INVALID_OUTPUT: hunk 1/1 of " + SOURCE_PATH + " does not apply", index, first.options(),
+                List.of(), first.settings(), first.directPredecessors()));
+
+        promptFor(AgentRole.IMPLEMENTATION, Payloads.forRole(AgentRole.IMPLEMENTATION), first);
+        LlmRequest initial = client.requests.getFirst();
+        promptFor(AgentRole.IMPLEMENTATION, Payloads.forRole(AgentRole.IMPLEMENTATION), rework);
+        LlmRequest again = client.requests.getFirst();
+
+        assertThat(initial.system()).isEqualTo(PromptTemplates.system(AgentRole.IMPLEMENTATION))
+                .isEqualTo(again.system());
+        assertThat(initial.hasStableContext()).isTrue();
+        assertThat(initial.stableContext()).as("identical across attempts and feedback loops")
+                .isEqualTo(again.stableContext())
+                .startsWith(PromptTemplates.REQUIREMENT_HEADING + "\nAdd bulk creation\n")
+                .contains("## Clarification answers (authoritative)\n- q1 Batch size?\n  Answer: at most 100")
+                .contains(PromptTemplates.REQUIREMENT_SPEC_HEADING + "\n### intake (REQUIREMENT_SPEC v1)\n```json\n")
+                .contains("## Codebase index").contains("api/LinkController.java [CONTROLLER]")
+                .doesNotContain("\"alternativesConsidered\"").doesNotContain("Feedback").doesNotContain("JSON schema");
+        assertThat(initial.user()).startsWith(PromptTemplates.FULL_ARTIFACTS_HEADING)
+                .contains("### design (DESIGN_SPEC v1)\n```json\n").contains("\"alternativesConsidered\"")
+                .contains(PromptTemplates.SUMMARIZED_ARTIFACTS_HEADING).contains("### decompose (TASK_PLAN v1, summary)")
+                .contains("JSON schema").doesNotContain("\"normalizedStatement\"").doesNotContain("## Codebase index")
+                .doesNotContain("## Clarification answers").doesNotContain(PromptTemplates.SOURCES_HEADING);
+        assertThat(again.user()).contains(PromptTemplates.SOURCES_HEADING).contains("## Feedback to address")
+                .contains("## The previous attempt failed\nINVALID_OUTPUT: hunk 1/1 of " + SOURCE_PATH);
+        assertThat(again.userWithContext()).isEqualTo(again.stableContext() + "\n" + again.user())
+                .isEqualTo(PromptTemplates.combined(rework, codec, JsonSchemas.forRecord(ChangeSet.class)));
+
+        // stages without the codebase index share one stable context: requirement, answers, specification
+        StageContext testDesign = new StageContext(base.runId(), "test-design", AgentRole.TEST_DESIGN,
+                first.requirement(), first.originalRequirement(), first.clarificationAnswers(), questions,
+                first.upstream(), List.of(), 1, 1, null, index, first.options(), List.of(), first.settings(),
+                Set.of("design"));
+        StageContext verify = new StageContext(base.runId(), "verify", AgentRole.VERIFICATION, first.requirement(),
+                first.originalRequirement(), first.clarificationAnswers(), questions, first.upstream(), List.of(), 1,
+                1, null, index, first.options(), List.of(), first.settings(), Set.of("implement", "test-design"));
+        assertThat(PromptTemplates.stableContext(testDesign, codec)).isEqualTo(PromptTemplates.stableContext(verify,
+                codec)).doesNotContain("## Codebase index");
+
+        LlmRequest legacy = new LlmRequest("s", "u", 10, Duration.ofSeconds(1));
+        assertThat(legacy.stableContext()).isEmpty();
+        assertThat(legacy.hasStableContext()).isFalse();
+        assertThat(legacy.userWithContext()).isEqualTo("u");
     }
 
     @Test

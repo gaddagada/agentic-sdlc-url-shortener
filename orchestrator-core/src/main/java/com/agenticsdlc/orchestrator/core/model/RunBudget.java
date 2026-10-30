@@ -14,7 +14,12 @@ import java.util.Objects;
  * remains a safety stop, not a cost target: a run that exceeds it safe-stops with {@code BUDGET_EXCEEDED} and a
  * human resume grants one more default allowance.</p>
  *
- * @param maxFeedbackLoops maximum verification feedback loops and rework rejections (default 2)
+ * <p>The default feedback loop budget (3, formerly 2) allows three re-implementations after failed verifications:
+ * live LLM runs of a brownfield change used both former loops on diff hunks and test gaps and stopped at the gate
+ * before the reworked change set could be verified.</p>
+ *
+ * @param maxFeedbackLoops maximum verification feedback loops and rework rejections (default
+ *                         {@value #DEFAULT_MAX_FEEDBACK_LOOPS})
  * @param maxReplans maximum re-plans (default 3)
  * @param maxAgentCalls maximum agent attempts across all stages (default 40)
  * @param maxLlmTokens maximum LLM input plus output tokens (default 600 000)
@@ -26,8 +31,12 @@ public record RunBudget(int maxFeedbackLoops, int maxReplans, int maxAgentCalls,
     /** Default token budget: ten stages with full direct-predecessor artifacts in context, retries included. */
     public static final long DEFAULT_MAX_LLM_TOKENS = 600_000L;
 
+    /** Default verification feedback loop (and rework) budget. */
+    public static final int DEFAULT_MAX_FEEDBACK_LOOPS = 3;
+
     /** Default budget. */
-    public static final RunBudget DEFAULT = new RunBudget(2, 3, 40, DEFAULT_MAX_LLM_TOKENS, Duration.ofHours(2));
+    public static final RunBudget DEFAULT = new RunBudget(DEFAULT_MAX_FEEDBACK_LOOPS, 3, 40, DEFAULT_MAX_LLM_TOKENS,
+            Duration.ofHours(2));
 
     /**
      * Validates the budget.

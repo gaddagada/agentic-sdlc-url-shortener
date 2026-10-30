@@ -113,7 +113,7 @@ class RunControllerTest {
         assertThat(options.budgetOverride()).isNotNull();
         assertThat(options.budgetOverride().maxAgentCalls()).isEqualTo(25);
         assertThat(options.budgetOverride().maxReplans()).isEqualTo(1);
-        assertThat(options.budgetOverride().maxFeedbackLoops()).isEqualTo(2);
+        assertThat(options.budgetOverride().maxFeedbackLoops()).isEqualTo(3);
         assertThat(options.budgetOverride().maxLlmTokens()).isEqualTo(50_000L);
     }
 

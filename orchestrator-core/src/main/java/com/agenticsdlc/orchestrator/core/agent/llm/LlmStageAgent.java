@@ -32,14 +32,18 @@ import tools.jackson.core.JacksonException;
 /**
  * A stage agent backed by an {@link LlmClient}, generic over the payload record it produces.
  *
- * <p>Builds the system prompt ({@link PromptTemplates#system(AgentRole)}) and the user prompt (requirement,
- * clarification answers, upstream artifacts, codebase index, feedback, previous error, output schema), calls the
- * client for a typed structured output and validates it. Upstream artifacts follow the context policy of
- * {@link PromptTemplates}: full JSON for the stage's direct predecessors and the requirement specification, a
- * compact summary for every other transitive predecessor. Invalid output is an INVALID_OUTPUT failure
+ * <p>Builds the system prompt ({@link PromptTemplates#system(AgentRole)}), the run-stable context
+ * ({@link PromptTemplates#stableContext}: requirement, clarification answers, accepted requirement specification,
+ * codebase index) and the stage-specific user prompt ({@link PromptTemplates#user}: direct predecessors' artifacts,
+ * summaries, source of impacted files, feedback, previous error, output schema), sends them as the three parts of an
+ * {@link LlmRequest} (so providers can cache the stable prefix), calls the client for a typed structured output and
+ * validates it. Upstream artifacts follow the context policy of {@link PromptTemplates}: full JSON for the stage's
+ * direct predecessors and the requirement specification, a compact summary for every other transitive
+ * predecessor. The prompt hash covers all three parts. Invalid output is an INVALID_OUTPUT failure
  * (retryable; the next attempt's prompt includes the validation error), and so is a change set the workspace
- * sandbox rejects (for example CREATE over an existing file); retryable provider errors are TRANSIENT; other
- * provider errors and an unavailable provider are FATAL, which engages the deterministic fallback. Usage, model
+ * sandbox rejects (for example CREATE over an existing file, or a DIFF hunk that does not match the file);
+ * retryable provider errors are TRANSIENT; other provider errors and an unavailable provider are FATAL, which
+ * engages the deterministic fallback. Usage, model
  * and prompt hash are reported for provenance and budgets, also for failed attempts. The requirements role
  * applies the intrinsic clarification gate; approvals an LLM might put into a release change record are
  * discarded (agents never approve anything).</p>
@@ -159,11 +163,12 @@ public final class LlmStageAgent<T extends ArtifactPayload> implements StageAgen
             throw StageFailure.fatal("provider " + client.providerId() + " is not available");
         }
         String system = PromptTemplates.system(role);
+        String stable = PromptTemplates.stableContext(context, codec);
         String user = PromptTemplates.user(context, codec, schema);
-        String promptHash = Hashes.sha256Hex(system + "\n\n" + user);
+        String promptHash = Hashes.sha256Hex(system + "\n\n" + stable + "\n\n" + user);
         LlmResponse<T> response;
         try {
-            response = client.complete(new LlmRequest(system, user, maxOutputTokens, timeout), payloadType);
+            response = client.complete(new LlmRequest(system, stable, user, maxOutputTokens, timeout), payloadType);
         } catch (LlmException e) {
             throw new StageFailure(e.retryable() ? FailureKind.TRANSIENT : FailureKind.FATAL,
                     "provider " + client.providerId() + " error: " + e.getMessage(), e,

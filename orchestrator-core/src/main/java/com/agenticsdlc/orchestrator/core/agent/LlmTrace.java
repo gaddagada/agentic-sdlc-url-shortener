@@ -7,7 +7,7 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  *
  * @param providerId provider id ({@code anthropic}, {@code ollama})
  * @param model model name
- * @param promptHash SHA-256 of system plus user prompt
+ * @param promptHash SHA-256 of the system prompt, the stable context and the user prompt
  * @param inputTokens input tokens
  * @param outputTokens output tokens
  */

@@ -323,6 +323,56 @@ class OrchestrationEngineReviewFixesTest {
     }
 
     @Test
+    void anAttemptThatFinishesWhileTheFirstCommitFailsNeverPersistsTheDiscardedRun() {
+        CountDownLatch intakeDone = new CountDownLatch(1);
+        AtomicInteger commits = new AtomicInteger();
+        RunStore slowFailingFirstCommit = new RunStore() {
+            @Override
+            public void commit(Run run, List<AuditEvent> events, AuditSink auditSink) {
+                if (commits.incrementAndGet() == 1) {
+                    try {
+                        // the intake attempt finishes and waits for the run lock before this commit fails
+                        intakeDone.await(5, TimeUnit.SECONDS);
+                        Thread.sleep(200);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    throw new IllegalStateException("database unavailable");
+                }
+                RunStore.super.commit(run, events, auditSink);
+            }
+
+            @Override
+            public void save(Run run) {
+                harness.store.save(run);
+            }
+
+            @Override
+            public java.util.Optional<Run> load(String id) {
+                return harness.store.load(id);
+            }
+
+            @Override
+            public List<Run> loadAll() {
+                return harness.store.loadAll();
+            }
+        };
+        harness.storeDecorator(s -> slowFailingFirstCommit).agent(new FakeAgent(AgentRole.REQUIREMENTS, (ctx, call) -> {
+            StageResult result = StageResult.success(Payloads.forRole(AgentRole.REQUIREMENTS), "fast intake");
+            intakeDone.countDown();
+            return result;
+        }));
+        OrchestrationEngine engine = harness.start();
+
+        assertThatThrownBy(() -> engine.start(REQUIREMENT, "ghost-race", options(AutonomyLevel.FULL_AUTO)))
+                .hasMessageContaining("database unavailable");
+
+        await().during(Duration.ofMillis(300)).atMost(EngineHarness.TIMEOUT)
+                .until(() -> engine.list().isEmpty() && harness.store.loadAll().isEmpty());
+        assertThat(commits.get()).as("the late attempt result was dropped, not committed").isEqualTo(1);
+    }
+
+    @Test
     void aCommitFailureOnALaterCommandReachesTheCallerAndTheStoreCatchesUpLater() {
         FlakyStore store = new FlakyStore(harness.store);
         harness.storeDecorator(s -> store);

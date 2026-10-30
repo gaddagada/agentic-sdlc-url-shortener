@@ -13,8 +13,10 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  * @param structuralChecks structural checks over the change set, design and test plan
  * @param traceability requirement-to-test traceability
  * @param build optional real build outcome (only when a sandbox build ran)
- * @param passed {@code all checks passed && uncovered empty && (build == null || build.exitCode == 0)}
- * @param feedbackForImplementation imperative feedback for each failed check
+ * @param passed {@code no blocking check failed && uncovered empty && (build == null || build.exitCode == 0)};
+ *               failed advisory checks ({@link Check#blocking()} false) do not make it false
+ * @param feedbackForImplementation imperative feedback for each failed blocking check (advisory findings may be
+ *                                  listed too; they are routed back only together with a blocking failure)
  * @param skeletonOnly whether the verified change set contains SKELETON content, i.e. it is a change plan rather
  *                     than complete code: API checks only confirm that the endpoints are planned, and the release
  *                     can at best be GO_WITH_CONDITIONS; never null after construction (a boxed type so that JSON
@@ -92,7 +94,8 @@ public record VerificationReport(List<Check> structuralChecks, Traceability trac
     }
 
     /**
-     * Computes the {@code passed} flag from its inputs.
+     * Computes the {@code passed} flag from its inputs: no blocking check failed, no requirement is uncovered and the
+     * build (if any) succeeded. Failed advisory checks do not fail a verification.
      *
      * @param checks structural checks
      * @param traceability traceability
@@ -100,8 +103,28 @@ public record VerificationReport(List<Check> structuralChecks, Traceability trac
      * @return whether verification passed
      */
     public static boolean computePassed(List<Check> checks, Traceability traceability, @Nullable BuildOutcome build) {
-        return checks.stream().allMatch(Check::passed) && traceability.uncovered().isEmpty()
+        return checks.stream().noneMatch(Check::failsBlocking) && traceability.uncovered().isEmpty()
                 && (build == null || build.exitCode() == 0);
+    }
+
+    /**
+     * Returns the failed advisory checks as {@code name: details} (empty when none); they are reported but do not
+     * fail the verification.
+     *
+     * @return advisory findings in check order
+     */
+    public List<String> advisoryFindings() {
+        return structuralChecks.stream().filter(c -> !c.passed() && !c.blocking())
+                .map(c -> c.details().isBlank() ? c.name() : c.name() + ": " + c.details()).toList();
+    }
+
+    /**
+     * Returns the names of the failed blocking checks (empty when none).
+     *
+     * @return blocking failures in check order
+     */
+    public List<String> blockingFailures() {
+        return structuralChecks.stream().filter(Check::failsBlocking).map(Check::name).toList();
     }
 
     @Override
@@ -141,9 +164,13 @@ public record VerificationReport(List<Check> structuralChecks, Traceability trac
         if (!notes.isEmpty()) {
             md.heading(3, "Notes").bullets(notes);
         }
-        md.heading(3, "Structural checks").table(List.of("Check", "Result", "Details"),
-                structuralChecks.stream().map(c -> List.of(c.name(), c.passed() ? "pass" : "FAIL", c.details()))
-                        .toList());
+        md.heading(3, "Structural checks").table(List.of("Check", "Severity", "Result", "Details"),
+                structuralChecks.stream().map(c -> List.of(c.name(), c.blocking() ? "blocking" : "advisory",
+                        c.passed() ? "pass" : c.blocking() ? "FAIL" : "advisory finding", c.details())).toList());
+        List<String> advisory = advisoryFindings();
+        if (!advisory.isEmpty()) {
+            md.heading(3, "Advisory findings (do not fail verification)").bullets(advisory);
+        }
         if (traceability != null) {
             md.heading(3, "Traceability").field("Covered", traceability.requirementsCovered() + " / "
                     + traceability.requirementsTotal()).field("Uncovered", Markdown.join(traceability.uncovered()));

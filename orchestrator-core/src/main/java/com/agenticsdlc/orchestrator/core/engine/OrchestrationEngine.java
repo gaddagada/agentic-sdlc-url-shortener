@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -88,7 +89,8 @@ import com.agenticsdlc.orchestrator.core.workspace.WorkspaceSandbox;
  * accepted only when the approval is granted, and a denied artifact is removed from the history. Retryable
  * failures are retried with exponential backoff, exhausted primary agents fall back to the deterministic agent,
  * and unrecoverable failures roll back to the stage's checkpoint (saga compensations in reverse order) and
- * safe-stop the run. A failed verification feeds back to implementation (bounded loop). Humans approve, reject,
+ * safe-stop the run. An engine-wide circuit breaker per LLM provider ({@link EngineConfig.ProviderCircuitBreaker})
+ * routes new attempts to the deterministic agents while a provider keeps failing ({@link #providerCircuits()}). A failed verification feeds back to implementation (bounded loop). Humans approve, reject,
  * clarify, re-plan, stop and resume through the commands below. Budgets bound agent calls, tokens, active time,
  * feedback loops and re-plans.</p>
  *
@@ -142,6 +144,7 @@ public final class OrchestrationEngine implements AutoCloseable {
     private final RunControl control;
     private final ReplanService replanService;
     private final RollbackService rollbackService;
+    private final ProviderCircuits circuits;
     private volatile boolean closed;
 
     /**
@@ -191,6 +194,7 @@ public final class OrchestrationEngine implements AutoCloseable {
             handlers.add(new SandboxCompensationHandler(config.sandboxRoot()));
         }
         this.rollbackService = new RollbackService(handlers, control, metrics);
+        this.circuits = new ProviderCircuits(config.providerCircuitBreaker());
     }
 
     /**
@@ -200,6 +204,20 @@ public final class OrchestrationEngine implements AutoCloseable {
      */
     public WorkflowGraph workflowGraph() {
         return graph;
+    }
+
+    /**
+     * Returns the circuit breaker state of every registered LLM provider (and of any other provider with recorded
+     * failures): state (CLOSED, OPEN, HALF_OPEN), consecutive provider-attributable failures, when the circuit
+     * opened and when it lets the next attempt try the provider again. The circuits are engine-wide (shared by all
+     * runs) and live in memory only; a restart closes them.
+     *
+     * @return provider id to circuit state, sorted by provider id (an unmodifiable snapshot)
+     */
+    public Map<String, ProviderCircuit> providerCircuits() {
+        Set<String> ids = new TreeSet<>(agents.providerIds());
+        ids.remove(AgentRegistry.DETERMINISTIC);
+        return circuits.snapshot(ids, now());
     }
 
     // =========================================================================================== commands
@@ -251,7 +269,7 @@ public final class OrchestrationEngine implements AutoCloseable {
         }
         String scenario = scenarioKey == null || scenarioKey.isBlank() ? "custom" : scenarioKey;
         Run run = Run.create(Ids.newId(), graph, scenario, requirement.strip(), options, now());
-        registry.register(run);
+        registry.register(run).committed = false;
         LOG.info("run created runId={} scenario={} autonomy={} provider={} workspace={}", run.id(), scenario,
                 options.autonomy(), providerLabel(options.providerId()), options.workspace());
         LOG.debug("run requirement runId={} requirement={}", run.id(), run.requirement());
@@ -752,11 +770,23 @@ public final class OrchestrationEngine implements AutoCloseable {
         Run copy;
         holder.lock.lock();
         try {
+            if (holder.discarded) {
+                // the creation of this run could not be committed; it is unregistered and must stay unpersisted
+                throw new RunNotFoundException(runId);
+            }
             RunMutation tx = new RunMutation(holder, now());
             body.accept(tx);
             pump(tx);
             tx.run.touch(tx.now);
-            runStore.commit(tx.run, tx.events(), auditSink);
+            try {
+                runStore.commit(tx.run, tx.events(), auditSink);
+            } catch (RuntimeException e) {
+                if (!holder.committed) {
+                    holder.discarded = true;
+                }
+                throw e;
+            }
+            holder.committed = true;
             copy = tx.run.copy();
         } finally {
             holder.lock.unlock();
@@ -882,6 +912,7 @@ public final class OrchestrationEngine implements AutoCloseable {
         }
         StageAgent agent;
         String agentSelection = "provider agent";
+        String circuitProvider = null;
         if (AgentRegistry.FALLBACK_AGENT_ID.equals(exec.activeAgent())) {
             agent = agents.deterministic(def.role());
             agentSelection = "deterministic fallback after the primary agent was exhausted";
@@ -894,11 +925,30 @@ public final class OrchestrationEngine implements AutoCloseable {
             agentSelection = "structural verification: the change set under review is a skeleton plan";
         } else {
             agent = agents.agentFor(def.role(), run.options().providerId());
-            exec.setActiveAgent(agent.id());
-            FaultSpec fault = run.options().faultFor(def.id()).orElse(null);
-            if (fault != null && run.injectedFaults(def.id()) < fault.failTimes()) {
-                int injection = run.recordFaultInjection(def.id());
-                agent = new FaultInjectingStageAgent(agent, fault.kind(), injection, fault.failTimes());
+            String providerId = run.options().providerId();
+            boolean providerAgent = providerId != null && !AgentRegistry.DETERMINISTIC.equals(agent.id())
+                    && !AgentRegistry.FALLBACK_AGENT_ID.equals(agent.id());
+            ProviderCircuits.Decision decision = providerAgent ? circuits.admit(providerId, tx.now)
+                    : ProviderCircuits.Decision.CALL_PROVIDER;
+            if (decision == ProviderCircuits.Decision.FALLBACK) {
+                engageCircuitFallback(tx, def, exec, agent.id(), providerId);
+                agent = agents.deterministic(def.role());
+                agentSelection = "deterministic fallback: the circuit of provider " + providerId + " is open";
+            } else {
+                exec.setActiveAgent(agent.id());
+                if (decision == ProviderCircuits.Decision.TRIAL) {
+                    agentSelection = "provider agent (half-open circuit trial)";
+                }
+                FaultSpec fault = run.options().faultFor(def.id()).orElse(null);
+                if (fault != null && run.injectedFaults(def.id()) < fault.failTimes()) {
+                    int injection = run.recordFaultInjection(def.id());
+                    agent = new FaultInjectingStageAgent(agent, fault.kind(), injection, fault.failTimes());
+                    if (providerAgent) {
+                        circuits.recordInconclusive(providerId); // injected faults say nothing about the provider
+                    }
+                } else if (providerAgent) {
+                    circuitProvider = providerId;
+                }
             }
         }
         String agentId = Objects.requireNonNull(exec.activeAgent());
@@ -920,9 +970,10 @@ public final class OrchestrationEngine implements AutoCloseable {
         String runId = run.id();
         String stageId = def.id();
         StageAgent chosen = agent;
+        String breaker = circuitProvider;
         try {
             var future = executor.submit(() -> runAttempt(runId, stageId, token, chosen, agentId, context,
-                    timeout));
+                    timeout, breaker));
             tx.holder.inFlight.put(stageId, new RunRegistry.InFlight(token, future));
         } catch (RejectedExecutionException e) {
             throw new IllegalStateException("engine is shutting down", e);
@@ -942,13 +993,20 @@ public final class OrchestrationEngine implements AutoCloseable {
     }
 
     private void runAttempt(String runId, String stageId, long token, StageAgent agent, String agentId,
-                            StageContext context, Duration timeout) {
+                            StageContext context, Duration timeout, @Nullable String circuitProvider) {
         StageExecutor.AttemptOutcome outcome = stageExecutor.execute(agent, context, timeout);
+        if (circuitProvider != null) {
+            // recorded before the result is applied, so that a retry scheduled by it already sees the new state
+            recordCircuitOutcome(circuitProvider, runId, stageId, outcome);
+        }
         if (outcome == null || closed || Thread.currentThread().isInterrupted()) {
             return;
         }
         try {
             mutate(runId, tx -> onAttemptFinished(tx, stageId, token, agentId, outcome));
+        } catch (RunNotFoundException e) {
+            LOG.debug("attempt result discarded: the run is no longer registered runId={} stageId={}", runId,
+                    stageId);
         } catch (RuntimeException e) {
             if (closed) {
                 LOG.debug("attempt result discarded after close runId={} stageId={}", runId, stageId);
@@ -957,6 +1015,65 @@ public final class OrchestrationEngine implements AutoCloseable {
             LOG.error("applying attempt result failed runId={} stageId={}", runId, stageId, e);
             failAfterInternalError(runId, stageId, token, e);
         }
+    }
+
+    /**
+     * Feeds the outcome of a provider attempt into the provider's circuit: a success (or clarification request)
+     * closes it, a TRANSIENT, TIMEOUT or INVALID_OUTPUT failure counts, anything else (FATAL, cancelled) is
+     * inconclusive.
+     */
+    private void recordCircuitOutcome(String providerId, String runId, String stageId,
+                                      StageExecutor.@Nullable AttemptOutcome outcome) {
+        try {
+            if (outcome == null) {
+                circuits.recordInconclusive(providerId);
+                return;
+            }
+            ProviderCircuits.Transition transition = switch (outcome.result()) {
+                case StageResult.Success s -> circuits.recordSuccess(providerId);
+                case StageResult.NeedsClarification c -> circuits.recordSuccess(providerId);
+                case StageResult.Failure f when ProviderCircuits.counts(f.failure().kind()) ->
+                        circuits.recordFailure(providerId, f.failure().describe(), now());
+                case StageResult.Failure f -> {
+                    circuits.recordInconclusive(providerId);
+                    yield ProviderCircuits.Transition.NONE;
+                }
+            };
+            switch (transition) {
+                case OPENED, REOPENED -> LOG.warn("provider circuit {} provider={} runId={} stageId={} "
+                                + "failures={} cooldown={}", transition == ProviderCircuits.Transition.OPENED
+                                ? "opened" : "re-opened", providerId, runId, stageId,
+                        circuits.circuit(providerId, now()).consecutiveFailures(),
+                        config.providerCircuitBreaker().cooldown());
+                case CLOSED -> LOG.info("provider circuit closed provider={} runId={} stageId={}", providerId, runId,
+                        stageId);
+                case NONE -> {
+                }
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("provider circuit update failed provider={} error={}", providerId, e.toString());
+        }
+    }
+
+    /**
+     * Routes an attempt to the deterministic agent because the provider's circuit is open: the stage continues with
+     * the deterministic fallback (fresh attempt count), audited as FALLBACK_ENGAGED with reason {@code circuit open}.
+     */
+    private void engageCircuitFallback(RunMutation tx, StageDefinition def, StageExecution exec, String from,
+                                       String providerId) {
+        ProviderCircuit circuit = circuits.circuit(providerId, tx.now);
+        exec.setActiveAgent(AgentRegistry.FALLBACK_AGENT_ID);
+        exec.setAttempts(0);
+        tx.run.updateCounters(RunCounters::plusFallback);
+        safeMetric(() -> metrics.fallback(def.id()));
+        tx.audit(AuditEventType.FALLBACK_ENGAGED, def.id(), Actor.system(), "circuit of provider " + providerId
+                        + " is open (" + circuit.consecutiveFailures() + " consecutive provider failures); "
+                        + "deterministic fallback engaged without calling " + from,
+                RunMutation.data("from", from, "to", AgentRegistry.FALLBACK_AGENT_ID, "reason", "circuit open",
+                        "providerId", providerId, "consecutiveFailures", circuit.consecutiveFailures(), "openedAt",
+                        circuit.openedAt(), "retryAt", circuit.retryAt(), "lastFailure", circuit.lastFailure()));
+        LOG.info("circuit open: deterministic fallback runId={} stageId={} provider={}", tx.run.id(), def.id(),
+                providerId);
     }
 
     private void failAfterInternalError(String runId, String stageId, long token, RuntimeException error) {

@@ -123,7 +123,7 @@ public final class OllamaLlmClient implements ProviderClient {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("model", settings.model());
         body.put("messages", List.of(Map.of("role", "system", "content", request.system()),
-                Map.of("role", "user", "content", request.user())));
+                Map.of("role", "user", "content", request.userWithContext())));
         body.put("stream", false);
         body.put("format", JsonSchemas.forRecord(outputType));
         body.put("options", Map.of("temperature", 0, "num_ctx", settings.numCtx(),

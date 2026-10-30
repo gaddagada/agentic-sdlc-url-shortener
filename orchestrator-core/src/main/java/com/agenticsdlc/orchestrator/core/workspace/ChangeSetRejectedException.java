@@ -5,8 +5,9 @@ import java.util.List;
 
 /**
  * Thrown when a change set cannot be applied to a sandbox because it violates the workspace rules (a CREATE of a
- * file that already exists, a path outside the allowed roots or outside the sandbox). Nothing is written when it is
- * thrown. The message lists every problem, so it can be fed back to the implementation agent.
+ * file that already exists, a path outside the allowed roots or outside the sandbox) or because a DIFF does not apply
+ * to the current file (the problem names the hunk, the expected line and the nearest mismatch). Nothing is written
+ * when it is thrown. The message lists every problem, so it can be fed back to the implementation agent.
  */
 public final class ChangeSetRejectedException extends IllegalArgumentException {
 

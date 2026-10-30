@@ -153,6 +153,123 @@ class WorkspaceSandboxTest {
         assertThat(workspace.resolve(existing)).content().contains("public class LinkController");
     }
 
+    private static final String LINK_SERVICE = "url-shortener/src/main/java/com/agenticsdlc/shortener/service/"
+            + "LinkService.java";
+
+    /** Adds a field after line 13 of the synthetic LinkService (lines 10 to 14 as context). */
+    private static String linkServiceDiff(String thirdContextLine) {
+        return "--- a/" + LINK_SERVICE + "\n"
+                + "+++ b/" + LINK_SERVICE + "\n"
+                + "@@ -10,5 +10,6 @@\n"
+                + " public class LinkService {\n"
+                + "     private final LinkRepository linkRepository;\n"
+                + thirdContextLine + "\n"
+                + "     private final ShortCodeGenerator shortCodeGenerator;\n"
+                + "+    private final java.time.Clock clock = java.time.Clock.systemUTC();\n"
+                + " \n";
+    }
+
+    @Test
+    void appliesDiffsOverwritesFullContentKeepsSkeletonSidecarsCreatesAndDeletes(@TempDir Path dir) throws Exception {
+        Path workspace = SyntheticWorkspace.create(dir.resolve("ws"));
+        WorkspaceSandbox sandbox = WorkspaceSandbox.create(workspace, dir.resolve("sandboxes"), "r1");
+        String controller = "url-shortener/src/main/java/com/agenticsdlc/shortener/api/LinkController.java";
+        String redirect = "url-shortener/src/main/java/com/agenticsdlc/shortener/api/RedirectController.java";
+        String created = "url-shortener/src/main/java/com/agenticsdlc/shortener/api/BulkLinkController.java";
+        String newDoc = "docs/bulk.md";
+        ChangeSet changes = new ChangeSet("HEAD", List.of(
+                new FileChange(LINK_SERVICE, Operation.MODIFY, "java", "clock", ContentKind.DIFF,
+                        linkServiceDiff("     private final UrlValidator urlValidator;"), List.of()),
+                new FileChange(controller, Operation.MODIFY, "java", "rewrite", ContentKind.FULL,
+                        "class LinkController {}\n", List.of()),
+                new FileChange(redirect, Operation.MODIFY, "java", "sketch", ContentKind.SKELETON, "// sketch",
+                        List.of()),
+                new FileChange(created, Operation.CREATE, "java", "new", ContentKind.FULL, "class Bulk {}\n",
+                        List.of()),
+                new FileChange(newDoc, Operation.CREATE, "markdown", "new doc", ContentKind.DIFF,
+                        "--- /dev/null\n+++ b/docs/bulk.md\n@@ -0,0 +1,2 @@\n+# Bulk\n+Create many links.\n",
+                        List.of()),
+                new FileChange("url-shortener/src/main/resources/application.yml", Operation.DELETE, "yaml", "rm",
+                        ContentKind.NONE, "", List.of())), "./mvnw verify", List.of(), "revert", List.of());
+
+        List<String> applied = sandbox.apply(changes);
+
+        assertThat(applied).containsExactly(LINK_SERVICE, controller, redirect + ".skeleton", created, newDoc,
+                "url-shortener/src/main/resources/application.yml");
+        String patched = Files.readString(sandbox.path().resolve(LINK_SERVICE));
+        assertThat(patched).contains("    private final ShortCodeGenerator shortCodeGenerator;\n"
+                + "    private final java.time.Clock clock = java.time.Clock.systemUTC();\n\n"
+                + "    public LinkService(");
+        assertThat(patched.lines().count()).isEqualTo(Files.readString(workspace.resolve(LINK_SERVICE)).lines()
+                .count() + 1);
+        assertThat(sandbox.path().resolve(LINK_SERVICE + ".diff")).as("no sidecar any more").doesNotExist();
+        assertThat(sandbox.path().resolve(controller)).hasContent("class LinkController {}");
+        assertThat(sandbox.path().resolve(redirect)).content().contains("public class RedirectController");
+        assertThat(sandbox.path().resolve(redirect + ".skeleton")).hasContent("// sketch");
+        assertThat(sandbox.path().resolve(created)).hasContent("class Bulk {}");
+        assertThat(sandbox.path().resolve(newDoc)).hasContent("# Bulk\nCreate many links.");
+        assertThat(sandbox.path().resolve("url-shortener/src/main/resources/application.yml")).doesNotExist();
+        assertThat(Files.readString(workspace.resolve(LINK_SERVICE))).as("the workspace is never touched")
+                .doesNotContain("clock");
+    }
+
+    @Test
+    void aDiffThatDoesNotApplyRejectsTheChangeSetWithHunkDiagnosticsAndWritesNothing(@TempDir Path dir)
+            throws Exception {
+        Path workspace = SyntheticWorkspace.create(dir.resolve("ws"));
+        WorkspaceSandbox sandbox = WorkspaceSandbox.create(workspace, dir.resolve("sandboxes"), "r1");
+        String created = "url-shortener/src/main/java/com/agenticsdlc/shortener/api/BulkLinkController.java";
+        String missing = "url-shortener/src/main/java/com/agenticsdlc/shortener/service/Missing.java";
+        ChangeSet changes = new ChangeSet("HEAD", List.of(
+                new FileChange(created, Operation.CREATE, "java", "new", ContentKind.FULL, "class Bulk {}", List.of()),
+                new FileChange(LINK_SERVICE, Operation.MODIFY, "java", "clock", ContentKind.DIFF,
+                        linkServiceDiff("     private final LinkLookup lookup;"), List.of()),
+                new FileChange(missing, Operation.MODIFY, "java", "edit", ContentKind.DIFF,
+                        "@@ -1,1 +1,1 @@\n-a\n+b\n", List.of()),
+                new FileChange("docs/notes.md", Operation.MODIFY, "markdown", "edit", ContentKind.DIFF,
+                        "just prose, no hunk", List.of())), "./mvnw verify", List.of(), "revert", List.of());
+
+        assertThatThrownBy(() -> sandbox.apply(changes)).isInstanceOfSatisfying(ChangeSetRejectedException.class,
+                e -> {
+                    assertThat(e.problems()).hasSize(3);
+                    assertThat(e.problems().get(0)).startsWith("hunk 1/1 of " + LINK_SERVICE + " (@@ -10,5 +10,6 @@): "
+                                    + "context line 'private final LinkLookup lookup;' (hunk line 3) not found in the "
+                                    + "file; nearest match at line 12 differs: 'private final UrlValidator "
+                                    + "urlValidator;'");
+                    assertThat(e.problems().get(1)).startsWith("MODIFY of missing file " + missing)
+                            .contains("use CREATE with contentKind FULL");
+                    assertThat(e.problems().get(2)).startsWith("DIFF of docs/notes.md cannot be parsed")
+                            .contains("no hunk");
+                    assertThat(e.getMessage()).startsWith("change set rejected: hunk 1/1 of " + LINK_SERVICE);
+                });
+        assertThat(sandbox.path().resolve(created)).as("all or nothing").doesNotExist();
+        assertThat(Files.readString(sandbox.path().resolve(LINK_SERVICE)))
+                .isEqualTo(Files.readString(workspace.resolve(LINK_SERVICE)));
+    }
+
+    @Test
+    void theMaterializerFeedsHunkDiagnosticsBackAsInvalidOutput(@TempDir Path dir) {
+        Path workspace = SyntheticWorkspace.create(dir.resolve("ws"));
+        Path sandboxRoot = dir.resolve("sandboxes");
+        ChangeSet wrong = new ChangeSet("HEAD", List.of(new FileChange(LINK_SERVICE, Operation.MODIFY, "java",
+                "clock", ContentKind.DIFF, linkServiceDiff("     private final LinkLookup lookup;"), List.of())),
+                "./mvnw verify", List.of(), "revert", List.of());
+        StageContext base = Contexts.of(AgentRole.IMPLEMENTATION, "x");
+        StageContext context = new StageContext(base.runId(), base.stageId(), base.role(), base.requirement(),
+                base.originalRequirement(), Map.of(), List.of(), base.upstream(), List.of(), 1, 1, null, null,
+                RunOptions.defaults().withWorkspace(WorkspaceMode.REPO), List.of(),
+                new AgentSettings(0.5, true, false, workspace, sandboxRoot, Duration.ofMinutes(1)));
+
+        assertThatThrownBy(() -> SandboxMaterializer.materialize(wrong, context))
+                .isInstanceOfSatisfying(StageFailure.class, f -> {
+                    assertThat(f.kind()).isEqualTo(FailureKind.INVALID_OUTPUT);
+                    assertThat(f.getMessage()).startsWith("the workspace sandbox rejected the change set: hunk 1/1 of "
+                            + LINK_SERVICE).contains("'private final LinkLookup lookup;'")
+                            .contains("nearest match at line 12");
+                });
+        assertThat(WorkspaceSandbox.pathFor(sandboxRoot, "run-1")).doesNotExist();
+    }
+
     @Test
     void refusesPathsOutsideTheSandbox(@TempDir Path dir) throws Exception {
         Path workspace = Files.createDirectories(dir.resolve("ws"));

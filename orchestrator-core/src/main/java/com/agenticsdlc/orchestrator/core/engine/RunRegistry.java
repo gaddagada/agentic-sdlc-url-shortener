@@ -30,6 +30,13 @@ final class RunRegistry {
         final Run run;
         final Map<String, InFlight> inFlight = new HashMap<>();
         private long tokenSequence;
+        /** False for a new run until its first commit succeeded (runs loaded from the store are committed). */
+        volatile boolean committed = true;
+        /**
+         * Set when the first commit of a new run failed: the run is being unregistered, so a mutation that obtained
+         * the holder before (for example the completion of an attempt that finished meanwhile) must not commit it.
+         */
+        volatile boolean discarded;
 
         RunHolder(Run run) {
             this.run = run;

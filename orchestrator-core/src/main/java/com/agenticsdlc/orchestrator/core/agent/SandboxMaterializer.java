@@ -29,8 +29,8 @@ public final class SandboxMaterializer {
      * @param context the stage context
      * @return the compensation to register, or empty when sandboxes are disabled for this run
      * @throws StageFailure INVALID_OUTPUT when the sandbox rejects the change set (for example a CREATE of an
-     *                      existing file or a path outside the allowed roots; the message is fed back to the
-     *                      agent), TRANSIENT when the sandbox cannot be written
+     *                      existing file, a path outside the allowed roots or a DIFF hunk that does not match the
+     *                      file; the message is fed back to the agent), TRANSIENT when the sandbox cannot be written
      */
     public static Optional<CompensationRequest> materialize(ChangeSet changeSet, StageContext context)
             throws StageFailure {

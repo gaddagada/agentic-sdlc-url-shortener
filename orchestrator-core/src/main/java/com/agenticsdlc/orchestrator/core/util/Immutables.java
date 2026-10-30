@@ -5,7 +5,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedMap;
 import java.util.SortedSet;
+import java.util.TreeMap;
 import java.util.TreeSet;
 
 import org.jspecify.annotations.Nullable;
@@ -54,6 +56,17 @@ public final class Immutables {
      */
     public static SortedSet<String> sortedSet(@Nullable Set<String> set) {
         return Collections.unmodifiableSortedSet(set == null ? new TreeSet<>() : new TreeSet<>(set));
+    }
+
+    /**
+     * Returns an immutable copy of {@code map} sorted by key, or an empty sorted map when it is null.
+     *
+     * @param map the map or null
+     * @param <V> value type
+     * @return immutable sorted copy
+     */
+    public static <V> SortedMap<String, V> sortedMap(@Nullable Map<String, V> map) {
+        return Collections.unmodifiableSortedMap(map == null ? new TreeMap<>() : new TreeMap<>(map));
     }
 
     /**

@@ -160,7 +160,7 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
                 .model(settings.model())
                 .maxTokens(Math.min(request.maxOutputTokens(), settings.maxOutputTokens()))
                 .system(request.system())
-                .addUserMessage(schema.hasMaps() ? request.user() + MAP_NOTE : request.user())
+                .addUserMessage(schema.hasMaps() ? request.userWithContext() + MAP_NOTE : request.userWithContext())
                 .outputConfig(OutputConfig.builder().format(outputFormat(schema)).build())
                 .build();
         long started = System.nanoTime();

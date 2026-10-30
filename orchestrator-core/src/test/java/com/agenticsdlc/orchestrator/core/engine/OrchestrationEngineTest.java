@@ -507,6 +507,29 @@ class OrchestrationEngineTest {
     }
 
     @Test
+    void advisoryFindingsAreReportedWithoutStartingAFeedbackLoop() {
+        FakeAgent implement = FakeAgent.succeeding(AgentRole.IMPLEMENTATION);
+        com.agenticsdlc.orchestrator.core.artifact.VerificationReport advisory =
+                new com.agenticsdlc.orchestrator.core.artifact.VerificationReport(List.of(
+                        com.agenticsdlc.orchestrator.core.artifact.Check.pass("tests-are-not-vacuous", "ok"),
+                        com.agenticsdlc.orchestrator.core.artifact.Check.advisory("test-placement", false,
+                                "the performance test runs in the default build")),
+                        new com.agenticsdlc.orchestrator.core.artifact.VerificationReport.Traceability(1, 1, List.of()),
+                        null, true, List.of("Advisory: move the performance test to a profile"));
+        harness.agent(implement).agent(new FakeAgent(AgentRole.VERIFICATION, (ctx, call) ->
+                StageResult.success(advisory, "passed with one advisory finding")));
+        OrchestrationEngine engine = harness.start();
+        String id = engine.start(REQUIREMENT, "advisory", options(AutonomyLevel.FULL_AUTO)).id();
+
+        Run atRelease = harness.awaitApproval(id, RELEASE);
+        assertThat(atRelease.counters().feedbackLoops()).isZero();
+        assertThat(implement.calls()).isEqualTo(1);
+        assertThat(atRelease.acceptedArtifact(VERIFY).orElseThrow().payload()).isEqualTo(advisory);
+        assertThat(harness.eventTypes(id)).doesNotContain(AuditEventType.FEEDBACK_LOOP);
+        completeRelease(engine, id);
+    }
+
+    @Test
     void verificationThatKeepsFailingExhaustsTheFeedbackBudgetAndSafeStops() {
         FakeAgent implement = FakeAgent.succeeding(AgentRole.IMPLEMENTATION);
         harness.agent(implement).agent(new FakeAgent(AgentRole.VERIFICATION, (ctx, call) ->
@@ -517,9 +540,9 @@ class OrchestrationEngineTest {
         Run stopped = harness.awaitStatus(id, RunStatus.SAFE_STOPPED);
         assertThat(stopped.haltReason()).isEqualTo(HaltReason.AGENT_FAILURE_EXHAUSTED);
         assertThat(stopped.stage(VERIFY).status()).isEqualTo(StageStatus.FAILED);
-        assertThat(stopped.stage(VERIFY).lastError()).isEqualTo("verification kept failing after 2 feedback loops");
-        assertThat(stopped.counters().feedbackLoops()).isEqualTo(3);
-        assertThat(implement.calls()).isEqualTo(3);
+        assertThat(stopped.stage(VERIFY).lastError()).isEqualTo("verification kept failing after 3 feedback loops");
+        assertThat(stopped.counters().feedbackLoops()).isEqualTo(4);
+        assertThat(implement.calls()).as("the first implementation plus three re-implementations").isEqualTo(4);
         assertThat(stopped.counters().rollbacks()).isEqualTo(1);
     }
 

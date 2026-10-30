@@ -127,6 +127,24 @@ class VerificationAgentTest {
     }
 
     @Test
+    void everyDeterministicCheckIsBlocking() {
+        VerificationReport plan = agent.verify(changeSet, design, testPlan, spec, null);
+        assertThat(plan.structuralChecks()).allSatisfy(c -> assertThat(c.blocking()).as(c.name()).isTrue());
+        assertThat(check(plan, "tests-are-not-vacuous").blocking()).isTrue();
+        assertThat(check(plan, "api-changes-planned").blocking()).isTrue();
+        assertThat(plan.advisoryFindings()).isEmpty();
+
+        List<FileChange> changes = List.of(controller(ContentKind.FULL, "class LinkController {}"),
+                controllerTest("class LinkControllerTest { void t() { } }"));
+        VerificationReport failing = agent.verify(with(changes), designWith("POST", "/api/v1/links/bulk"), testPlan,
+                spec, null);
+        assertThat(failing.passed()).isFalse();
+        assertThat(failing.blockingFailures()).contains("tests-are-not-vacuous", "api-changes-implemented");
+        assertThat(failing.structuralChecks()).allSatisfy(c -> assertThat(c.blocking()).as(c.name()).isTrue());
+        assertThat(failing.markdown()).contains("blocking").doesNotContain("Advisory findings");
+    }
+
+    @Test
     void onlyTheWorkloadRootsAreAllowed() {
         assertThat(VerificationAgent.ALLOWED_ROOTS).containsExactly("url-shortener/", "docs/");
         List<FileChange> changes = new ArrayList<>(changeSet.changes());

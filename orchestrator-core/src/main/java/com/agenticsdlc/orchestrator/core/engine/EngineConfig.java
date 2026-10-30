@@ -41,6 +41,14 @@ import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
  *                        the deterministic agent or the deterministic fallback), so that long streamed outputs
  *                        (for example 32k tokens) are cut off by the provider limits rather than by the stage
  *                        timeout (default {@value #DEFAULT_LLM_TIMEOUT_SCALE}; at least 1.0)
+ * @param sourceContextPerFileChars maximum characters of the source of one impacted file in a stage context
+ *                                  (default {@value #DEFAULT_SOURCE_CONTEXT_PER_FILE_CHARS}); see
+ *                                  {@link com.agenticsdlc.orchestrator.core.agent.StageContext#impactedSources()}
+ * @param sourceContextTotalChars maximum characters of all impacted sources of one stage context (default
+ *                                {@value #DEFAULT_SOURCE_CONTEXT_TOTAL_CHARS})
+ * @param providerCircuitBreaker engine-wide circuit breaker per LLM provider (default
+ *                               {@link ProviderCircuitBreaker#DEFAULTS}: open after 3 consecutive failures, 10 min
+ *                               cooldown)
  */
 public record EngineConfig(
         double ambiguityThreshold,
@@ -58,10 +66,62 @@ public record EngineConfig(
         @Nullable ExecutorService stageExecutor,
         @Nullable ScheduledExecutorService retryScheduler,
         String buildCommand,
-        double llmTimeoutScale) {
+        double llmTimeoutScale,
+        int sourceContextPerFileChars,
+        int sourceContextTotalChars,
+        ProviderCircuitBreaker providerCircuitBreaker) {
 
     /** Default {@link #llmTimeoutScale()}. */
     public static final double DEFAULT_LLM_TIMEOUT_SCALE = 3.0;
+
+    /** Default {@link #sourceContextPerFileChars()}. */
+    public static final int DEFAULT_SOURCE_CONTEXT_PER_FILE_CHARS = 20_000;
+
+    /** Default {@link #sourceContextTotalChars()}. */
+    public static final int DEFAULT_SOURCE_CONTEXT_TOTAL_CHARS = 120_000;
+
+    /**
+     * Settings of the engine-wide circuit breaker per LLM provider. Provider-attributable failures are TRANSIENT,
+     * TIMEOUT and INVALID_OUTPUT failures of attempts that called an agent of the provider (injected faults and the
+     * deterministic agents never count). After {@code failureThreshold} consecutive such failures (across stages
+     * and runs) the circuit opens: new attempts for that provider run the deterministic agent of their stage
+     * instead (audited as FALLBACK_ENGAGED with reason {@code circuit open}). After {@code cooldown} the next
+     * attempt tries the provider again (half-open); a success closes the circuit, another failure re-opens it.
+     *
+     * @param failureThreshold consecutive provider-attributable failures that open the circuit (default 3; 0
+     *                         disables the breaker)
+     * @param cooldown how long an open circuit routes attempts to the deterministic agents (default 10 min)
+     */
+    public record ProviderCircuitBreaker(int failureThreshold, Duration cooldown) {
+
+        /** Default settings: 3 consecutive failures, 10 minute cooldown. */
+        public static final ProviderCircuitBreaker DEFAULTS = new ProviderCircuitBreaker(3, Duration.ofMinutes(10));
+
+        /** Settings that never open a circuit. */
+        public static final ProviderCircuitBreaker DISABLED = new ProviderCircuitBreaker(0, Duration.ofMinutes(10));
+
+        /**
+         * Validates the settings.
+         */
+        public ProviderCircuitBreaker {
+            Objects.requireNonNull(cooldown, "cooldown");
+            if (failureThreshold < 0) {
+                throw new IllegalArgumentException("failureThreshold must not be negative");
+            }
+            if (cooldown.isNegative() || cooldown.isZero()) {
+                throw new IllegalArgumentException("cooldown must be positive");
+            }
+        }
+
+        /**
+         * Returns whether the breaker can open at all.
+         *
+         * @return false when {@code failureThreshold} is 0
+         */
+        public boolean enabled() {
+            return failureThreshold > 0;
+        }
+    }
 
     /**
      * Validates the configuration.
@@ -86,6 +146,43 @@ public record EngineConfig(
         if (!(llmTimeoutScale >= 1.0) || Double.isInfinite(llmTimeoutScale)) {
             throw new IllegalArgumentException("llmTimeoutScale must be a finite value of at least 1.0");
         }
+        Objects.requireNonNull(providerCircuitBreaker, "providerCircuitBreaker");
+        if (sourceContextPerFileChars < 1 || sourceContextTotalChars < 1) {
+            throw new IllegalArgumentException("source context limits must be positive");
+        }
+    }
+
+    /**
+     * Creates a configuration with the default source context limits and provider circuit breaker (the canonical
+     * constructor before they existed).
+     *
+     * @param ambiguityThreshold ambiguity threshold
+     * @param backoffScale backoff scale
+     * @param maxBackoff backoff cap
+     * @param sandboxEnabled whether sandboxes are enabled
+     * @param verifyBuildEnabled whether sandbox builds are enabled
+     * @param sandboxRoot sandbox root
+     * @param workspaceRoot workspace root, or null
+     * @param buildTimeout build timeout
+     * @param clock clock
+     * @param workspaceIndex codebase index supplier
+     * @param compensationHandlers compensation handlers
+     * @param listener listener, or null
+     * @param stageExecutor stage executor, or null
+     * @param retryScheduler retry scheduler, or null
+     * @param buildCommand sandbox build command
+     * @param llmTimeoutScale LLM timeout scale
+     */
+    public EngineConfig(double ambiguityThreshold, double backoffScale, Duration maxBackoff, boolean sandboxEnabled,
+                        boolean verifyBuildEnabled, Path sandboxRoot, @Nullable Path workspaceRoot,
+                        Duration buildTimeout, Clock clock, Supplier<@Nullable CodebaseIndex> workspaceIndex,
+                        List<CompensationHandler> compensationHandlers, @Nullable EngineListener listener,
+                        @Nullable ExecutorService stageExecutor, @Nullable ScheduledExecutorService retryScheduler,
+                        String buildCommand, double llmTimeoutScale) {
+        this(ambiguityThreshold, backoffScale, maxBackoff, sandboxEnabled, verifyBuildEnabled, sandboxRoot,
+                workspaceRoot, buildTimeout, clock, workspaceIndex, compensationHandlers, listener, stageExecutor,
+                retryScheduler, buildCommand, llmTimeoutScale, DEFAULT_SOURCE_CONTEXT_PER_FILE_CHARS,
+                DEFAULT_SOURCE_CONTEXT_TOTAL_CHARS, ProviderCircuitBreaker.DEFAULTS);
     }
 
     /**
@@ -176,6 +273,9 @@ public record EngineConfig(
         b.retryScheduler = retryScheduler;
         b.buildCommand = buildCommand;
         b.llmTimeoutScale = llmTimeoutScale;
+        b.sourceContextPerFileChars = sourceContextPerFileChars;
+        b.sourceContextTotalChars = sourceContextTotalChars;
+        b.providerCircuitBreaker = providerCircuitBreaker;
         return b;
     }
 
@@ -209,8 +309,44 @@ public record EngineConfig(
         private @Nullable ScheduledExecutorService retryScheduler;
         private String buildCommand = AgentSettings.DEFAULT_BUILD_COMMAND;
         private double llmTimeoutScale = DEFAULT_LLM_TIMEOUT_SCALE;
+        private int sourceContextPerFileChars = DEFAULT_SOURCE_CONTEXT_PER_FILE_CHARS;
+        private int sourceContextTotalChars = DEFAULT_SOURCE_CONTEXT_TOTAL_CHARS;
+        private ProviderCircuitBreaker providerCircuitBreaker = ProviderCircuitBreaker.DEFAULTS;
 
         private Builder() {
+        }
+
+        /**
+         * Sets the maximum characters of the source of one impacted file in a stage context.
+         *
+         * @param value characters (at least 1)
+         * @return this builder
+         */
+        public Builder sourceContextPerFileChars(int value) {
+            this.sourceContextPerFileChars = value;
+            return this;
+        }
+
+        /**
+         * Sets the maximum characters of all impacted sources of one stage context.
+         *
+         * @param value characters (at least 1)
+         * @return this builder
+         */
+        public Builder sourceContextTotalChars(int value) {
+            this.sourceContextTotalChars = value;
+            return this;
+        }
+
+        /**
+         * Sets the provider circuit breaker.
+         *
+         * @param value settings ({@link ProviderCircuitBreaker#DISABLED} never opens a circuit)
+         * @return this builder
+         */
+        public Builder providerCircuitBreaker(ProviderCircuitBreaker value) {
+            this.providerCircuitBreaker = value;
+            return this;
         }
 
         /**
@@ -397,7 +533,8 @@ public record EngineConfig(
         public EngineConfig build() {
             return new EngineConfig(ambiguityThreshold, backoffScale, maxBackoff, sandboxEnabled, verifyBuildEnabled,
                     sandboxRoot, workspaceRoot, buildTimeout, clock, workspaceIndex, compensationHandlers, listener,
-                    stageExecutor, retryScheduler, buildCommand, llmTimeoutScale);
+                    stageExecutor, retryScheduler, buildCommand, llmTimeoutScale, sourceContextPerFileChars,
+                    sourceContextTotalChars, providerCircuitBreaker);
         }
     }
 }

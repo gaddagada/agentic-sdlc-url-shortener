@@ -60,6 +60,11 @@ import com.agenticsdlc.orchestrator.core.workspace.WorkspaceSandbox;
  *   <li>{@code content-present} and {@code traceability}.</li>
  * </ul>
  *
+ * <p>Every check of this verifier is blocking ({@link Check#blocking()}): each one guards the build, the design or a
+ * policy ({@code tests-are-not-vacuous} and {@code api-changes-planned} included). The deterministic verifier has no
+ * advisory checks (test placement or performance suggestions); LLM verifiers may report such findings as advisory,
+ * and they do not fail the verification ({@link VerificationReport#computePassed}).</p>
+ *
  * <p>The report's {@code skeletonOnly} flag is set when the change set contains SKELETON content, and the note
  * {@value VerificationReport#NO_BUILD_NOTE} is added when no build ran. Sandbox builds always run the
  * engine-configured command ({@link com.agenticsdlc.orchestrator.core.agent.AgentSettings#buildCommand()}); the
@@ -128,7 +133,7 @@ public final class VerificationAgent implements StageAgent {
             }
         }
         VerificationReport report = verify(changeSet, design, testPlan, spec, build, context.workspaceIndex());
-        long failed = report.structuralChecks().stream().filter(c -> !c.passed()).count();
+        long failed = report.structuralChecks().stream().filter(Check::failsBlocking).count();
         return StageResult.success(report, (report.passed() ? "all " + report.structuralChecks().size()
                 + " checks passed" : failed + " checks failed; " + report.feedbackForImplementation().size()
                 + " feedback items for implementation") + (report.notes().isEmpty() ? ""

@@ -9,8 +9,10 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.TreeSet;
 
@@ -160,29 +162,40 @@ public final class WorkspaceSandbox {
     }
 
     /**
-     * Applies a change set inside the sandbox: CREATE and FULL MODIFY contents are written, DELETE removes the
-     * file. Partial content of a MODIFY (SKELETON or DIFF) never overwrites the existing file; it is written
-     * next to it as {@code <file>.skeleton} or {@code <file>.diff} for human completion.
+     * Applies a change set inside the sandbox:
      *
-     * <p>The whole change set is checked before anything is written: a CREATE of a file that already exists
-     * (agents must MODIFY existing files) and a path outside the {@link #ALLOWED_ROOTS} or outside the sandbox
-     * reject it with a {@link ChangeSetRejectedException} listing every problem.</p>
+     * <ul>
+     *   <li>{@code CREATE} with FULL (or SKELETON) content creates the file; a CREATE of a file that already exists
+     *       is rejected (agents must MODIFY existing files);</li>
+     *   <li>{@code MODIFY} with FULL content overwrites the file;</li>
+     *   <li>{@code MODIFY} (or {@code CREATE}) with DIFF content applies the unified diff to the current file
+     *       ({@link UnifiedDiff}; exact, whitespace-insensitive and offset matching) and writes the result; a DIFF
+     *       of a missing file is rejected unless it only adds lines ({@code --- /dev/null});</li>
+     *   <li>{@code MODIFY} with SKELETON content never overwrites the file: it is written next to it as
+     *       {@code <file>.skeleton} for human completion;</li>
+     *   <li>{@code DELETE} deletes the file; NONE content of a CREATE or MODIFY writes nothing.</li>
+     * </ul>
+     *
+     * <p>The whole change set is checked, and every diff is applied in memory, before anything is written: a CREATE
+     * of an existing file, a path outside the {@link #ALLOWED_ROOTS} or outside the sandbox, and a diff that does
+     * not apply (with the hunk, the expected line and the nearest mismatch) reject it with a
+     * {@link ChangeSetRejectedException} listing every problem.</p>
      *
      * @param changeSet the change set
-     * @return the written or deleted paths (relative)
+     * @return the written or deleted paths (relative; {@code <file>.skeleton} for skeleton modifications)
      * @throws IOException on I/O errors
-     * @throws ChangeSetRejectedException when the change set violates the workspace rules (nothing is written)
+     * @throws ChangeSetRejectedException when the change set violates the workspace rules or a diff does not apply
+     *                                    (nothing is written)
      */
     public List<String> apply(ChangeSet changeSet) throws IOException {
-        check(changeSet);
+        Map<String, String> patched = check(changeSet);
         List<String> applied = new ArrayList<>();
         for (ChangeSet.FileChange change : changeSet.changes()) {
             String relative = change.path();
-            if (change.operation() == ChangeSet.Operation.MODIFY
-                    && change.contentKind() == ChangeSet.ContentKind.SKELETON) {
+            boolean sidecar = change.operation() == ChangeSet.Operation.MODIFY
+                    && change.contentKind() == ChangeSet.ContentKind.SKELETON;
+            if (sidecar) {
                 relative = relative + ".skeleton";
-            } else if (change.contentKind() == ChangeSet.ContentKind.DIFF) {
-                relative = relative + ".diff";
             }
             Path file = resolveInside(relative);
             switch (change.operation()) {
@@ -190,8 +203,10 @@ public final class WorkspaceSandbox {
                     if (change.contentKind() == ChangeSet.ContentKind.NONE) {
                         continue;
                     }
+                    String content = change.contentKind() == ChangeSet.ContentKind.DIFF ? patched.get(change.path())
+                            : change.content();
                     Files.createDirectories(file.getParent());
-                    Files.writeString(file, change.content(), StandardCharsets.UTF_8);
+                    Files.writeString(file, content, StandardCharsets.UTF_8);
                 }
                 case DELETE -> Files.deleteIfExists(file);
             }
@@ -200,8 +215,15 @@ public final class WorkspaceSandbox {
         return applied;
     }
 
-    private void check(ChangeSet changeSet) {
+    /**
+     * Checks the change set and applies its diffs in memory.
+     *
+     * @return path to patched content of every DIFF change
+     * @throws ChangeSetRejectedException listing every problem
+     */
+    private Map<String, String> check(ChangeSet changeSet) {
         List<String> problems = new ArrayList<>();
+        Map<String, String> patched = new HashMap<>();
         for (ChangeSet.FileChange change : changeSet.changes()) {
             if (!isAllowedPath(change.path())) {
                 problems.add(change.path() + " is outside the allowed roots (" + String.join(", ", ALLOWED_ROOTS)
@@ -218,10 +240,50 @@ public final class WorkspaceSandbox {
             if (change.operation() == ChangeSet.Operation.CREATE && Files.exists(file)) {
                 problems.add("CREATE of existing file " + change.path() + " (use MODIFY, preferably with contentKind "
                         + "DIFF)");
+                continue;
+            }
+            if (change.operation() != ChangeSet.Operation.DELETE
+                    && change.contentKind() == ChangeSet.ContentKind.DIFF) {
+                String problem = patch(change, file, patched);
+                if (problem != null) {
+                    problems.add(problem);
+                }
             }
         }
         if (!problems.isEmpty()) {
             throw new ChangeSetRejectedException(problems);
+        }
+        return patched;
+    }
+
+    /** Applies the DIFF of a change in memory; returns the problem, or null when it applied. */
+    private static String patch(ChangeSet.FileChange change, Path file, Map<String, String> patched) {
+        UnifiedDiff diff;
+        try {
+            diff = UnifiedDiff.parse(change.content());
+        } catch (UnifiedDiff.PatchException e) {
+            return "DIFF of " + change.path() + " cannot be parsed: " + e.getMessage();
+        }
+        boolean exists = Files.isRegularFile(file);
+        if (!exists && change.operation() == ChangeSet.Operation.MODIFY && !diff.createsFile()) {
+            return "MODIFY of missing file " + change.path() + ": a DIFF needs the existing file (use CREATE with "
+                    + "contentKind FULL for a new file)";
+        }
+        if (exists && diff.createsFile()) {
+            return "DIFF of " + change.path() + " creates the file (--- /dev/null) but it exists; write the hunks "
+                    + "against the existing source";
+        }
+        String original;
+        try {
+            original = exists ? Files.readString(file, StandardCharsets.UTF_8) : "";
+        } catch (IOException e) {
+            return "DIFF of " + change.path() + " cannot be applied: the file is not readable UTF-8 text";
+        }
+        try {
+            patched.put(change.path(), diff.apply(original, change.path()));
+            return null;
+        } catch (UnifiedDiff.PatchException e) {
+            return e.getMessage();
         }
     }
 
