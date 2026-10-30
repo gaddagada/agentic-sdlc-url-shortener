@@ -62,6 +62,17 @@ public record ShortenerProperties(
      *
      * @param ipSalt secret mixed into visitor IP hashes; rotate it to unlink historic hashes
      */
-    public record Analytics(@NotBlank String ipSalt) {
+    /**
+     * Click analytics settings.
+     *
+     * @param ipSalt    secret mixed into the daily visitor hash
+     * @param retention how long click events are kept before the retention job purges them (default 90 days)
+     */
+    public record Analytics(@NotBlank String ipSalt, @DefaultValue("90d") @NotNull Duration retention) {
+        public Analytics {
+            if (retention != null && (retention.isZero() || retention.isNegative())) {
+                throw new IllegalArgumentException("shortener.analytics.retention must be positive");
+            }
+        }
     }
 }

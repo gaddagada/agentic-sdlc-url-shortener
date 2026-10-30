@@ -49,3 +49,4 @@ shortener:
     refill-per-minute: 20
   analytics:
     ip-salt: change-me-in-production
+    retention: 90d

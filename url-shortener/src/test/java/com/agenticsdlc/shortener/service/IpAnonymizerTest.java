@@ -34,7 +34,7 @@ class IpAnonymizerTest {
     @Test
     void dependsOnTheSecretSalt() {
         ShortenerProperties otherSalt = new ShortenerProperties("https://sho.rt", 7, Duration.ofDays(365), true, false,
-                new ShortenerProperties.RateLimit(true, 20, 20), new ShortenerProperties.Analytics("other-salt"));
+                new ShortenerProperties.RateLimit(true, 20, 20), new ShortenerProperties.Analytics("other-salt", Duration.ofDays(90)));
 
         assertThat(new IpAnonymizer(otherSalt).hash("203.0.113.9", DAY))
                 .isNotEqualTo(anonymizer.hash("203.0.113.9", DAY));

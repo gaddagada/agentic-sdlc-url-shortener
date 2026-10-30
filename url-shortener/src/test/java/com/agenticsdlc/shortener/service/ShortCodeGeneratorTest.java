@@ -27,7 +27,7 @@ class ShortCodeGeneratorTest {
     @ValueSource(ints = {4, 10, 32})
     void honoursConfiguredLength(int length) {
         ShortenerProperties properties = new ShortenerProperties("https://sho.rt", length, Duration.ofDays(1), true,
-                false, new ShortenerProperties.RateLimit(true, 1, 1), new ShortenerProperties.Analytics("s"));
+                false, new ShortenerProperties.RateLimit(true, 1, 1), new ShortenerProperties.Analytics("s", Duration.ofDays(90)));
 
         assertThat(new ShortCodeGenerator(properties).generate()).hasSize(length);
     }

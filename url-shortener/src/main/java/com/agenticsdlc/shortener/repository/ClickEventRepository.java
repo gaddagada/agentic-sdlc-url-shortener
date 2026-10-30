@@ -5,6 +5,7 @@ import java.util.List;
 
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
@@ -17,6 +18,16 @@ import com.agenticsdlc.shortener.domain.ClickEvent;
  * {@code idx_click_events_link_time} index; no click rows are loaded into memory.
  */
 public interface ClickEventRepository extends JpaRepository<ClickEvent, Long> {
+
+    /**
+     * Deletes click events that occurred before the given instant (analytics data retention).
+     *
+     * @param before exclusive upper bound
+     * @return number of rows deleted
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("delete from ClickEvent c where c.occurredAt < :before")
+    int deleteOccurredBefore(@Param("before") Instant before);
 
     /**
      * Counts clicks of a link since {@code from} (inclusive).

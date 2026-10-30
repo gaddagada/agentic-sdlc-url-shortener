@@ -22,6 +22,6 @@ public final class TestProperties {
 
     public static ShortenerProperties create(boolean blockPrivateTargets, boolean trustForwardedHeaders) {
         return new ShortenerProperties(BASE_URL, 7, Duration.ofDays(365), blockPrivateTargets,
-                trustForwardedHeaders, new RateLimit(true, 20, 20), new Analytics("test-salt"));
+                trustForwardedHeaders, new RateLimit(true, 20, 20), new Analytics("test-salt", Duration.ofDays(90)));
     }
 }
