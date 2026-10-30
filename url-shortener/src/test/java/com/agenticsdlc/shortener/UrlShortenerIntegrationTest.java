@@ -18,9 +18,12 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.context.annotation.Primary;
+import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -31,6 +34,8 @@ import org.springframework.test.web.servlet.request.RequestPostProcessor;
 
 import com.agenticsdlc.shortener.api.LinkController;
 import com.agenticsdlc.shortener.api.ProblemTypes;
+import com.agenticsdlc.shortener.config.TokenBucketRateLimiter;
+import com.agenticsdlc.shortener.service.RateLimiter;
 import com.agenticsdlc.shortener.support.MutableClock;
 
 /**
@@ -67,6 +72,9 @@ class UrlShortenerIntegrationTest {
 
     @Autowired
     private MeterRegistry meters;
+
+    @Autowired
+    private ApplicationContext context;
 
     private String clientIp;
 
@@ -235,6 +243,13 @@ class UrlShortenerIntegrationTest {
             assertThat(result).bodyJson().extractingPath("$.errors[0].field").isEqualTo("days");
         }
         assertThat(mvc.get().uri("/api/v1/links/unknown1/analytics")).hasStatus(HttpStatus.NOT_FOUND);
+    }
+
+    @Test
+    void theDefaultRateLimitBackendIsInMemoryWithoutAnyRedisBean() {
+        assertThat(context.getBean(RateLimiter.class)).isInstanceOf(TokenBucketRateLimiter.class);
+        assertThat(context.getBeanNamesForType(RedisConnectionFactory.class)).isEmpty();
+        assertThat(context.getBeanNamesForType(StringRedisTemplate.class)).isEmpty();
     }
 
     @Test

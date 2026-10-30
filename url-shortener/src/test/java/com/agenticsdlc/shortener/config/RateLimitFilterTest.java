@@ -29,30 +29,27 @@ class RateLimitFilterTest {
         POST | /api/v1/links;x                 | NULL          | true
         POST | /api/v1;v=1/links;jsessionid=1  | NULL          | true
         POST | //api//v1//links                | NULL          | true
-        POST | /api/v1/links/bulk              | NULL          | true
         POST | /api                            | /v1/links;x   | true
         POST | ''                              | /api/v1/links | true
+        POST | /api/v1/links/bulk/             | NULL          | true
+        POST | /api/v1/links/bulkx             | NULL          | true
+        POST | /api/v1/links/other             | NULL          | true
+        POST | /api/v1/links/bulk              | NULL          | false
+        POST | /api/v1/links/bulk;x            | NULL          | false
+        POST | //api/v1/links//bulk            | NULL          | false
         GET  | /api/v1/links                   | NULL          | false
         GET  | /api/v1/links;x                 | NULL          | false
         POST | /api/v1/other                   | NULL          | false
         POST | /abc1234                        | NULL          | false
         POST | /                               | NULL          | false
         """)
-    void limitsEveryPostUnderTheLinksPathWhateverItsSpelling(String method, String servletPath, String pathInfo,
-                                                             boolean limited) {
+    void limitsEveryPostUnderTheLinksPathExceptTheBulkEndpointWhateverItsSpelling(String method, String servletPath,
+                                                                                  String pathInfo, boolean limited) {
         MockHttpServletRequest request = new MockHttpServletRequest(method, "/ignored-raw-uri");
         request.setServletPath(servletPath);
         request.setPathInfo(pathInfo);
 
         assertThat(filter.shouldNotFilter(request)).isEqualTo(!limited);
-    }
-
-    @Test
-    void normalizesPathParametersAndDuplicateSlashes() {
-        MockHttpServletRequest request = new MockHttpServletRequest("POST", "/ignored");
-        request.setServletPath("//api;a=b//v1/links;x/");
-
-        assertThat(RateLimitFilter.normalizedPath(request)).isEqualTo("/api/v1/links/");
     }
 
     @Test
@@ -63,7 +60,12 @@ class RateLimitFilterTest {
         assertThat(first.getStatus()).isEqualTo(200); // passed on to the (mock) chain
         assertThat(second.getStatus()).isEqualTo(429);
         assertThat(second.getHeader(RateLimitFilter.REMAINING_HEADER)).isEqualTo("0");
-        assertThat(second.getContentAsString()).contains("\"instance\":\"/api/v1/links\"");
+        assertThat(second.getHeader("Retry-After")).isEqualTo("60");
+        assertThat(second.getContentType()).isEqualTo("application/problem+json");
+        assertThat(second.getContentAsString())
+                .contains("\"instance\":\"/api/v1/links\"")
+                .contains("\"type\":\"https://agenticsdlc.dev/problems/rate-limited\"")
+                .contains("\"status\":429");
     }
 
     private MockHttpServletResponse post(String path) throws Exception {

@@ -57,8 +57,8 @@ class LinkServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new LinkService(links, lookup, codes, new UrlValidator(TestProperties.defaults()), idempotency,
-                TestProperties.defaults(), clock, meters);
+        service = new LinkService(links, lookup, codes, TestProperties.urlValidator(TestProperties.defaults()),
+                idempotency, TestProperties.defaults(), clock, meters);
         when(links.saveAndFlush(any(Link.class))).thenAnswer(invocation -> invocation.getArgument(0));
     }
 

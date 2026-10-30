@@ -28,7 +28,8 @@ import tools.jackson.databind.ObjectMapper;
 /**
  * Keeps the hand-maintained contract {@code docs/api/url-shortener.openapi.yaml} in sync with the controllers by
  * comparing it with the document springdoc generates at runtime: every operation (method, path, operationId,
- * parameters, response status codes) and the property names of every DTO schema must match.
+ * parameters, response status codes), the property names of every DTO schema and the API key security of the
+ * management operations must match.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -39,7 +40,8 @@ class OpenApiContractTest {
     private static final Set<String> HTTP_METHODS = Set.of("get", "put", "post", "delete", "patch", "head",
             "options");
     private static final List<String> DTO_SCHEMAS = List.of("CreateLinkRequest", "LinkResponse",
-            "AnalyticsResponse", "DailyClicks", "ReferrerClicks", "UserAgentClicks");
+            "AnalyticsResponse", "DailyClicks", "ReferrerClicks", "UserAgentClicks", "BulkCreateLinksRequest",
+            "BulkCreateLinksResponse", "BulkItemResult", "BulkItemError");
 
     @Autowired
     private MockMvcTester mvc;
@@ -51,8 +53,9 @@ class OpenApiContractTest {
     void committedContractDeclaresTheGeneratedOperations() throws Exception {
         SortedMap<String, String> generated = operations(generated());
 
-        assertThat(generated).containsOnlyKeys("POST /api/v1/links", "GET /api/v1/links/{code}",
-                "DELETE /api/v1/links/{code}", "GET /api/v1/links/{code}/analytics", "GET /{code}");
+        assertThat(generated).containsOnlyKeys("POST /api/v1/links", "POST /api/v1/links/bulk",
+                "GET /api/v1/links/{code}", "DELETE /api/v1/links/{code}", "GET /api/v1/links/{code}/analytics",
+                "GET /{code}");
         assertThat(operations(committed())).isEqualTo(generated);
     }
 
@@ -62,6 +65,21 @@ class OpenApiContractTest {
         Map<String, Object> generated = generated();
         for (String schema : DTO_SCHEMAS) {
             assertThat(propertyNames(committed, schema)).as(schema).isEqualTo(propertyNames(generated, schema));
+        }
+    }
+
+    @Test
+    void committedContractDeclaresTheApiKeySchemeOnTheManagementOperations() throws Exception {
+        for (Map<String, Object> document : List.of(committed(), generated())) {
+            Map<String, Object> schemes = asMap(asMap(document.get("components")).get("securitySchemes"));
+            assertThat(asMap(schemes.get("ApiKey"))).containsEntry("type", "apiKey").containsEntry("in", "header")
+                    .containsEntry("name", "X-Api-Key");
+            asMap(document.get("paths")).forEach((path, item) -> asMap(item).forEach((method, operation) -> {
+                if (HTTP_METHODS.contains(method)) {
+                    assertThat(asList(asMap(operation).get("security"))).as(method + " " + path)
+                            .hasSize(path.startsWith("/api/v1/links") ? 1 : 0);
+                }
+            }));
         }
     }
 

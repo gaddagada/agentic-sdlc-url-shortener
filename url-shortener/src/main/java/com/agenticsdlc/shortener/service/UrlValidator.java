@@ -6,10 +6,16 @@ import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.UnknownHostException;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
+
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.stereotype.Component;
@@ -25,13 +31,32 @@ import com.agenticsdlc.shortener.service.exception.UrlRejectedException;
  *   <li>no user-info (credentials) in the authority;</li>
  *   <li>when {@code shortener.block-private-targets=true}: no {@code localhost}, no {@code .local}/{@code .internal}
  *       host names and no IP literal in loopback, private, carrier-grade NAT, link-local (including the cloud metadata
- *       address {@code 169.254.169.254}), multicast, unspecified or reserved ranges.</li>
+ *       address {@code 169.254.169.254}), multicast, unspecified or reserved ranges;</li>
+ *   <li>additionally, when {@code shortener.resolve-targets=true}: no host name resolving to such an address (see
+ *       below).</li>
  * </ul>
  *
  * <p>IP literals are parsed without DNS. Dotted quads are checked both as decimal and with POSIX
  * {@code inet_aton} semantics (octal/hex parts such as {@code 0177.0.0.1}), and a host is blocked if either reading is
- * non-public. Host names are deliberately not resolved: a public name that resolves to a private address is not
- * detected (documented trade-off, the shortener never fetches targets itself).
+ * non-public.
+ *
+ * <p><b>Resolve-time check (optional, {@code shortener.resolve-targets=true}).</b> By default host names are not
+ * resolved: a public-looking name that resolves to a private address is not detected (the shortener never fetches
+ * targets itself). With {@code resolve-targets} (and {@code block-private-targets}) every host name is resolved through
+ * the {@link HostResolver} (default: the platform resolver, bounded by {@code shortener.resolve-timeout}, 2 s) and the
+ * URL is rejected when <em>any</em> resolved address is non-public, using the same rules as for IP literals. A name
+ * that does not resolve, or not in time, is rejected as well (fail closed, {@code 422 url-rejected} with a clear
+ * reason). Verdicts (public / non-public) are cached per host for {@value #VERDICT_TTL_SECONDS} s, bounded to
+ * {@value #MAX_CACHED_VERDICTS} hosts; resolution failures are not cached, so a transient DNS problem can be retried.
+ * Items of a bulk request are validated one after the other, so a batch of unresolvable hosts can take up to
+ * {@code resolve-timeout} per distinct host.
+ *
+ * <p><b>DNS rebinding caveat.</b> The check only sees the answers at creation time (or up to
+ * {@value #VERDICT_TTL_SECONDS} s earlier). An attacker controlling a domain can answer with a public address now and
+ * a private one later (low TTL, or different answers per resolver), so a URL accepted here may point inside the
+ * network when it is eventually fetched. This makes the check a filter against obvious internal targets, not an SSRF
+ * defence for whoever follows the links: a component that fetches target URLs (previews, crawlers) must resolve once,
+ * validate and connect to that same address (or go through an egress proxy that enforces the policy).
  */
 @Component
 public class UrlValidator {
@@ -39,19 +64,38 @@ public class UrlValidator {
     /** Maximum accepted URL length. */
     public static final int MAX_LENGTH = 2048;
 
+    static final long VERDICT_TTL_SECONDS = 60;
+    static final long MAX_CACHED_VERDICTS = 10_000;
+
     private static final Set<String> ALLOWED_SCHEMES = Set.of("http", "https");
     private static final List<String> BLOCKED_HOST_SUFFIXES = List.of(".local", ".internal", ".localhost");
     private static final String METADATA_ADDRESS = "169.254.169.254";
 
     private final boolean blockPrivateTargets;
+    private final boolean resolveTargets;
+    private final HostResolver hostResolver;
+    private final Duration resolveTimeout;
+    /** Host name to "every resolved address is public". */
+    private final Cache<String, Boolean> verdicts;
 
     /**
      * Creates the validator.
      *
-     * @param properties provides {@code shortener.block-private-targets}
+     * @param properties   provides {@code shortener.block-private-targets}, {@code resolve-targets} and
+     *                     {@code resolve-timeout}
+     * @param hostResolver resolves host names when {@code resolve-targets} is on
+     * @param clock        time source of the verdict cache
      */
-    public UrlValidator(ShortenerProperties properties) {
+    public UrlValidator(ShortenerProperties properties, HostResolver hostResolver, Clock clock) {
         this.blockPrivateTargets = properties.blockPrivateTargets();
+        this.resolveTargets = properties.resolveTargets();
+        this.hostResolver = hostResolver;
+        this.resolveTimeout = properties.resolveTimeout();
+        this.verdicts = Caffeine.newBuilder()
+                .maximumSize(MAX_CACHED_VERDICTS)
+                .expireAfterWrite(Duration.ofSeconds(VERDICT_TTL_SECONDS))
+                .ticker(() -> TimeUnit.MILLISECONDS.toNanos(clock.millis()))
+                .build();
     }
 
     /**
@@ -95,7 +139,7 @@ public class UrlValidator {
         }
     }
 
-    private static void rejectNonPublicHost(String rawHost) {
+    private void rejectNonPublicHost(String rawHost) {
         String host = rawHost.toLowerCase(Locale.ROOT);
         if (host.endsWith(".")) {
             host = host.substring(0, host.length() - 1);
@@ -103,12 +147,48 @@ public class UrlValidator {
         if (host.equals("localhost") || BLOCKED_HOST_SUFFIXES.stream().anyMatch(host::endsWith)) {
             throw new UrlRejectedException("Target host '" + rawHost + "' is a local or internal host name.");
         }
-        for (InetAddress address : ipLiteralReadings(host)) {
+        List<InetAddress> literalReadings = ipLiteralReadings(host);
+        for (InetAddress address : literalReadings) {
             if (isNonPublic(address)) {
                 throw new UrlRejectedException(
                         "Target host '" + rawHost + "' is a private, loopback or otherwise non-public address.");
             }
         }
+        if (resolveTargets && literalReadings.isEmpty()) {
+            rejectIfResolvesToNonPublic(rawHost, host);
+        }
+    }
+
+    /**
+     * Resolve-time check of a host name. The cache is read and written around the lookup instead of computing inside
+     * it, so a slow lookup never blocks other hosts; concurrent first lookups of the same host may both resolve.
+     */
+    private void rejectIfResolvesToNonPublic(String rawHost, String host) {
+        Boolean allPublic = verdicts.getIfPresent(host);
+        if (allPublic == null) {
+            allPublic = resolvesToPublicAddressesOnly(rawHost, host);
+            verdicts.put(host, allPublic);
+        }
+        if (!allPublic) {
+            throw new UrlRejectedException("Target host '" + rawHost
+                    + "' resolves to a private, loopback or otherwise non-public address.");
+        }
+    }
+
+    private boolean resolvesToPublicAddressesOnly(String rawHost, String host) {
+        List<InetAddress> addresses;
+        try {
+            addresses = hostResolver.resolve(host);
+        } catch (HostResolver.ResolutionTimeoutException slow) {
+            throw new UrlRejectedException("Target host '" + rawHost + "' could not be resolved within "
+                    + resolveTimeout.toMillis() + " ms; please retry.");
+        } catch (UnknownHostException unknown) {
+            throw new UrlRejectedException("Target host '" + rawHost + "' could not be resolved.");
+        }
+        if (addresses.isEmpty()) {
+            throw new UrlRejectedException("Target host '" + rawHost + "' could not be resolved.");
+        }
+        return addresses.stream().noneMatch(UrlValidator::isNonPublic);
     }
 
     /** All plausible IP interpretations of {@code host} without any DNS lookup; empty for host names. */

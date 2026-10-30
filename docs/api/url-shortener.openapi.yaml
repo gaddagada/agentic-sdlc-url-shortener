@@ -8,8 +8,13 @@ info:
     * Errors are RFC 9457 Problem Details (`application/problem+json`). Clients should branch on the
       problem `type` URI (`https://agenticsdlc.dev/problems/<slug>`), not on `title` or `detail`.
     * Timestamps are ISO-8601 in UTC.
-    * `POST /api/v1/links` is rate limited per client IP (token bucket, default 20 burst, 20/minute).
-    * The API is unauthenticated in this version (see docs/RISKS_AND_TRADEOFFS.md).
+    * Link creation is rate limited per client IP with a token bucket (default 20 burst, 20/minute), one token per
+      created link: `POST /api/v1/links` costs 1 token, `POST /api/v1/links/bulk` costs one token per item. Buckets
+      live in memory per node by default, or in Redis shared by all nodes (`shortener.rate-limit.backend=redis`).
+    * Authentication is optional. When `shortener.security.api-key` is set, every request under `/api/v1/links`
+      (create, bulk, metadata, analytics, deactivate) must send it in the `X-Api-Key` header, otherwise it gets
+      `401` (`unauthorized`). Redirects (`GET /{code}`), actuator and the API docs stay public. Without a key the API
+      is open (a warning is logged at startup).
 
     This contract is hand-maintained. `OpenApiContractTest` compares it with the document generated from the
     controllers (`/v3/api-docs`) on every build: operations, operation ids, parameters, response codes and DTO
@@ -33,6 +38,8 @@ paths:
       tags: [Links]
       operationId: createLink
       summary: Create a short link
+      security:
+        - ApiKey: []
       description: |
         Creates a short link with a random Base62 code (default length 7) or a custom alias.
 
@@ -104,6 +111,8 @@ paths:
                 errors:
                   - field: url
                     message: must not be blank
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '409':
           description: |
             Custom alias already taken (`alias-conflict`), or a request with the same Idempotency-Key is still in
@@ -118,7 +127,8 @@ paths:
         '422':
           description: |
             Target URL rejected by policy (`url-rejected`: scheme other than http/https, embedded credentials,
-            private/loopback/link-local/internal host), custom alias reserved (`alias-rejected`), or
+            private/loopback/link-local/internal host; with `shortener.resolve-targets=true` also a host name that
+            resolves to such an address or cannot be resolved in time), custom alias reserved (`alias-rejected`), or
             Idempotency-Key reused with a different payload (`idempotency-key-reused`).
           content:
             application/problem+json:
@@ -159,11 +169,176 @@ paths:
               schema:
                 $ref: '#/components/schemas/ProblemDetail'
 
+  /api/v1/links/bulk:
+    post:
+      tags: [Links]
+      operationId: createLinksBulk
+      summary: Create up to 100 short links
+      description: |
+        Creates 1 to 100 links in one request. Every item goes through the same flow as `POST /api/v1/links`, in its
+        own transaction: a failing item never rolls back or blocks the others (partial failure). The request is
+        answered `200` whenever it was executed, even if every item failed; `results` holds one entry per item, in
+        request order, with either the created `link` or the `error` - the Problem Details `type`, `title`,
+        `status` and `detail` that `POST /api/v1/links` answers for the same item (e.g. `url-rejected` 422,
+        `alias-conflict` 409, `invalid-expiry` 400). Items repeating the `customAlias` of an earlier item are
+        detected before anything is created and fail with `alias-conflict` without being attempted.
+
+        **Rate limiting:** one token per item, all-or-nothing, charged when the batch is executed. If the client's
+        bucket cannot cover every item, nothing is created and the answer is `429`. A batch with more items than the
+        bucket capacity (`shortener.rate-limit.capacity`, default 20) could never be admitted and is rejected with
+        `422 batch-too-large`. Requests rejected as a whole (validation, idempotency conflicts) and idempotent replays
+        are not charged.
+
+        **Idempotency:** with an `Idempotency-Key`, a retry with the same items within 24 hours replays the whole
+        stored response (including failed items) with `Idempotent-Replayed: true`; the same key with other items is
+        rejected (422). A request rejected as a whole (e.g. `429`) stores nothing and can be retried with the same
+        key. Keys are shared with `POST /api/v1/links`, whose payloads never match a bulk request.
+      security:
+        - ApiKey: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Client-generated key (1-128 characters) making the request safe to retry.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkCreateLinksRequest'
+            example:
+              items:
+                - url: https://example.com/some/long/path
+                - url: https://example.com/spring-sale
+                  customAlias: spring-sale
+                  ttlSeconds: 86400
+                - url: http://169.254.169.254/latest/meta-data/
+      responses:
+        '200':
+          description: Batch executed; `results` holds the outcome of every item.
+          headers:
+            Idempotent-Replayed:
+              description: Present with value `true` when the stored response of an earlier request is replayed.
+              schema:
+                type: boolean
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BulkCreateLinksResponse'
+              example:
+                total: 3
+                created: 2
+                failed: 1
+                results:
+                  - index: 0
+                    status: CREATED
+                    link:
+                      code: aZ3kP9q
+                      shortUrl: http://localhost:8080/aZ3kP9q
+                      originalUrl: https://example.com/some/long/path
+                      status: ACTIVE
+                      createdAt: '2026-01-15T10:00:00Z'
+                      clickCount: 0
+                    error: null
+                  - index: 1
+                    status: CREATED
+                    link:
+                      code: spring-sale
+                      shortUrl: http://localhost:8080/spring-sale
+                      originalUrl: https://example.com/spring-sale
+                      status: ACTIVE
+                      createdAt: '2026-01-15T10:00:00Z'
+                      expiresAt: '2026-01-16T10:00:00Z'
+                      clickCount: 0
+                    error: null
+                  - index: 2
+                    status: FAILED
+                    link: null
+                    error:
+                      type: https://agenticsdlc.dev/problems/url-rejected
+                      title: URL not allowed
+                      status: 422
+                      detail: Target host '169.254.169.254' is a private, loopback or otherwise non-public address.
+        '400':
+          description: |
+            Validation error (`validation-error`): `items` missing, empty or with more than 100 entries, or an
+            invalid item (`errors[].field` such as `items[3].url`); malformed JSON (`malformed-request`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+              example:
+                type: https://agenticsdlc.dev/problems/validation-error
+                title: Validation failed
+                status: 400
+                detail: The request is invalid; see 'errors' for details.
+                instance: /api/v1/links/bulk
+                errors:
+                  - field: items
+                    message: size must be between 1 and 100
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: A request with the same Idempotency-Key is still in progress (`idempotency-request-in-progress`).
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '422':
+          description: |
+            More items than the rate-limit bucket capacity (`batch-too-large`, with `maxItems`; split the batch), or
+            Idempotency-Key reused with other items (`idempotency-key-reused`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+              example:
+                type: https://agenticsdlc.dev/problems/batch-too-large
+                title: Batch too large
+                status: 422
+                detail: >-
+                  The batch has 30 items but at most 20 links can be created per client burst (rate-limit
+                  capacity); split it into smaller batches.
+                instance: /api/v1/links/bulk
+                maxItems: 20
+        '429':
+          description: Not enough rate-limit tokens for every item (`rate-limited`); nothing was created.
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+              example:
+                type: https://agenticsdlc.dev/problems/rate-limited
+                title: Too many requests
+                status: 429
+                detail: This request needs 5 rate-limit tokens but only 2 are available; retry after 9 seconds.
+                instance: /api/v1/links/bulk
+
   /api/v1/links/{code}:
     get:
       tags: [Links]
       operationId: getLink
       summary: Get link metadata
+      security:
+        - ApiKey: []
       parameters:
         - $ref: '#/components/parameters/Code'
       responses:
@@ -173,6 +348,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/LinkResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/LinkNotFound'
     delete:
@@ -182,11 +359,15 @@ paths:
       description: |
         Soft delete: the link keeps its analytics, its status becomes `DISABLED` and redirects answer 410 Gone.
         Idempotent.
+      security:
+        - ApiKey: []
       parameters:
         - $ref: '#/components/parameters/Code'
       responses:
         '204':
           description: Link deactivated.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/LinkNotFound'
 
@@ -199,6 +380,8 @@ paths:
         Totals, unique visitors, clicks per UTC day (zero-filled), top 10 referrers and clicks per user-agent family
         over the last `days` UTC days including today. Clicks are recorded asynchronously and appear within moments
         of the redirect. Analytics remain available for disabled and expired links.
+      security:
+        - ApiKey: []
       parameters:
         - $ref: '#/components/parameters/Code'
         - name: days
@@ -224,6 +407,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/ProblemDetail'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/LinkNotFound'
 
@@ -273,6 +458,15 @@ paths:
                 reason: EXPIRED
 
 components:
+  securitySchemes:
+    ApiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: |
+        Required on /api/v1/links/** only when shortener.security.api-key is configured. Compared in constant time;
+        a missing or wrong key gets 401 `unauthorized`.
+
   parameters:
     Code:
       name: code
@@ -299,6 +493,26 @@ components:
         type: integer
 
   responses:
+    Unauthorized:
+      description: |
+        Missing or wrong `X-Api-Key` (`unauthorized`); only when `shortener.security.api-key` is configured. Sent with
+        `WWW-Authenticate: ApiKey realm="url-shortener"`. Rejected before rate limiting, so it consumes no tokens.
+      headers:
+        WWW-Authenticate:
+          description: Always `ApiKey realm="url-shortener"`.
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://agenticsdlc.dev/problems/unauthorized
+            title: Unauthorized
+            status: 401
+            detail: A valid X-Api-Key header is required.
+            instance: /api/v1/links
+
     LinkNotFound:
       description: 'Unknown code (`link-not-found`). Sent with `Cache-Control: no-store`.'
       content:
@@ -372,6 +586,91 @@ components:
           type: integer
           format: int64
           description: Total recorded clicks (eventually consistent).
+
+    BulkCreateLinksRequest:
+      type: object
+      description: Short links to create in one request, processed in order.
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: |
+            1 to 100 links, each validated like the body of `POST /api/v1/links`. At most the rate-limit capacity
+            (default 20) can be admitted at once; larger batches are rejected with `batch-too-large`.
+          items:
+            $ref: '#/components/schemas/CreateLinkRequest'
+
+    BulkCreateLinksResponse:
+      type: object
+      description: Outcome of a bulk creation; items succeed or fail independently.
+      required: [total, created, failed, results]
+      properties:
+        total:
+          type: integer
+          format: int32
+          description: Number of items in the request.
+        created:
+          type: integer
+          format: int32
+          description: Number of links created.
+        failed:
+          type: integer
+          format: int32
+          description: Number of items that failed.
+        results:
+          type: array
+          description: One result per item, in request order (`results[i].index == i`).
+          items:
+            $ref: '#/components/schemas/BulkItemResult'
+
+    BulkItemResult:
+      type: object
+      description: Outcome of one item. Exactly one of `link` and `error` is non-null.
+      required: [index, status, link, error]
+      properties:
+        index:
+          type: integer
+          format: int32
+          description: Position of the item in the request (0-based).
+        status:
+          type: string
+          enum: [CREATED, FAILED]
+        link:
+          description: The created link when `status` is `CREATED`, otherwise null.
+          oneOf:
+            - $ref: '#/components/schemas/LinkResponse'
+            - type: 'null'
+        error:
+          description: Why the item failed when `status` is `FAILED`, otherwise null.
+          oneOf:
+            - $ref: '#/components/schemas/BulkItemError'
+            - type: 'null'
+
+    BulkItemError:
+      type: object
+      description: |
+        Problem Details of a failed item: the `type`, `title` and `status` that `POST /api/v1/links` answers for the
+        same failure (same mapper), with a `detail` for this occurrence.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Problem type, `https://agenticsdlc.dev/problems/<slug>`.
+          examples: [https://agenticsdlc.dev/problems/alias-conflict]
+        title:
+          type: string
+          examples: [Alias already in use]
+        status:
+          type: integer
+          format: int32
+          description: HTTP status the single-link endpoint answers for this failure.
+          examples: [409]
+        detail:
+          type: string
+          examples: ["The alias 'spring-sale' is already in use."]
 
     AnalyticsResponse:
       type: object
@@ -463,6 +762,8 @@ components:
             - https://agenticsdlc.dev/problems/idempotency-request-in-progress
             - https://agenticsdlc.dev/problems/code-generation-failed
             - https://agenticsdlc.dev/problems/rate-limited
+            - https://agenticsdlc.dev/problems/batch-too-large
+            - https://agenticsdlc.dev/problems/unauthorized
             - https://agenticsdlc.dev/problems/internal-error
             - about:blank
         title:
@@ -485,6 +786,10 @@ components:
           type: string
           enum: [EXPIRED, DISABLED]
           description: Present on `link-gone`.
+        maxItems:
+          type: integer
+          format: int32
+          description: Present on `batch-too-large`; the largest batch this client can send (rate-limit capacity).
 
     FieldViolation:
       type: object

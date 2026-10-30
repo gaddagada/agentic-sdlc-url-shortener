@@ -23,6 +23,8 @@ public final class ProblemTypes {
     public static final URI IDEMPOTENCY_REQUEST_IN_PROGRESS = of("idempotency-request-in-progress");
     public static final URI CODE_GENERATION_FAILED = of("code-generation-failed");
     public static final URI RATE_LIMITED = of("rate-limited");
+    public static final URI BATCH_TOO_LARGE = of("batch-too-large");
+    public static final URI UNAUTHORIZED = of("unauthorized");
     public static final URI INTERNAL_ERROR = of("internal-error");
 
     private ProblemTypes() {

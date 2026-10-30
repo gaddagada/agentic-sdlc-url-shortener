@@ -5,6 +5,7 @@ import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -26,6 +27,7 @@ import com.agenticsdlc.shortener.service.AnalyticsService;
 @RestController
 @RequestMapping(LinkController.BASE_PATH)
 @Tag(name = "Analytics")
+@SecurityRequirement(name = OpenApiNames.API_KEY_SCHEME)
 public class AnalyticsController {
 
     private final AnalyticsService analyticsService;
@@ -51,6 +53,9 @@ public class AnalyticsController {
                     + "per user-agent family. Clicks are recorded asynchronously and appear within moments.")
     @ApiResponse(responseCode = "200", description = "Aggregated analytics")
     @ApiResponse(responseCode = "400", description = "days outside 1..90",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                    schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(responseCode = "401", description = "Missing or wrong X-Api-Key (only when an API key is configured)",
             content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
                     schema = @Schema(implementation = ProblemDetail.class)))
     @ApiResponse(responseCode = "404", description = "Unknown code",

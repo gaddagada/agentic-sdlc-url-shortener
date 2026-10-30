@@ -26,6 +26,19 @@ spring:
   mvc:
     problemdetails:
       enabled: true
+  data:
+    redis:
+      # Only used with shortener.rate-limit.backend=redis: the Redis auto-configuration is switched off for the other
+      # backends (RedisBackendAutoConfigurationFilter). Any spring.data.redis.* setting applies (url, password, ssl,
+      # sentinel, cluster).
+      host: localhost
+      port: 6379
+      # Rate-limit decisions are on the request path: fail fast (the limiter then fails open) instead of waiting
+      # for Lettuce's 60 s default.
+      timeout: 500ms
+      connect-timeout: 500ms
+      repositories:
+        enabled: false
 
 management:
   endpoints:
@@ -46,11 +59,23 @@ shortener:
   code-length: 7
   max-ttl: 365d
   block-private-targets: true
+  # Also resolve target host names (DNS) when a link is created and reject names resolving to a private, loopback or
+  # otherwise non-public address (needs block-private-targets). Off by default: it adds a DNS lookup per new host
+  # (verdicts cached 60 s) and cannot prevent DNS rebinding (see the UrlValidator Javadoc).
+  resolve-targets: false
+  # Upper bound of one DNS lookup when resolve-targets is on; a slower or failing lookup rejects the URL (422).
+  resolve-timeout: 2s
   trust-forwarded-headers: false
   rate-limit:
     enabled: true
+    # Burst size per client. One token per created link: a bulk request costs one token per item, so this is also
+    # the largest bulk request a client can send (larger ones are answered 422 batch-too-large).
     capacity: 20
     refill-per-minute: 20
+    # memory: buckets per application node (default). redis: buckets shared by all nodes through an atomic Lua
+    # script (configure spring.data.redis.*); if Redis is unreachable requests are allowed (fail open).
+    backend: memory
+    redis-key-prefix: "shortener:rate-limit:"
   analytics:
     # HMAC key of the daily visitor hash. The placeholder is rejected at startup under the postgres/prod profiles.
     ip-salt: change-me-in-production
@@ -58,3 +83,8 @@ shortener:
     recorder:
       threads: 8
       queue-capacity: 10000
+  security:
+    # Shared secret required in the X-Api-Key header for every /api/v1/links/** request when set (environment
+    # variable SHORTENER_SECURITY_APIKEY; use a long random value). Empty (default): the management API is open and a
+    # warning is logged at startup. Redirects, actuator and Swagger stay public either way.
+    api-key: ""

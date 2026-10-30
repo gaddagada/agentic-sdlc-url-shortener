@@ -4,7 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.net.URI;
+import java.time.Duration;
+import java.time.Instant;
 
+import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -12,11 +15,13 @@ import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import com.agenticsdlc.shortener.service.exception.UrlRejectedException;
+import com.agenticsdlc.shortener.support.FakeHostResolver;
+import com.agenticsdlc.shortener.support.MutableClock;
 import com.agenticsdlc.shortener.support.TestProperties;
 
 class UrlValidatorTest {
 
-    private final UrlValidator validator = new UrlValidator(TestProperties.defaults());
+    private final UrlValidator validator = TestProperties.urlValidator(TestProperties.defaults());
 
     @ParameterizedTest
     @ValueSource(strings = {
@@ -113,7 +118,7 @@ class UrlValidatorTest {
 
     @Test
     void allowsPrivateTargetsWhenBlockingIsDisabled() {
-        UrlValidator permissive = new UrlValidator(TestProperties.create(false, false));
+        UrlValidator permissive = TestProperties.urlValidator(TestProperties.create(false, false));
 
         assertThat(permissive.validate("http://127.0.0.1:8080/")).hasHost("127.0.0.1");
         assertThat(permissive.validate("http://localhost/")).hasHost("localhost");
@@ -121,5 +126,111 @@ class UrlValidatorTest {
                 .isInstanceOf(UrlRejectedException.class);
         assertThatThrownBy(() -> permissive.validate("http://user:pw@localhost/"))
                 .isInstanceOf(UrlRejectedException.class);
+    }
+
+    /** {@code shortener.resolve-targets=true}: host names are resolved through a fake resolver. */
+    @Nested
+    class ResolveTargets {
+
+        private final FakeHostResolver dns = new FakeHostResolver();
+        private final MutableClock clock = new MutableClock(Instant.parse("2026-01-15T10:00:00Z"));
+        private final UrlValidator resolving = new UrlValidator(TestProperties.withResolveTargets(true, true), dns,
+                clock);
+
+        @Test
+        void acceptsNamesResolvingOnlyToPublicAddresses() {
+            dns.answer("example.com", "93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946");
+
+            assertThat(resolving.validate("https://example.com/path")).hasHost("example.com");
+            assertThat(dns.lookups("example.com")).isEqualTo(1);
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"10.0.0.7", "127.0.0.1", "169.254.169.254", "100.64.1.1", "::1", "fd00::1",
+            "::ffff:192.168.1.1"})
+        void rejectsNamesResolvingToANonPublicAddress(String address) {
+            dns.answer("sneaky.example.com", "93.184.216.34", address);
+
+            assertThatThrownBy(() -> resolving.validate("https://sneaky.example.com/"))
+                    .isInstanceOf(UrlRejectedException.class)
+                    .hasMessage("Target host 'sneaky.example.com' resolves to a private, loopback or otherwise "
+                            + "non-public address.")
+                    .hasMessageNotContaining(address);
+        }
+
+        @Test
+        void rejectsNamesThatDoNotResolve() {
+            dns.unknownByDefault();
+
+            assertThatThrownBy(() -> resolving.validate("https://no-such-host.example/"))
+                    .isInstanceOf(UrlRejectedException.class)
+                    .hasMessage("Target host 'no-such-host.example' could not be resolved.");
+        }
+
+        @Test
+        void rejectsNamesThatDoNotResolveInTime() {
+            dns.timeout("slow.example.com");
+
+            assertThatThrownBy(() -> resolving.validate("https://slow.example.com/"))
+                    .isInstanceOf(UrlRejectedException.class)
+                    .hasMessage("Target host 'slow.example.com' could not be resolved within 2000 ms; please retry.");
+        }
+
+        @Test
+        void cachesVerdictsPerHostForSixtySeconds() {
+            dns.answer("cached.example.com", "93.184.216.34");
+            dns.answer("internal.example.com", "10.1.2.3");
+
+            resolving.validate("https://cached.example.com/a");
+            resolving.validate("https://CACHED.example.com./b");
+            assertThatThrownBy(() -> resolving.validate("https://internal.example.com/"))
+                    .isInstanceOf(UrlRejectedException.class);
+            assertThatThrownBy(() -> resolving.validate("https://internal.example.com/again"))
+                    .isInstanceOf(UrlRejectedException.class);
+            assertThat(dns.lookups("cached.example.com")).isEqualTo(1);
+            assertThat(dns.lookups("internal.example.com")).isEqualTo(1);
+
+            clock.advance(Duration.ofSeconds(61));
+            dns.answer("internal.example.com", "93.184.216.34"); // the answer changed meanwhile
+            resolving.validate("https://cached.example.com/c");
+
+            assertThat(dns.lookups("cached.example.com")).isEqualTo(2);
+            assertThat(resolving.validate("https://internal.example.com/")).hasHost("internal.example.com");
+        }
+
+        @Test
+        void doesNotCacheResolutionFailures() {
+            dns.timeout("flaky.example.com");
+            assertThatThrownBy(() -> resolving.validate("https://flaky.example.com/"))
+                    .isInstanceOf(UrlRejectedException.class);
+
+            dns.answer("flaky.example.com", "93.184.216.34");
+
+            assertThat(resolving.validate("https://flaky.example.com/")).hasHost("flaky.example.com");
+            assertThat(dns.lookups("flaky.example.com")).isEqualTo(2);
+        }
+
+        @Test
+        void neverResolvesIpLiteralsOrBlockedNames() {
+            UrlValidator strict = new UrlValidator(TestProperties.withResolveTargets(true, true),
+                    TestProperties.NO_DNS, clock);
+
+            assertThat(strict.validate("https://93.184.216.34/")).hasHost("93.184.216.34");
+            assertThat(strict.validate("https://[2606:2800:220:1:248:1893:25c8:1946]/")).isNotNull();
+            assertThatThrownBy(() -> strict.validate("http://10.0.0.1/")).isInstanceOf(UrlRejectedException.class);
+            assertThatThrownBy(() -> strict.validate("http://printer.local/"))
+                    .isInstanceOf(UrlRejectedException.class);
+        }
+
+        @Test
+        void resolvesNothingWhenTheCheckOrPrivateTargetBlockingIsOff() {
+            UrlValidator off = new UrlValidator(TestProperties.withResolveTargets(true, false), TestProperties.NO_DNS,
+                    clock);
+            UrlValidator permissive = new UrlValidator(TestProperties.withResolveTargets(false, true),
+                    TestProperties.NO_DNS, clock);
+
+            assertThat(off.validate("https://anything.example.com/")).hasHost("anything.example.com");
+            assertThat(permissive.validate("https://anything.example.com/")).hasHost("anything.example.com");
+        }
     }
 }

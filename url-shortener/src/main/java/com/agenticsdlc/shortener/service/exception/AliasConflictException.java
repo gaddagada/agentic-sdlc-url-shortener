@@ -15,8 +15,24 @@ public final class AliasConflictException extends RuntimeException {
      * @param alias the conflicting alias
      */
     public AliasConflictException(String alias) {
-        super("The alias '" + alias + "' is already in use.");
+        this(alias, "The alias '" + alias + "' is already in use.");
+    }
+
+    private AliasConflictException(String alias, String message) {
+        super(message);
         this.alias = alias;
+    }
+
+    /**
+     * Creates the exception for a bulk item whose alias is already requested by an earlier item of the same batch.
+     *
+     * @param alias      the duplicated alias
+     * @param firstIndex index of the earlier item requesting it
+     * @return the exception
+     */
+    public static AliasConflictException duplicateInBatch(String alias, int firstIndex) {
+        return new AliasConflictException(alias,
+                "The alias '" + alias + "' is already requested by item " + firstIndex + " of this batch.");
     }
 
     public String getAlias() {

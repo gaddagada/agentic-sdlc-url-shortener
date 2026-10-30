@@ -8,6 +8,7 @@ import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 
+import org.jspecify.annotations.Nullable;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.validation.annotation.Validated;
@@ -19,9 +20,13 @@ import org.springframework.validation.annotation.Validated;
  * @param codeLength            length of generated Base62 codes
  * @param maxTtl                maximum distance of {@code expiresAt} from creation time
  * @param blockPrivateTargets   reject target URLs pointing at private/loopback/link-local/internal hosts
+ * @param resolveTargets        additionally resolve target host names (DNS) at creation time and reject names that
+ *                              resolve to a non-public address; only effective with {@code blockPrivateTargets}
+ * @param resolveTimeout        upper bound of one host name resolution when {@code resolveTargets} is on
  * @param trustForwardedHeaders honour {@code X-Forwarded-For} (only behind a trusted reverse proxy)
  * @param rateLimit             token-bucket settings for link creation
  * @param analytics             click analytics settings
+ * @param security              management API authentication
  */
 @Validated
 @ConfigurationProperties(prefix = "shortener")
@@ -30,11 +35,14 @@ public record ShortenerProperties(
         @DefaultValue("7") @Min(4) @Max(32) int codeLength,
         @DefaultValue("365d") @NotNull Duration maxTtl,
         @DefaultValue("true") boolean blockPrivateTargets,
+        @DefaultValue("false") boolean resolveTargets,
+        @DefaultValue("2s") @NotNull Duration resolveTimeout,
         @DefaultValue("false") boolean trustForwardedHeaders,
         @DefaultValue @Valid @NotNull RateLimit rateLimit,
-        @DefaultValue @Valid @NotNull Analytics analytics) {
+        @DefaultValue @Valid @NotNull Analytics analytics,
+        @DefaultValue @Valid @NotNull Security security) {
 
-    /** Normalizes the base URL and rejects a non-positive maximum TTL. */
+    /** Normalizes the base URL and rejects a non-positive maximum TTL or resolve timeout. */
     public ShortenerProperties {
         if (baseUrl != null && baseUrl.endsWith("/")) {
             baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
@@ -42,19 +50,35 @@ public record ShortenerProperties(
         if (maxTtl != null && (maxTtl.isZero() || maxTtl.isNegative())) {
             throw new IllegalArgumentException("shortener.max-ttl must be positive");
         }
+        if (resolveTimeout != null && (resolveTimeout.isZero() || resolveTimeout.isNegative())) {
+            throw new IllegalArgumentException("shortener.resolve-timeout must be positive");
+        }
     }
 
     /**
-     * Token-bucket rate limit applied per client IP to {@code POST /api/v1/links}.
+     * Token-bucket rate limit applied per client IP to link creation: one token per created link
+     * ({@code POST /api/v1/links} costs 1, {@code POST /api/v1/links/bulk} costs the number of items).
      *
-     * @param enabled         whether the limiter filter is registered
-     * @param capacity        bucket size (burst)
+     * @param enabled         whether link creation is rate limited at all
+     * @param capacity        bucket size (burst); also the largest bulk request a client can send
      * @param refillPerMinute tokens added per minute (sustained rate)
+     * @param backend         where buckets live: {@code memory} (per node, default) or {@code redis} (shared)
+     * @param redisKeyPrefix  prefix of the bucket keys in Redis ({@code backend=redis})
      */
     public record RateLimit(
             @DefaultValue("true") boolean enabled,
-            @DefaultValue("20") @Min(1) int capacity,
-            @DefaultValue("20") @Min(1) int refillPerMinute) {
+            @DefaultValue("20") @Min(1) @Max(1_000_000) int capacity,
+            @DefaultValue("20") @Min(1) @Max(1_000_000) int refillPerMinute,
+            @DefaultValue("memory") @NotNull Backend backend,
+            @DefaultValue(RedisRateLimiter.DEFAULT_KEY_PREFIX) @NotBlank String redisKeyPrefix) {
+
+        /** Storage of the token buckets. */
+        public enum Backend {
+            /** In-memory buckets of each node ({@link TokenBucketRateLimiter}). */
+            MEMORY,
+            /** Buckets shared by all nodes in Redis ({@link RedisRateLimiter}). */
+            REDIS
+        }
     }
 
     /**
@@ -93,6 +117,26 @@ public record ShortenerProperties(
         /** {@return the core pool size: half of {@link #threads()}, rounded up} */
         public int coreThreads() {
             return (threads + 1) / 2;
+        }
+    }
+
+    /**
+     * Management API authentication.
+     *
+     * @param apiKey shared secret expected in the {@code X-Api-Key} header of every {@code /api/v1/links/**}
+     *               request; blank (the default) leaves the API open and logs a warning at startup
+     */
+    public record Security(@Nullable String apiKey) {
+
+        /** {@return whether an API key is configured, i.e. the management API requires authentication} */
+        public boolean apiKeyConfigured() {
+            return apiKey != null && !apiKey.isBlank();
+        }
+
+        /** Never prints the key itself. */
+        @Override
+        public String toString() {
+            return "Security[apiKey=" + (apiKeyConfigured() ? "<redacted>" : "<unset>") + "]";
         }
     }
 }

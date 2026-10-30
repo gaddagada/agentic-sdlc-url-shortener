@@ -8,6 +8,7 @@ import io.swagger.v3.oas.annotations.headers.Header;
 import io.swagger.v3.oas.annotations.media.Content;
 import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Size;
@@ -36,14 +37,15 @@ import com.agenticsdlc.shortener.service.LinkService;
 @RestController
 @RequestMapping(LinkController.BASE_PATH)
 @Tag(name = "Links")
+@SecurityRequirement(name = OpenApiNames.API_KEY_SCHEME)
 public class LinkController {
 
     /** Base path of the links resource. */
     public static final String BASE_PATH = "/api/v1/links";
     /** Optional request header making creation safe to retry. */
-    public static final String IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+    public static final String IDEMPOTENCY_KEY_HEADER = ApiHeaders.IDEMPOTENCY_KEY;
     /** Response header set to {@code true} when a stored response is replayed. */
-    public static final String IDEMPOTENT_REPLAYED_HEADER = "Idempotent-Replayed";
+    public static final String IDEMPOTENT_REPLAYED_HEADER = ApiHeaders.IDEMPOTENT_REPLAYED;
 
     private final LinkService linkService;
 
@@ -72,9 +74,14 @@ public class LinkController {
                 schema = @Schema(type = "string", format = "uri-reference")),
         @Header(name = IDEMPOTENT_REPLAYED_HEADER, description = "Present with value true on idempotent replays",
                 schema = @Schema(type = "boolean")),
-        @Header(name = "X-RateLimit-Limit", description = "Bucket capacity", schema = @Schema(type = "integer")),
-        @Header(name = "X-RateLimit-Remaining", description = "Tokens left", schema = @Schema(type = "integer"))})
+        @Header(name = ApiHeaders.RATE_LIMIT_LIMIT, description = "Bucket capacity",
+                schema = @Schema(type = "integer")),
+        @Header(name = ApiHeaders.RATE_LIMIT_REMAINING, description = "Tokens left",
+                schema = @Schema(type = "integer"))})
     @ApiResponse(responseCode = "400", description = "Validation error or invalid expiry",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                    schema = @Schema(implementation = ProblemDetail.class)))
+    @ApiResponse(responseCode = "401", description = "Missing or wrong X-Api-Key (only when an API key is configured)",
             content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
                     schema = @Schema(implementation = ProblemDetail.class)))
     @ApiResponse(responseCode = "409", description = "Alias already taken, or same Idempotency-Key in flight",
@@ -114,6 +121,9 @@ public class LinkController {
      */
     @Operation(operationId = "getLink", summary = "Get link metadata")
     @ApiResponse(responseCode = "200", description = "The link")
+    @ApiResponse(responseCode = "401", description = "Missing or wrong X-Api-Key (only when an API key is configured)",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                    schema = @Schema(implementation = ProblemDetail.class)))
     @ApiResponse(responseCode = "404", description = "Unknown code",
             content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
                     schema = @Schema(implementation = ProblemDetail.class)))
@@ -132,6 +142,9 @@ public class LinkController {
             description = "Soft delete: the link keeps its analytics, its status becomes DISABLED and redirects "
                     + "answer 410 Gone. Idempotent.")
     @ApiResponse(responseCode = "204", description = "Link deactivated")
+    @ApiResponse(responseCode = "401", description = "Missing or wrong X-Api-Key (only when an API key is configured)",
+            content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
+                    schema = @Schema(implementation = ProblemDetail.class)))
     @ApiResponse(responseCode = "404", description = "Unknown code",
             content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE,
                     schema = @Schema(implementation = ProblemDetail.class)))

@@ -26,6 +26,7 @@ import org.springframework.test.context.ActiveProfiles;
 class RateLimitServletContainerTest {
 
     private static final String BODY = "{\"url\": \"https://example.com/container\"}";
+    private static final String BULK_BODY = "{\"items\": [{\"url\": \"https://example.com/container/bulk\"}]}";
 
     @LocalServerPort
     private int port;
@@ -54,7 +55,18 @@ class RateLimitServletContainerTest {
         // The container decodes %6C to 'l'. 404 (not routed) would also be safe; 201 would be a bypass.
         assertThat(post("/api/v1/%6Cinks").statusCode()).isIn(429, 404);
         assertThat(post("/api/v1/%6cinks;jsessionid=abc").statusCode()).isIn(429, 404);
-        assertThat(post("/api/v1/links/bulk").statusCode()).isEqualTo(429);
+
+        // The bulk endpoint is charged per item by the service, whatever the spelling: still no bypass.
+        for (String bulkPath : new String[] {"/api/v1/links/bulk", "/api/v1/links/bulk;x", "/api/v1/%6Cinks/bulk"}) {
+            HttpResponse<String> bulk = post(bulkPath, BULK_BODY);
+            assertThat(bulk.statusCode()).as(bulkPath).isIn(429, 404);
+            if (bulk.statusCode() == 429) {
+                assertThat(bulk.headers().firstValue("Retry-After")).isPresent();
+                assertThat(JsonPath.<String>read(bulk.body(), "$.type"))
+                        .isEqualTo("https://agenticsdlc.dev/problems/rate-limited");
+            }
+        }
+        assertThat(post("/api/v1/links/bulk", BULK_BODY).statusCode()).isEqualTo(429);
 
         // Redirects are not rate limited and keep their headers in the real container.
         String code = JsonPath.read(created.body(), "$.code");
@@ -67,9 +79,13 @@ class RateLimitServletContainerTest {
     }
 
     private HttpResponse<String> post(String rawPath) throws Exception {
+        return post(rawPath, BODY);
+    }
+
+    private HttpResponse<String> post(String rawPath, String body) throws Exception {
         HttpRequest request = HttpRequest.newBuilder(uri(rawPath))
                 .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(BODY))
+                .POST(HttpRequest.BodyPublishers.ofString(body))
                 .build();
         return http.send(request, HttpResponse.BodyHandlers.ofString());
     }
