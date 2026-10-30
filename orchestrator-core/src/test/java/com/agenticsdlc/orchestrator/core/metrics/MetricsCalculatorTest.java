@@ -126,6 +126,39 @@ class MetricsCalculatorTest {
     }
 
     @Test
+    void aggregatesCacheTokensAndKnownCostsAndCountsUnpricedCalls() {
+        Run priced = run("p1", RunStatus.COMPLETED);
+        priced.updateCounters(c -> c.plusLlmUsage(1000, 100, 600, 200, 4_000L).plusLlmUsage(500, 50, 0, 0, 1_500L));
+        Run alsoPriced = run("p2", RunStatus.RUNNING);
+        alsoPriced.updateCounters(c -> c.plusLlmUsage(100, 10, 50, 0, 500L));
+        Run partlyPriced = run("p3", RunStatus.RUNNING);
+        partlyPriced.updateCounters(c -> c.plusLlmUsage(100, 10, 0, 0, 900L).plusLlmUsage(200, 20, 100, 50, null));
+        Run deterministic = run("d1", RunStatus.COMPLETED);
+
+        ReliabilityMetrics.LlmStats llm = MetricsCalculator.compute(List.of(priced, alsoPriced, partlyPriced,
+                deterministic), clock).llm();
+
+        assertThat(llm.calls()).isEqualTo(5);
+        assertThat(llm.inputTokens()).isEqualTo(1900);
+        assertThat(llm.outputTokens()).isEqualTo(190);
+        assertThat(llm.cacheReadTokens()).isEqualTo(750);
+        assertThat(llm.cacheCreationTokens()).isEqualTo(250);
+        assertThat(llm.unpricedCalls()).isEqualTo(1);
+        assertThat(llm.estimatedCostUsd()).as("known run costs only: 5500 + 500 micro-dollars")
+                .isCloseTo(0.006, within(1e-12));
+
+        Run unpriced = run("u1", RunStatus.COMPLETED);
+        unpriced.updateCounters(c -> c.plusLlmUsage(10, 1));
+        ReliabilityMetrics.LlmStats nothingPriced = MetricsCalculator.compute(List.of(unpriced, deterministic), clock)
+                .llm();
+        assertThat(nothingPriced.estimatedCostUsd()).as("nothing could be priced").isNull();
+        assertThat(nothingPriced.unpricedCalls()).isEqualTo(1);
+        assertThat(MetricsCalculator.compute(List.of(deterministic), clock).llm())
+                .isEqualTo(new ReliabilityMetrics.LlmStats(0, 0, 0, 0, 0, 0.0, 0))
+                .isEqualTo(new ReliabilityMetrics.LlmStats(0, 0, 0));
+    }
+
+    @Test
     void emptyInputYieldsZeroes() {
         ReliabilityMetrics m = MetricsCalculator.compute(List.of(), clock);
         assertThat(m.runs().successRate()).isZero();

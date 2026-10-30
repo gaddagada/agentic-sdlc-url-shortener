@@ -139,4 +139,24 @@ class RunRegistryEvictionTest {
                 .isEqualTo(RunStatus.COMPLETED);
         assertThat(AuditChain.verify(harness.events(id)).valid()).isTrue();
     }
+
+    @Test
+    void listCachedReturnsOnlyTheRegistryWhileListAlsoReadsTheStore() {
+        OrchestrationEngine engine = harness.start();
+        String first = engine.start(REQUIREMENT, "first", RunOptions.defaults()).id();
+        harness.awaitApproval(first, DESIGN);
+        clock.advance(Duration.ofSeconds(1));
+        String second = engine.start(REQUIREMENT, "second", RunOptions.defaults()).id();
+        harness.awaitApproval(second, DESIGN);
+        assertThat(engine.listCached()).extracting(Run::id).containsExactly(second, first);
+
+        clock.advance(Duration.ofMinutes(61));
+        assertThat(engine.evictIdleRuns()).isEqualTo(2);
+        assertThat(engine.listCached()).as("evicted runs are not cached").isEmpty();
+        assertThat(engine.list()).extracting(Run::id).as("the store still has them").containsExactly(second, first);
+        assertThat(engine.isCached(first)).as("list() does not rehydrate").isFalse();
+
+        engine.approve(first, DESIGN, ALICE, null);
+        assertThat(engine.listCached()).extracting(Run::id).containsExactly(first);
+    }
 }

@@ -19,6 +19,7 @@ import com.agenticsdlc.orchestrator.core.agent.AgentRegistry;
 import com.agenticsdlc.orchestrator.core.agent.AgentSettings;
 import com.agenticsdlc.orchestrator.core.audit.ChangeRecordSigner;
 import com.agenticsdlc.orchestrator.core.audit.UnsignedChangeRecordSigner;
+import com.agenticsdlc.orchestrator.core.metrics.LlmPriceBook;
 import com.agenticsdlc.orchestrator.core.port.InMemoryRunLeaseProvider;
 import com.agenticsdlc.orchestrator.core.port.RunLeaseProvider;
 import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
@@ -75,6 +76,16 @@ import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
  * @param registryMaxTerminalRuns maximum number of COMPLETED and ABORTED runs cached in memory; beyond it the
  *                                least recently ended ones are evicted (default
  *                                {@value #DEFAULT_REGISTRY_MAX_TERMINAL_RUNS})
+ * @param priceBook prices used to estimate the cost of every LLM call when its usage is recorded (default
+ *                  {@link LlmPriceBook#EMPTY}: no prices, every call is unpriced and run costs are unknown); prices
+ *                  are operator configuration, the core ships none
+ * @param dependencyScanCommand optional external dependency scanner (for example an OWASP dependency-check Maven
+ *                              goal) run by the security review in the run's sandbox, through the same
+ *                              {@link com.agenticsdlc.orchestrator.core.workspace.BuildRunner} and allow-list as
+ *                              {@code buildCommand} (Maven commands only); only its exit status and the first 2000
+ *                              characters of its captured output are recorded (default null: no external scan; the
+ *                              built-in dependency inventory always runs for REPO runs)
+ * @param dependencyScanTimeout timeout of the dependency scan (default 5 min)
  */
 public record EngineConfig(
         double ambiguityThreshold,
@@ -101,7 +112,13 @@ public record EngineConfig(
         RunLeaseProvider leaseProvider,
         Duration leaseTtl,
         Duration registryRetention,
-        int registryMaxTerminalRuns) {
+        int registryMaxTerminalRuns,
+        LlmPriceBook priceBook,
+        @Nullable String dependencyScanCommand,
+        Duration dependencyScanTimeout) {
+
+    /** Default {@link #dependencyScanTimeout()}. */
+    public static final Duration DEFAULT_DEPENDENCY_SCAN_TIMEOUT = AgentSettings.DEFAULT_DEPENDENCY_SCAN_TIMEOUT;
 
     /** Default {@link #llmTimeoutScale()}. */
     public static final double DEFAULT_LLM_TIMEOUT_SCALE = 3.0;
@@ -215,6 +232,60 @@ public record EngineConfig(
         if (registryMaxTerminalRuns < 0) {
             throw new IllegalArgumentException("registryMaxTerminalRuns must not be negative");
         }
+        Objects.requireNonNull(priceBook, "priceBook");
+        Objects.requireNonNull(dependencyScanTimeout, "dependencyScanTimeout");
+        if (dependencyScanCommand != null && dependencyScanCommand.isBlank()) {
+            dependencyScanCommand = null;
+        }
+        if (dependencyScanTimeout.isNegative() || dependencyScanTimeout.isZero()) {
+            throw new IllegalArgumentException("dependencyScanTimeout must be positive");
+        }
+    }
+
+    /**
+     * Creates a configuration without prices and without a dependency scan command (the canonical constructor before
+     * they existed): {@link LlmPriceBook#EMPTY}, no scan, default scan timeout.
+     *
+     * @param ambiguityThreshold ambiguity threshold
+     * @param backoffScale backoff scale
+     * @param maxBackoff backoff cap
+     * @param sandboxEnabled whether sandboxes are enabled
+     * @param verifyBuildEnabled whether sandbox builds are enabled
+     * @param sandboxRoot sandbox root
+     * @param workspaceRoot workspace root, or null
+     * @param buildTimeout build timeout
+     * @param clock clock
+     * @param workspaceIndex codebase index supplier
+     * @param compensationHandlers compensation handlers
+     * @param listener listener, or null
+     * @param stageExecutor stage executor, or null
+     * @param retryScheduler retry scheduler, or null
+     * @param buildCommand sandbox build command
+     * @param llmTimeoutScale LLM timeout scale
+     * @param sourceContextPerFileChars source context characters per file
+     * @param sourceContextTotalChars source context characters in total
+     * @param providerCircuitBreaker provider circuit breaker
+     * @param changeRecordSigner change record signer
+     * @param nodeId node id
+     * @param leaseProvider lease provider
+     * @param leaseTtl lease duration
+     * @param registryRetention registry retention
+     * @param registryMaxTerminalRuns maximum cached terminal runs
+     */
+    public EngineConfig(double ambiguityThreshold, double backoffScale, Duration maxBackoff, boolean sandboxEnabled,
+                        boolean verifyBuildEnabled, Path sandboxRoot, @Nullable Path workspaceRoot,
+                        Duration buildTimeout, Clock clock, Supplier<@Nullable CodebaseIndex> workspaceIndex,
+                        List<CompensationHandler> compensationHandlers, @Nullable EngineListener listener,
+                        @Nullable ExecutorService stageExecutor, @Nullable ScheduledExecutorService retryScheduler,
+                        String buildCommand, double llmTimeoutScale, int sourceContextPerFileChars,
+                        int sourceContextTotalChars, ProviderCircuitBreaker providerCircuitBreaker,
+                        ChangeRecordSigner changeRecordSigner, String nodeId, RunLeaseProvider leaseProvider,
+                        Duration leaseTtl, Duration registryRetention, int registryMaxTerminalRuns) {
+        this(ambiguityThreshold, backoffScale, maxBackoff, sandboxEnabled, verifyBuildEnabled, sandboxRoot,
+                workspaceRoot, buildTimeout, clock, workspaceIndex, compensationHandlers, listener, stageExecutor,
+                retryScheduler, buildCommand, llmTimeoutScale, sourceContextPerFileChars, sourceContextTotalChars,
+                providerCircuitBreaker, changeRecordSigner, nodeId, leaseProvider, leaseTtl, registryRetention,
+                registryMaxTerminalRuns, LlmPriceBook.EMPTY, null, DEFAULT_DEPENDENCY_SCAN_TIMEOUT);
     }
 
     /**
@@ -427,6 +498,9 @@ public record EngineConfig(
         b.leaseTtl = leaseTtl;
         b.registryRetention = registryRetention;
         b.registryMaxTerminalRuns = registryMaxTerminalRuns;
+        b.priceBook = priceBook;
+        b.dependencyScanCommand = dependencyScanCommand;
+        b.dependencyScanTimeout = dependencyScanTimeout;
         return b;
     }
 
@@ -437,7 +511,7 @@ public record EngineConfig(
      */
     public AgentSettings agentSettings() {
         return new AgentSettings(ambiguityThreshold, sandboxEnabled, verifyBuildEnabled, workspaceRoot, sandboxRoot,
-                buildTimeout, buildCommand);
+                buildTimeout, buildCommand, dependencyScanCommand, dependencyScanTimeout);
     }
 
     /**
@@ -469,8 +543,44 @@ public record EngineConfig(
         private Duration leaseTtl = DEFAULT_LEASE_TTL;
         private Duration registryRetention = DEFAULT_REGISTRY_RETENTION;
         private int registryMaxTerminalRuns = DEFAULT_REGISTRY_MAX_TERMINAL_RUNS;
+        private LlmPriceBook priceBook = LlmPriceBook.EMPTY;
+        private @Nullable String dependencyScanCommand;
+        private Duration dependencyScanTimeout = DEFAULT_DEPENDENCY_SCAN_TIMEOUT;
 
         private Builder() {
+        }
+
+        /**
+         * Sets the LLM price book used to estimate call costs.
+         *
+         * @param value the price book ({@link LlmPriceBook#EMPTY} prices nothing)
+         * @return this builder
+         */
+        public Builder priceBook(LlmPriceBook value) {
+            this.priceBook = value;
+            return this;
+        }
+
+        /**
+         * Sets the optional external dependency scan command run by the security review in the run's sandbox.
+         *
+         * @param value a command accepted by the build runner (Maven commands with plain arguments), or null for none
+         * @return this builder
+         */
+        public Builder dependencyScanCommand(@Nullable String value) {
+            this.dependencyScanCommand = value;
+            return this;
+        }
+
+        /**
+         * Sets the dependency scan timeout.
+         *
+         * @param value positive duration
+         * @return this builder
+         */
+        public Builder dependencyScanTimeout(Duration value) {
+            this.dependencyScanTimeout = value;
+            return this;
         }
 
         /**
@@ -762,7 +872,8 @@ public record EngineConfig(
                     nodeId != null ? nodeId : defaultNodeId(),
                     leaseProvider != null ? leaseProvider
                             : new InMemoryRunLeaseProvider(Objects.requireNonNull(clock, "clock")),
-                    leaseTtl, registryRetention, registryMaxTerminalRuns);
+                    leaseTtl, registryRetention, registryMaxTerminalRuns, priceBook, dependencyScanCommand,
+                    dependencyScanTimeout);
         }
     }
 }

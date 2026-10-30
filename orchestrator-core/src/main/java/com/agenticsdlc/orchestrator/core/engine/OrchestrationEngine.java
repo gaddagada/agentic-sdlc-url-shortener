@@ -77,6 +77,7 @@ import com.agenticsdlc.orchestrator.core.policy.PolicyDecision;
 import com.agenticsdlc.orchestrator.core.policy.PolicyEngine;
 import com.agenticsdlc.orchestrator.core.policy.PolicyFinding;
 import com.agenticsdlc.orchestrator.core.policy.Verdict;
+import com.agenticsdlc.orchestrator.core.policy.pack.PolicyPack;
 import com.agenticsdlc.orchestrator.core.policy.rules.NoGoReleaseRule;
 import com.agenticsdlc.orchestrator.core.port.RunLease;
 import com.agenticsdlc.orchestrator.core.port.RunLeaseProvider;
@@ -178,6 +179,9 @@ public final class OrchestrationEngine implements AutoCloseable {
     private final ProviderCircuits circuits;
     private final RunLeaseProvider leases;
     private final String nodeId;
+    private final @Nullable PolicyPack policyPack;
+    /** Audit data {@code policyPack} (name, version, hash) of the active pack, or null without a pack. */
+    private final @Nullable Map<String, Object> policyPackData;
     private volatile boolean closed;
 
     /**
@@ -230,6 +234,19 @@ public final class OrchestrationEngine implements AutoCloseable {
         }
         this.rollbackService = new RollbackService(handlers, control, metrics);
         this.circuits = new ProviderCircuits(config.providerCircuitBreaker());
+        this.policyPack = policyEngine.pack();
+        this.policyPackData = policyPack == null ? null : RunMutation.data("name", policyPack.name(), "version",
+                policyPack.version(), "hash", policyEngine.packHash());
+    }
+
+    /**
+     * Returns the policy pack of this engine's policy engine. When a pack is active, its name, version and hash are
+     * recorded as data {@code policyPack} of every RUN_CREATED and POLICY_DENIED audit event.
+     *
+     * @return the active pack, or null when only the built-in rules are active
+     */
+    public @Nullable PolicyPack policyPack() {
+        return policyPack;
     }
 
     /**
@@ -340,13 +357,14 @@ public final class OrchestrationEngine implements AutoCloseable {
                             "requestedBy", requestedBy.id(), "nodeId", tx.nodeId,
                             "requirementChars", run.requirement().length(), "faults",
                             options.faults().stream().map(f -> f.stageId() + ":" + f.kind() + "x" + f.failTimes())
-                                    .toList()));
+                                    .toList(), "policyPack", policyPackData));
             PolicyDecision decision = gates.runStart(run, run.activeRequirement());
             recordFindings(tx, null, GatePhase.RUN_START, decision.findings());
             if (decision.verdict() == Verdict.DENY) {
                 String detail = denialDetail(decision.findings());
                 tx.audit(AuditEventType.POLICY_DENIED, null, Actor.system(), "requirement denied by policy: " + detail,
-                        RunMutation.data("phase", GatePhase.RUN_START, "rules", ruleIds(decision.findings())));
+                        RunMutation.data("phase", GatePhase.RUN_START, "rules", ruleIds(decision.findings()),
+                                "policyPack", policyPackData));
                 control.safeStop(tx, HaltReason.POLICY_DENIED, "policy denied the requirement: " + detail,
                         Actor.system());
                 return;
@@ -588,7 +606,7 @@ public final class OrchestrationEngine implements AutoCloseable {
                 String detail = denialDetail(decision.findings());
                 tx.audit(AuditEventType.POLICY_DENIED, null, actor, "re-plan denied by policy: " + detail,
                         RunMutation.data("phase", GatePhase.RUN_START, "rules", ruleIds(decision.findings()),
-                                "requirementChars", requirement.length()));
+                                "requirementChars", requirement.length(), "policyPack", policyPackData));
                 if (run.status().isActive()) {
                     control.safeStop(tx, HaltReason.POLICY_DENIED, "re-plan denied by policy: " + detail, actor);
                 } else {
@@ -716,6 +734,10 @@ public final class OrchestrationEngine implements AutoCloseable {
      * store ({@link RunStore#loadAll()}), without duplicates. The cached copy of a run wins, unless this node is not
      * executing the run and the store holds a newer state (written by another node).
      *
+     * <p>This is the authoritative listing, but it is expensive: every call loads every run of the store (with a JPA
+     * store, every run aggregate is read and deserialized). Use {@link #listCached()} for frequent, cheap reads that
+     * may omit runs, and this method where completeness matters (metrics over all runs, startup reports).</p>
+     *
      * @return copies
      */
     public List<Run> list() {
@@ -741,6 +763,31 @@ public final class OrchestrationEngine implements AutoCloseable {
         List<Run> runs = new ArrayList<>(byId.values());
         runs.sort(Comparator.comparing(Run::createdAt).reversed().thenComparing(Run::id));
         evictQuietly(null);
+        return List.copyOf(runs);
+    }
+
+    /**
+     * Returns snapshot copies of the runs cached in this engine's in-memory registry only, newest first. Cheap: it
+     * never touches the store. Not authoritative: runs evicted from memory ({@link #evictIdleRuns()}), runs that
+     * this engine never loaded (for example created by another node, or persisted before a restart and not yet read)
+     * are missing, and a cached run that another node changed meanwhile may be stale. Use {@link #list()} when every
+     * run must be included.
+     *
+     * @return copies of the cached runs
+     */
+    public List<Run> listCached() {
+        List<Run> runs = new ArrayList<>();
+        for (RunRegistry.RunHolder holder : registry.all()) {
+            holder.lock.lock();
+            try {
+                if (!holder.evicted && !holder.discarded) {
+                    runs.add(holder.run.copy());
+                }
+            } finally {
+                holder.lock.unlock();
+            }
+        }
+        runs.sort(Comparator.comparing(Run::createdAt).reversed().thenComparing(Run::id));
         return List.copyOf(runs);
     }
 
@@ -1128,7 +1175,8 @@ public final class OrchestrationEngine implements AutoCloseable {
                             exec.setLastError("entry gate denied: " + gate.reasonText());
                             tx.audit(AuditEventType.POLICY_DENIED, def.id(), Actor.system(),
                                     "entry of " + def.id() + " denied: " + gate.reasonText(),
-                                    RunMutation.data("phase", GatePhase.ENTRY, "rules", gate.ruleIds()));
+                                    RunMutation.data("phase", GatePhase.ENTRY, "rules", gate.ruleIds(),
+                                            "policyPack", policyPackData));
                             tx.audit(AuditEventType.STAGE_FAILED, def.id(), Actor.system(), exec.lastError());
                             rollbackService.rollback(tx, def.id(), "entry gate denied: " + gate.reasonText(),
                                     HaltReason.POLICY_DENIED);
@@ -1406,24 +1454,61 @@ public final class OrchestrationEngine implements AutoCloseable {
             case StageResult.NeedsClarification c -> c.llm();
             case StageResult.Failure f -> f.failure().trace();
         };
+        // The cost is computed once, when the usage is recorded, with the price book of this moment.
+        Long cost = trace != null ? priceOf(trace) : null;
         if (trace != null) {
-            run.updateCounters(c -> c.plusLlmUsage(trace.inputTokens(), trace.outputTokens()));
+            run.updateCounters(c -> c.plusLlmUsage(trace.inputTokens(), trace.outputTokens(),
+                    trace.cacheReadTokens(), trace.cacheCreationTokens(), cost));
         }
         String provider = trace != null ? trace.providerId() : providerOf(agentId);
         long in = trace != null ? trace.inputTokens() : 0L;
         long out = trace != null ? trace.outputTokens() : 0L;
-        safeMetric(() -> metrics.agentCall(provider, def.role(), outcome.latencyMs(), in, out));
+        long cacheRead = trace != null ? trace.cacheReadTokens() : 0L;
+        long cacheCreation = trace != null ? trace.cacheCreationTokens() : 0L;
+        safeMetric(() -> metrics.agentCall(provider, def.role(), outcome.latencyMs(), in, out, cacheRead,
+                cacheCreation));
+        if (trace != null) {
+            safeMetric(() -> metrics.llmCost(provider, def.role(), cost));
+        }
+        Map<String, Object> llmData = llmAuditData(trace, cost);
         switch (outcome.result()) {
-            case StageResult.Success s -> handleSuccess(tx, def, exec, s, outcome, agentId);
-            case StageResult.NeedsClarification c -> handleClarification(tx, exec, c, agentId);
+            case StageResult.Success s -> handleSuccess(tx, def, exec, s, outcome, agentId, cost, llmData);
+            case StageResult.NeedsClarification c -> handleClarification(tx, exec, c, agentId, llmData);
             case StageResult.Failure f -> handleFailure(tx, def, exec, f.failure());
         }
         StageStatus status = exec.status();
         safeMetric(() -> metrics.stageCompleted(stageId, status, outcome.latencyMs()));
     }
 
+    /** Prices an LLM call with the configured price book; null when no price applies (or pricing failed). */
+    private @Nullable Long priceOf(LlmTrace trace) {
+        try {
+            return config.priceBook().costMicroUsd(trace.providerId(), trace.model(), trace.inputTokens(),
+                    trace.outputTokens(), trace.cacheReadTokens(), trace.cacheCreationTokens()).orElse(null);
+        } catch (RuntimeException e) {
+            LOG.warn("LLM call could not be priced provider={} model={} error={}", trace.providerId(), trace.model(),
+                    e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * Returns the LLM usage data of an attempt for its AGENT_DECISION audit event: provider, model, token counts
+     * (prompt cache reads and writes included) and {@code costMicroUsd} when the call was priced; empty without an
+     * LLM trace.
+     */
+    private static Map<String, Object> llmAuditData(@Nullable LlmTrace trace, @Nullable Long cost) {
+        if (trace == null) {
+            return Map.of();
+        }
+        return RunMutation.data("provider", trace.providerId(), "model", trace.model(), "inputTokens",
+                trace.inputTokens(), "outputTokens", trace.outputTokens(), "cacheReadTokens", trace.cacheReadTokens(),
+                "cacheCreationTokens", trace.cacheCreationTokens(), "costMicroUsd", cost);
+    }
+
     private void handleSuccess(RunMutation tx, StageDefinition def, StageExecution exec, StageResult.Success success,
-                               StageExecutor.AttemptOutcome outcome, String agentId) {
+                               StageExecutor.AttemptOutcome outcome, String agentId, @Nullable Long cost,
+                               Map<String, Object> llmData) {
         Run run = tx.run;
         ArtifactPayload payload = success.payload();
         try {
@@ -1443,16 +1528,20 @@ public final class OrchestrationEngine implements AutoCloseable {
         Provenance provenance = new Provenance(outcome.context().derivedFrom(), def.role(), agentId,
                 trace != null ? trace.providerId() : providerOf(agentId), trace != null ? trace.model() : null,
                 trace != null ? trace.promptHash() : null, trace != null ? trace.inputTokens() : 0L,
-                trace != null ? trace.outputTokens() : 0L, outcome.latencyMs(), exec.attempts(), run.planVersion());
+                trace != null ? trace.outputTokens() : 0L, outcome.latencyMs(), exec.attempts(), run.planVersion(),
+                trace != null ? trace.cacheReadTokens() : 0L, trace != null ? trace.cacheCreationTokens() : 0L,
+                trace != null ? cost : Long.valueOf(0L));
         Artifact previous = run.acceptedArtifact(def.id()).orElse(null);
         Artifact artifact = new Artifact(Ids.newId(), run.id(), def.id(), payload.kind(),
                 run.nextArtifactVersion(def.id()), run.planVersion(), codec.hash(payload), payload, provenance,
                 tx.now);
         run.addArtifact(artifact);
+        Map<String, Object> decisionData = RunMutation.data("artifactId", artifact.id(), "version", artifact.version(),
+                "kind", artifact.kind(), "hash", artifact.hash(), "latencyMs", outcome.latencyMs(), "compensations",
+                success.compensations().size());
+        decisionData.putAll(llmData);
         tx.audit(AuditEventType.AGENT_DECISION, def.id(), Actor.agent(agentId), auditableRationale(success.rationale()),
-                RunMutation.data("artifactId", artifact.id(), "version", artifact.version(), "kind", artifact.kind(),
-                        "hash", artifact.hash(), "latencyMs", outcome.latencyMs(), "compensations",
-                        success.compensations().size()));
+                decisionData);
         exec.setLastError(null);
         // The agent's side effects (for example a sandbox materialization) already happened, whatever the gate
         // decides: register their compensations now so that a denial or a later failure rolls them back.
@@ -1474,7 +1563,7 @@ public final class OrchestrationEngine implements AutoCloseable {
             tx.audit(AuditEventType.POLICY_DENIED, def.id(), Actor.system(), "artifact " + artifact.reference()
                             + " denied and removed from history: " + gate.reasonText(),
                     RunMutation.data("phase", GatePhase.EXIT, "rules", gate.ruleIds(), "artifactId",
-                            artifact.id(), "hash", artifact.hash(), "removed", true));
+                            artifact.id(), "hash", artifact.hash(), "removed", true, "policyPack", policyPackData));
             failStage(tx, exec, "exit gate denied: " + gate.reasonText(), HaltReason.POLICY_DENIED);
             return;
         }
@@ -1559,12 +1648,14 @@ public final class OrchestrationEngine implements AutoCloseable {
     }
 
     private void handleClarification(RunMutation tx, StageExecution exec, StageResult.NeedsClarification request,
-                                     String agentId) {
+                                     String agentId, Map<String, Object> llmData) {
         Run run = tx.run;
         exec.setStatus(StageStatus.AWAITING_CLARIFICATION);
         run.setClarification(new Clarification(exec.stageId(), request.questions(), Map.of(), tx.now, null, null));
+        Map<String, Object> decisionData = RunMutation.data("needsClarification", true);
+        decisionData.putAll(llmData);
         tx.audit(AuditEventType.AGENT_DECISION, exec.stageId(), Actor.agent(agentId),
-                auditableRationale(request.rationale()), RunMutation.data("needsClarification", true));
+                auditableRationale(request.rationale()), decisionData);
         tx.audit(AuditEventType.CLARIFICATION_REQUESTED, exec.stageId(), Actor.system(),
                 request.questions().size() + " clarification questions asked",
                 RunMutation.data("questionIds", request.questions().stream().map(ClarificationQuestion::id).toList()));

@@ -153,7 +153,8 @@ public final class PromptTemplates {
             case DOCUMENTATION -> "Write concise GitHub-flavoured Markdown. Document only what this change adds or "
                     + "alters; do not repeat unchanged documentation.";
             case SECURITY_REVIEW -> "Use STRIDE categories; passed is true only when there is no HIGH or CRITICAL "
-                    + "finding. When the prompt shows the source of impacted files, judge the change against it.";
+                    + "finding. When the prompt shows the source of impacted files, judge the change against it. Leave "
+                    + "dependencies empty: the engine fills the dependency inventory from the build files.";
             case RELEASE -> "Leave changeRecord.approvals empty and changeRecord.signature null: approvals are recorded "
                     + "and the record is signed by the engine from human "
                     + "decisions only. A checklist item with status FAIL requires the decision NO_GO; never mark "

@@ -32,4 +32,13 @@ public final class DefaultPolicyRules {
                 new StrictEntryApprovalRule(),
                 new AutonomyFloorRule());
     }
+
+    /**
+     * Returns the ids of all built-in rules, in the order of {@link #all()}.
+     *
+     * @return the ids
+     */
+    public static List<String> ids() {
+        return all().stream().map(PolicyRule::id).toList();
+    }
 }

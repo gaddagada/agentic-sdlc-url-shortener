@@ -1,5 +1,7 @@
 package com.agenticsdlc.orchestrator.core.metrics;
 
+import org.jspecify.annotations.Nullable;
+
 import com.agenticsdlc.orchestrator.core.agent.AgentRole;
 import com.agenticsdlc.orchestrator.core.model.StageStatus;
 
@@ -57,6 +59,37 @@ public interface MetricsRecorder {
      * @param outputTokens LLM output tokens (0 for deterministic agents)
      */
     void agentCall(String providerId, AgentRole role, long latencyMs, long inputTokens, long outputTokens);
+
+    /**
+     * An agent call finished, with prompt cache usage. The engine calls this overload; the default delegates to
+     * {@link #agentCall(String, AgentRole, long, long, long)} and drops the cache counts, so existing recorders keep
+     * working unchanged.
+     *
+     * @param providerId provider id
+     * @param role agent role
+     * @param latencyMs latency
+     * @param inputTokens LLM input tokens, cache reads and writes included (0 for deterministic agents)
+     * @param outputTokens LLM output tokens (0 for deterministic agents)
+     * @param cacheReadTokens input tokens served from the provider's prompt cache
+     * @param cacheCreationTokens input tokens written to the provider's prompt cache
+     */
+    default void agentCall(String providerId, AgentRole role, long latencyMs, long inputTokens, long outputTokens,
+                           long cacheReadTokens, long cacheCreationTokens) {
+        agentCall(providerId, role, latencyMs, inputTokens, outputTokens);
+    }
+
+    /**
+     * The estimated cost of an LLM call was computed (called for every attempt that reported LLM usage, right after
+     * {@link #agentCall(String, AgentRole, long, long, long, long, long)}). The default does nothing.
+     *
+     * @param providerId provider id
+     * @param role agent role
+     * @param costMicroUsd cost in micro-dollars (millionths of a US dollar), or null when the engine's price book has
+     *                     no price for the provider and model
+     */
+    default void llmCost(String providerId, AgentRole role, @Nullable Long costMicroUsd) {
+        // optional
+    }
 
     /**
      * A human decided on an approval.

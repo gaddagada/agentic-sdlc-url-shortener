@@ -53,8 +53,31 @@ class CoreArchitectureTest {
         noClasses().that().resideInAnyPackage("..core.model..", "..core.artifact..", "..core.graph..")
                 .should().dependOnClassesThat().resideInAnyPackage("..core.engine..", "..core.policy..",
                         "..core.agent.deterministic..", "..core.agent.llm..", "..core.workspace..", "..core.port..",
-                        "..core.audit..", "..core.metrics..")
+                        "..core.audit..", "..core.metrics..", "..core.evaluation..")
                 .because("model, artifact and graph are the domain layer").check(classes);
+    }
+
+    @Test
+    void evaluationUsesAgentsOnlyThroughTheEngine() {
+        noClasses().that().resideInAPackage("..core.evaluation..").should().dependOnClassesThat()
+                .resideInAnyPackage("..core.agent.deterministic..", "..core.agent.llm..")
+                .because("the evaluation harness scores whatever agents the engine factory configures")
+                .check(classes);
+    }
+
+    @Test
+    void onlyTheEvaluationHarnessDependsOnEvaluation() {
+        noClasses().that().resideOutsideOfPackage("..core.evaluation..").should().dependOnClassesThat()
+                .resideInAPackage("..core.evaluation..")
+                .because("evaluation is an offline harness on top of the engine, never part of a run").check(classes);
+    }
+
+    @Test
+    void policyPacksStayInsideThePolicyLayer() {
+        noClasses().that().resideInAPackage("..core.policy.pack..").should().dependOnClassesThat()
+                .resideInAnyPackage("..core.engine..", "..core.agent..", "..core.workspace..", "..core.port..",
+                        "..core.audit..", "..core.metrics..", "..core.evaluation..")
+                .because("declarative rules evaluate the policy context only").check(classes);
     }
 
     @Test

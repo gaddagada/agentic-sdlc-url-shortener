@@ -252,12 +252,16 @@ com.agenticsdlc.orchestrator.core
                JsonSchemas (record -> JSON schema), LlmException
   policy/      PolicyEngine, PolicyRule, PolicyContext, PolicyDecision, Verdict, PolicyFinding,
                Severity, RiskLevel, RiskAssessment, rules/* (section 5.7)
+  policy/pack/ PolicyPack, DeclarativeRule, Condition, Effect, PolicyPackLoader, DeclarativePolicyRule (5.7.1)
   workspace/   CodebaseIndex, CodebaseIndexer, IndexedType, TypeKind, Endpoint, ImpactAnalyzer,
-               WorkspaceSandbox, BuildRunner, ProcessBuildRunner, BuildResult
+               WorkspaceSandbox, BuildRunner, ProcessBuildRunner, BuildResult, DependencyInventory (5.6.9)
   engine/      OrchestrationEngine, Scheduler, StageExecutor, GateEvaluator, ReplanService,
                RollbackService, RunRegistry (locks + cache), EngineConfig, EngineListener
   audit/       AuditEvent, AuditEventType, Actor, AuditSink, InMemoryAuditSink
-  metrics/     ReliabilityMetrics (record), MetricsCalculator, MetricsRecorder (SPI), NoopMetricsRecorder
+  metrics/     ReliabilityMetrics (record), MetricsCalculator, MetricsRecorder (SPI), NoopMetricsRecorder,
+               LlmPriceBook, LlmPrice (5.10.1)
+  evaluation/  ArtifactScorer(s), Score, Criterion, RunEvaluator, EvaluationReport, EvaluationSuite,
+               EvaluationSuiteRunner, SuiteResult (5.13)
   port/        RunStore (SPI), InMemoryRunStore
   json/        JsonCodec (Jackson 3 based: canonical serialization, hashing, typed parsing)
   util/        Hashes (SHA-256 hex), Ids, Clocks
@@ -707,10 +711,29 @@ statement, ADRs from `DesignSpec.decisions`).
 #### 5.6.9 `security-scan` -> `SecurityReview`
 
 ```
-SecurityReview { List<Threat> threats; List<Check> checks; List<Finding> findings; List<String> complianceNotes; boolean passed }
+SecurityReview { List<Threat> threats; List<Check> checks; List<Finding> findings; List<String> complianceNotes; boolean passed;
+  List<DependencyRecord> dependencies }
 Threat { String id; String category (STRIDE: SPOOFING|TAMPERING|REPUDIATION|INFORMATION_DISCLOSURE|DENIAL_OF_SERVICE|ELEVATION_OF_PRIVILEGE); String description; String mitigation; String status (MITIGATED|ACCEPTED|OPEN) }
 Finding { Severity severity (LOW|MEDIUM|HIGH|CRITICAL); String title; String recommendation }
+DependencyRecord { String module (POM path); String groupId; String artifactId; String version (resolved, or "managed" | "unknown" | "none");
+  String scope ("build" for plugins); Kind kind (DEPENDENCY|PLUGIN); String section (dependencies|dependencyManagement|build/plugins|build/pluginManagement, "profile:<id>/" prefix) }
 ```
+
+Dependency inventory (REPO runs; `workspace/DependencyInventory`, applied by `agent/DependencyReview` in both the
+deterministic and the LLM agent, so the inventory is always read from the build files and never taken from model
+output): every `pom.xml` under the run's sandbox (when it exists) or the workspace root, skipping `target/`, `.git/`,
+`node_modules/`, `sandbox/`, `.idea/`, parsed with the JDK XML parser in secure mode (DOCTYPE rejected, no external
+entities or DTDs, no XInclude). Properties are resolved from the module and its in-workspace parents. Flags: `system`
+scope and `LATEST`/`RELEASE` HIGH, version ranges and SNAPSHOT versions of artifacts not built in the workspace MEDIUM,
+duplicate declarations and plugins without a managed version LOW (a plugin whose parent POM lies outside the
+workspace gets version `unknown` and no flag), unparseable POMs MEDIUM. One finding per flag kind (title prefix
+`Dependency hygiene: `) and a `dependency-inventory` check (passed when no flag is HIGH). This is an inventory and
+hygiene check, not a CVE scan. Optional external scanner: `EngineConfig.dependencyScanCommand` (default null) runs in
+the run's sandbox through the same `BuildRunner` and allow-list as `buildCommand` (Maven commands only) with
+`dependencyScanTimeout` (default 5 min); only the exit status and the first 2000 characters of the captured output
+(credential-like tokens redacted) are recorded in a `dependency-scan` check; a non-zero exit is a HIGH finding, a
+scan that could not run or timed out MEDIUM, a configured scan without a sandbox an advisory check only.
+
 Deterministic: STRIDE threats templated from the API changes and data handling; checks: input
 validation present in design (`securityConsiderations` mentions validation), SSRF/open-redirect
 guard when URLs are handled, no raw PII (data handling protection not empty when piiFields non-empty),
@@ -752,9 +775,13 @@ public interface LlmClient {
 }
 public record LlmRequest(String system, String user, int maxOutputTokens, Duration timeout) {}
 public record LlmResponse<T>(T output, String rawText, LlmUsage usage, long latencyMs, String model) {}
-public record LlmUsage(long inputTokens, long outputTokens) {}
+public record LlmUsage(long inputTokens, long outputTokens, long cacheReadTokens, long cacheCreationTokens) {}  // 2-arg constructor: cache counts 0
 public class LlmException extends Exception { boolean retryable; }
 ```
+
+`inputTokens` counts every input token, prompt cache reads and writes included; the cache counts are parts of it
+(uncached input = input - cacheRead - cacheCreation). `LlmTrace`, `Provenance` and `RunCounters` carry the cache
+counts too (compatibility constructors keep the old shapes; new persisted fields are boxed so older JSON reads).
 
 `JsonSchemas.forRecord(Class<?>)` produces a JSON-schema `Map<String,Object>` (type object,
 properties, required = all components, `additionalProperties=false`, enums as `enum` arrays, lists as
@@ -791,6 +818,27 @@ Rules (all deterministic, each with unit tests):
 `PolicyEngine.evaluate(ctx)` runs every rule, audits each finding (`POLICY_FINDING`), and combines.
 A DENY at RUN_START makes `start` create the run, audit `POLICY_DENIED`, and immediately safe-stop it
 with `HaltReason.POLICY_DENIED` (so the denial is visible and auditable, not a 400 error).
+
+#### 5.7.1 Policy packs (policy as code)
+
+`policy/pack/PolicyPack { name, version, List<DeclarativeRule> rules, List<String> disabledRules }`, loaded with
+`PolicyPackLoader.fromJson(json)` (YAML is converted to JSON by the app) and activated with
+`PolicyEngine.withDefaultRulesAnd(pack)`: built-in rules minus `disabledRules`, then the pack's rules (adapters,
+pack order). `DeclarativeRule { id ([A-Z]{2,5}-\d{3}, never a built-in id), description, phase (RUN_START|ENTRY|EXIT),
+stages (empty = all; must be empty for RUN_START), when (Condition), effect, severity (default by effect), message }`.
+Effects: `DENY` -> verdict DENY (default HIGH), `REQUIRE_APPROVAL` -> REQUIRE_APPROVAL (default MEDIUM), `WARN` ->
+an ALLOW finding with severity LOW (never blocks; audited and shown as a gate note). Conditions (JSON `type`
+discriminator): `intentMatches {regexes}` (requirement, clarification answers, normalized statement;
+case-insensitive), `pathMatches {globs}` (candidate change set or impact paths, else the accepted ones; glob syntax
+of SEC-003), `payloadMatches {regexes}` (candidate payload's strict canonical JSON; EXIT rules only),
+`riskAtLeast {level}`, `changeSizeOver {files, lines}`, `releaseDecisionIs {decision}`, `autonomyIs {autonomy}`,
+`allOf`/`anyOf {conditions}`, `not {condition}` (nesting depth at most 16). Loading is strict and reports every
+problem with its JSON path: malformed JSON or duplicate keys, unknown fields, unknown enum values or condition types,
+invalid regexes or globs, duplicate ids, built-in id collisions, disabling an unknown rule. `CHG-002`, `GOV-003` and
+`SEC-002` (`PolicyPack.NON_DISABLEABLE_RULE_IDS`: the release gate and the secret-leak guard) can never be disabled.
+`PolicyPack.hash()` is the SHA-256 of the pack's strict canonical JSON; when a pack is active, RUN_CREATED and every
+POLICY_DENIED audit event carry `policyPack {name, version, hash}`. Sample: `policy/sample-policy-pack.json`
+(immutable V1 migration, security code approval, PII warning, CRITICAL risk in FULL_AUTO).
 
 ### 5.8 Governance summary (what "controlled autonomy" means here)
 
@@ -843,7 +891,7 @@ ReliabilityMetrics {
   LatencyStats latency { endToEndMsAvg, endToEndMsP50, endToEndMsP95, activeMsAvg, humanWaitMsAvg, agentCallMsAvg, agentCallMsP95 } (over completed runs; agent-call stats over all artifacts' provenance latency)
   RecoveryStats recovery { incidents (runs with firstFailureAt), recovered (runs with recoveredAt), mttrMs (mean of recoveredAt - firstFailureAt), unrecovered }
   ApprovalStats approvals { requested, approved, rejected, revoked, meanDecisionMs }
-  LlmStats llm { calls, inputTokens, outputTokens }
+  LlmStats llm { calls, inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, @Nullable estimatedCostUsd, unpricedCalls }
 }
 ```
 
@@ -854,6 +902,23 @@ active = end-to-end minus the sum of `humanWaitIntervals`. Percentiles use neare
 `MetricsRecorder` SPI (Micrometer adapter in the app): `stageCompleted(stageId, status, durationMs)`,
 `retry(stageId)`, `fallback(stageId)`, `rollback(runId)`, `runCompleted(durationMs, activeMs)`,
 `agentCall(providerId, role, latencyMs, inputTokens, outputTokens)`, `approvalDecision(decisionMs, approved)`.
+The engine calls the default overload `agentCall(..., cacheReadTokens, cacheCreationTokens)` (delegates to the
+5-argument method) and the default no-op `llmCost(providerId, role, @Nullable costMicroUsd)` for every attempt with
+LLM usage.
+
+#### 5.10.1 LLM cost model
+
+`metrics/LlmPriceBook` maps `(providerId, model)` to `LlmPrice { inputPerMillionUsd, outputPerMillionUsd,
+cacheReadPerMillionUsd, cacheWritePerMillionUsd }`; lookup (case-insensitive): exact model, else the longest model
+prefix ending at a name boundary (`claude-opus-5` prices `claude-opus-5-5`, `gpt-4` does not price `gpt-4o`), else the
+provider default. The core ships no prices: `EngineConfig.priceBook` defaults to `LlmPriceBook.EMPTY` and the app maps
+operator configuration. Cost in micro-dollars = uncached input x input price + output x output price + cache reads x
+cache read price + cache writes x cache write price (tokens x USD per million = micro-dollars), summed exactly and
+rounded half up. The engine prices each call when it records its usage: `RunCounters.llmCostMicroUsd` (null as soon as
+one call cannot be priced; `llmUnpricedCalls` counts those), `Provenance.costMicroUsd`, and the AGENT_DECISION audit
+data (`provider`, `model`, `inputTokens`, `outputTokens`, `cacheReadTokens`, `cacheCreationTokens`, `costMicroUsd`
+when priced). `LlmStats.estimatedCostUsd` sums the known run costs (a lower bound when `unpricedCalls > 0`; null when
+no run with LLM calls could be priced).
 
 ### 5.11 Ports
 
@@ -877,7 +942,10 @@ adapters live in the app. `Run` must be serializable to JSON via `JsonCodec` (th
 the aggregate as one JSON document); provide a `RunSnapshot` record mirror if the mutable aggregate is
 awkward to serialize directly, with `Run.toSnapshot()` / `Run.fromSnapshot()`.
 
-### 5.12 Core tests (minimum)
+`OrchestrationEngine.list()` is authoritative but expensive: every call reads every run of the store
+(`RunStore.loadAll()`) and merges the cached runs. `OrchestrationEngine.listCached()` returns only the runs cached in
+the node's registry (no store access; evicted runs and runs this node never loaded are missing, and runs changed by
+another node may be stale) for frequent, cheap reads such as console polling.
 
 - `WorkflowGraphTest`: validation (duplicate id, unknown dependency, cycle), topological order, layers,
   downstream closure for the default graph (e.g. downstream of `design` = implement, test-design,
@@ -901,7 +969,32 @@ awkward to serialize directly, with `Run.toSnapshot()` / `Run.fromSnapshot()`.
 - `MetricsCalculatorTest` (hand-built runs with known timings).
 - `JsonSchemasTest`, `JsonCodecTest` (canonical hash stable across key order).
 - `CoreArchitectureTest` (ArchUnit): no `org.springframework` dependency anywhere in core; `engine`
-  does not depend on `agent.deterministic`; `model` and `artifact` depend only on `util`/`json`.
+  does not depend on `agent.deterministic`; `model` and `artifact` depend only on `util`/`json`;
+  `evaluation` does not depend on concrete agents and nothing else depends on `evaluation`; `policy.pack`
+  depends only on the policy layer and the domain.
+
+### 5.13 Evaluation harness
+
+`evaluation/ArtifactScorers` holds one deterministic scorer per artifact kind; each returns `Score(value 0..1,
+List<Criterion(name, weight, value, rationale)>)`, the weighted mean of criteria computed from the artifacts (and the
+codebase index for REPO runs; criteria that do not apply get weight 0). Examples: requirement spec (acceptance
+criteria per FR, measurable NFRs, ambiguity resolved), task plan (FR coverage, dependency order, impact analysis
+first in brownfield, human release gate), impact (consistent with the workspace, indexed paths), design (risk with
+factors, decisions with rationale, NFR strategies, known types in REPO runs), change set (content completeness with
+skeletons at 0.25, tests per production file, parseable diffs on indexed files), test plan (FR coverage, negative
+cases), verification (blocking checks, traceability, advisory count, build), documentation (sections, API coverage,
+rollback in the runbook), security review (no HIGH/CRITICAL finding, STRIDE coverage, treated threats, dependency
+inventory), release readiness (decision consistent with checklist, verification, security and skeleton changes).
+`RunEvaluator.evaluate(run[, index])` is pure: it scores the accepted artifact of each stage (or the latest one under
+review, noted) and returns `EvaluationReport(runId, stageScores, overall = mean, notes)` with `markdown()`.
+`EvaluationSuite` (bundled `evaluation/default-suite.json`, 10 cases: greenfield GUIDED and FULL_AUTO, brownfield
+REPO, clarification answered and unanswered, two policy denials, STRICT, a HIGH-risk security change, a NO_GO
+release) is run by `EvaluationSuiteRunner.run(engineFactory, suite)`, which drives each case through a fresh engine
+(answers clarifications with the first suggested answers and approves gates as the human operator identity
+`evaluation-runner` with comment "auto-approved by the evaluation runner", never waives a NO_GO release, stops at the
+first human gate when `expectCompleted` is false) and checks `expectClarification`, `expectPolicyDenial`,
+`expectCompleted`, `expectedRiskAtLeast`, `minOverallScore` and `expectedReleaseDecision`. The deterministic agents
+pass the bundled suite. Scores measure structural quality, not the correctness of generated code.
 
 ---
 

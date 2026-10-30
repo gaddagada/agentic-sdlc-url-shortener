@@ -21,7 +21,8 @@ import com.agenticsdlc.orchestrator.core.util.Clocks;
  * {@code endedAt - startedAt} over completed runs; active = end-to-end minus the sum of human-wait
  * intervals; agent-call latency over the provenance of every agent-produced artifact; MTTR = mean of
  * {@code recoveredAt - firstFailureAt} over recovered runs; mean decision time over approved and rejected
- * approvals. Percentiles use the nearest-rank method.</p>
+ * approvals. Percentiles use the nearest-rank method. LLM cost: the sum of the known run costs
+ * ({@link RunCounters#llmCostMicroUsd()}), see {@link ReliabilityMetrics.LlmStats}.</p>
  */
 public final class MetricsCalculator {
 
@@ -58,6 +59,11 @@ public final class MetricsCalculator {
         long llmCalls = 0;
         long inputTokens = 0;
         long outputTokens = 0;
+        long cacheReadTokens = 0;
+        long cacheCreationTokens = 0;
+        long knownCostMicroUsd = 0;
+        boolean anyLlmRunPriced = false;
+        long unpricedCalls = 0;
         List<Long> endToEnd = new ArrayList<>();
         List<Long> active = new ArrayList<>();
         List<Long> humanWait = new ArrayList<>();
@@ -89,6 +95,13 @@ public final class MetricsCalculator {
             llmCalls += c.llmCalls();
             inputTokens += c.llmInputTokens();
             outputTokens += c.llmOutputTokens();
+            cacheReadTokens += c.llmCacheReadTokens();
+            cacheCreationTokens += c.llmCacheCreationTokens();
+            unpricedCalls += c.llmUnpricedCalls();
+            if (c.llmCostMicroUsd() != null) {
+                knownCostMicroUsd += c.llmCostMicroUsd();
+                anyLlmRunPriced |= c.llmCalls() > 0;
+            }
 
             if (run.status() == RunStatus.COMPLETED && run.endToEndMs() != null) {
                 long e2e = run.endToEndMs();
@@ -128,7 +141,9 @@ public final class MetricsCalculator {
                 new ReliabilityMetrics.RecoveryStats(incidents, recovered, mean(mttr), incidents - recovered),
                 new ReliabilityMetrics.ApprovalStats(approvalsRequested, approvalsApproved, approvalsRejected,
                         approvalsRevoked, mean(decisions)),
-                new ReliabilityMetrics.LlmStats(llmCalls, inputTokens, outputTokens));
+                new ReliabilityMetrics.LlmStats(llmCalls, inputTokens, outputTokens, cacheReadTokens,
+                        cacheCreationTokens, llmCalls > 0 && !anyLlmRunPriced ? null : knownCostMicroUsd / 1_000_000.0,
+                        (int) Math.min(Integer.MAX_VALUE, unpricedCalls)));
     }
 
     /**

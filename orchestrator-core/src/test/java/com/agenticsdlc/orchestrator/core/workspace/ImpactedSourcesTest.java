@@ -2,10 +2,12 @@ package com.agenticsdlc.orchestrator.core.workspace;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -117,5 +119,34 @@ class ImpactedSourcesTest {
         assertThat(String.join("\n", result.notes())).doesNotContain("top secret");
         assertThat(ImpactedSources.read(dir.resolve("missing"), List.of(new Request("a.txt", Priority.MODIFY)),
                 10, 10).notes()).singleElement().asString().contains("is not readable");
+    }
+
+    @Test
+    void refusesSymbolicLinksThatEscapeTheWorkspaceRoot(@TempDir Path dir) throws Exception {
+        Path ws = SyntheticWorkspace.create(dir.resolve("ws"));
+        Path outsideFile = Files.writeString(dir.resolve("outside.txt"), "top secret");
+        Path outsideDir = Files.createDirectories(dir.resolve("outside-dir"));
+        Files.writeString(outsideDir.resolve("Leak.java"), "class Leak { String s = \"top secret\"; }");
+        String fileLink = BASE + "service/Escape.java";
+        String dirLink = BASE + "linked";
+        String insideLink = BASE + "service/Alias.java";
+        try {
+            Files.createSymbolicLink(ws.resolve(fileLink), outsideFile);
+            Files.createSymbolicLink(ws.resolve(dirLink), outsideDir);
+            Files.createSymbolicLink(ws.resolve(insideLink), ws.resolve(VALIDATOR));
+        } catch (UnsupportedOperationException | IOException | SecurityException e) {
+            Assumptions.abort("the operating system refused to create symbolic links: " + e);
+        }
+
+        Result result = ImpactedSources.read(ws, List.of(new Request(fileLink, Priority.MODIFY),
+                new Request(dirLink + "/Leak.java", Priority.MODIFY), new Request(insideLink, Priority.EXTEND)),
+                20_000, 120_000);
+
+        assertThat(result.sources()).as("a link within the workspace is fine").containsOnlyKeys(insideLink);
+        assertThat(result.notes()).containsExactly(
+                fileLink + ": refused (resolves outside the workspace root)",
+                dirLink + "/Leak.java: refused (resolves outside the workspace root)");
+        assertThat(String.join("\n", result.sources().values()) + String.join("\n", result.notes()))
+                .doesNotContain("top secret");
     }
 }

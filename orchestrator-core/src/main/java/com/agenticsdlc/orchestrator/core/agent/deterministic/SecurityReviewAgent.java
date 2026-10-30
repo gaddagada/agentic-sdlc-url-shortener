@@ -4,8 +4,11 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+import org.jspecify.annotations.Nullable;
+
 import com.agenticsdlc.orchestrator.core.agent.AgentRegistry;
 import com.agenticsdlc.orchestrator.core.agent.AgentRole;
+import com.agenticsdlc.orchestrator.core.agent.DependencyReview;
 import com.agenticsdlc.orchestrator.core.agent.StageAgent;
 import com.agenticsdlc.orchestrator.core.agent.StageContext;
 import com.agenticsdlc.orchestrator.core.agent.StageFailure;
@@ -20,6 +23,7 @@ import com.agenticsdlc.orchestrator.core.artifact.SecurityReview.Threat;
 import com.agenticsdlc.orchestrator.core.artifact.SecurityReview.ThreatStatus;
 import com.agenticsdlc.orchestrator.core.artifact.Severity;
 import com.agenticsdlc.orchestrator.core.util.SecretPatterns;
+import com.agenticsdlc.orchestrator.core.workspace.BuildRunner;
 
 /**
  * Deterministic security reviewer ({@code security-scan}): STRIDE threats templated from the API changes and
@@ -27,14 +31,30 @@ import com.agenticsdlc.orchestrator.core.util.SecretPatterns;
  * public create endpoints, secrets in the change set and an authentication note for mutating endpoints.
  * {@code passed} is true when there is no HIGH or CRITICAL finding; a failed review is still a successful
  * stage (the release stage turns it into NO_GO).
+ *
+ * <p>For REPO runs the review also carries the dependency inventory of the workspace's Maven build files with a
+ * {@code dependency-inventory} check and hygiene findings, and the result of the optional external dependency scan
+ * ({@link DependencyReview}). The inventory is a hygiene check, not a CVE scan.</p>
  */
 public final class SecurityReviewAgent implements StageAgent {
 
+    private final @Nullable BuildRunner scanRunner;
+
     /**
-     * Creates the agent.
+     * Creates the agent without a runner for the external dependency scan (a configured scan is reported as not
+     * executed).
      */
     public SecurityReviewAgent() {
-        // stateless
+        this(null);
+    }
+
+    /**
+     * Creates the agent.
+     *
+     * @param scanRunner runner of the optional external dependency scan (the sandbox build runner), or null
+     */
+    public SecurityReviewAgent(@Nullable BuildRunner scanRunner) {
+        this.scanRunner = scanRunner;
     }
 
     @Override
@@ -49,9 +69,12 @@ public final class SecurityReviewAgent implements StageAgent {
 
     @Override
     public StageResult execute(StageContext context) throws StageFailure {
-        SecurityReview review = review(context.require(DesignSpec.class), context.require(ChangeSet.class));
+        SecurityReview review = DependencyReview.complete(review(context.require(DesignSpec.class),
+                context.require(ChangeSet.class)), context, scanRunner);
         return StageResult.success(review, (review.passed() ? "passed" : "failed") + " with "
-                + review.findings().size() + " findings and " + review.threats().size() + " threats");
+                + review.findings().size() + " findings and " + review.threats().size() + " threats"
+                + (review.dependencies().isEmpty() ? "" : "; " + review.dependencies().size()
+                + " dependency declarations inventoried"));
     }
 
     /**

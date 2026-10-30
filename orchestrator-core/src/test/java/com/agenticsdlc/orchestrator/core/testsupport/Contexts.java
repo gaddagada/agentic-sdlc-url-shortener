@@ -60,6 +60,15 @@ public final class Contexts {
                 AgentSettings.defaults());
     }
 
+    /** Returns a copy of a context with other agent settings. */
+    public static StageContext withSettings(StageContext ctx, AgentSettings settings) {
+        return new StageContext(ctx.runId(), ctx.stageId(), ctx.role(), ctx.requirement(), ctx.originalRequirement(),
+                ctx.clarificationAnswers(), ctx.clarificationQuestions(), ctx.upstream(), ctx.feedback(),
+                ctx.attempt(), ctx.planVersion(), ctx.previousError(), ctx.workspaceIndex(), ctx.options(),
+                ctx.approvals(), settings, ctx.directPredecessors(), ctx.impactedSources(),
+                ctx.impactedSourceNotes());
+    }
+
     private static AgentRole roleOf(ArtifactPayload payload) {
         for (AgentRole role : AgentRole.values()) {
             if (role.artifactKind() == payload.kind()) {

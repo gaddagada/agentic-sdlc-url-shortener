@@ -29,13 +29,14 @@ public final class DeterministicAgents {
     /**
      * Returns all deterministic agents.
      *
-     * @param buildRunner runner for optional sandbox builds, or null for structural verification only
+     * @param buildRunner runner for optional sandbox builds and the optional external dependency scan, or null for
+     *                    structural verification only (and no external scan)
      * @return one agent per role
      */
     public static List<StageAgent> all(@Nullable BuildRunner buildRunner) {
         return List.of(new RequirementsAgent(), new PlanningAgent(), new CodebaseReasoningAgent(new ImpactAnalyzer()),
                 new ArchitectureAgent(), new ImplementationAgent(), new TestDesignAgent(),
-                new VerificationAgent(buildRunner), new DocumentationAgent(), new SecurityReviewAgent(),
+                new VerificationAgent(buildRunner), new DocumentationAgent(), new SecurityReviewAgent(buildRunner),
                 new ReleaseAgent());
     }
 }

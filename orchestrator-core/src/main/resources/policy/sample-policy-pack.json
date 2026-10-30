@@ -1,0 +1,56 @@
+{
+  "name": "sample-baseline",
+  "version": "1.0.0",
+  "disabledRules": [],
+  "rules": [
+    {
+      "id": "ORG-001",
+      "description": "Applied Flyway migrations are immutable",
+      "phase": "EXIT",
+      "stages": ["implement"],
+      "when": {
+        "type": "allOf",
+        "conditions": [
+          { "type": "pathMatches", "globs": ["**/db/migration/V1__*"] },
+          { "type": "payloadMatches", "regexes": ["\"operation\":\"(MODIFY|DELETE)\",\"path\":\"[^\"]*db/migration/V1__"] }
+        ]
+      },
+      "effect": "DENY",
+      "severity": "HIGH",
+      "message": "the change modifies or deletes the applied migration V1; add a new versioned migration instead"
+    },
+    {
+      "id": "ORG-002",
+      "description": "Security code needs a security reviewer",
+      "phase": "EXIT",
+      "stages": ["implement"],
+      "when": { "type": "pathMatches", "globs": ["**/security/**", "**/*Security*.java"] },
+      "effect": "REQUIRE_APPROVAL",
+      "severity": "HIGH",
+      "message": "the change touches security code; a security reviewer must approve it"
+    },
+    {
+      "id": "ORG-003",
+      "description": "Personal data mentioned in the requirement",
+      "phase": "RUN_START",
+      "when": { "type": "intentMatches", "regexes": ["\\bPII\\b", "\\bSSN\\b", "social security number"] },
+      "effect": "WARN",
+      "message": "the requirement mentions personal data (PII/SSN); involve the privacy officer before release"
+    },
+    {
+      "id": "ORG-004",
+      "description": "Critical risk is never fully autonomous",
+      "phase": "EXIT",
+      "when": {
+        "type": "allOf",
+        "conditions": [
+          { "type": "autonomyIs", "autonomy": "FULL_AUTO" },
+          { "type": "riskAtLeast", "level": "CRITICAL" }
+        ]
+      },
+      "effect": "REQUIRE_APPROVAL",
+      "severity": "HIGH",
+      "message": "CRITICAL risk in FULL_AUTO autonomy requires a human approval at every stage exit"
+    }
+  ]
+}

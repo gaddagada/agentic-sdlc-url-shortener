@@ -1,5 +1,7 @@
 package com.agenticsdlc.orchestrator.core.metrics;
 
+import org.jspecify.annotations.Nullable;
+
 /**
  * Reliability metrics over a set of runs (see {@link MetricsCalculator} for the exact definitions).
  *
@@ -86,10 +88,33 @@ public record ReliabilityMetrics(RunStats runs, StageStats stages, LatencyStats 
     /**
      * LLM usage statistics.
      *
+     * <p>{@code estimatedCostUsd} sums the costs of the runs whose LLM calls were all priced (a run with an unpriced
+     * call has an unknown cost and contributes nothing), so it is a lower bound whenever {@code unpricedCalls > 0};
+     * it is null when there were LLM calls but no run with LLM calls has a known cost (for example with the default,
+     * empty price book), and 0 when there were no LLM calls.</p>
+     *
      * @param calls LLM-backed agent attempts
-     * @param inputTokens input tokens
+     * @param inputTokens input tokens (prompt cache reads and writes included)
      * @param outputTokens output tokens
+     * @param cacheReadTokens input tokens served from a provider's prompt cache
+     * @param cacheCreationTokens input tokens written to a provider's prompt cache
+     * @param estimatedCostUsd estimated cost in US dollars, or null when nothing could be priced
+     * @param unpricedCalls LLM calls without a configured price
      */
-    public record LlmStats(long calls, long inputTokens, long outputTokens) {
+    public record LlmStats(long calls, long inputTokens, long outputTokens, long cacheReadTokens,
+                           long cacheCreationTokens, @Nullable Double estimatedCostUsd, int unpricedCalls) {
+
+        /**
+         * Creates statistics without prompt cache counts and costs (the canonical constructor before they existed):
+         * cache counts 0 and every call unpriced (cost null), or a cost of 0 without calls.
+         *
+         * @param calls LLM-backed agent attempts
+         * @param inputTokens input tokens
+         * @param outputTokens output tokens
+         */
+        public LlmStats(long calls, long inputTokens, long outputTokens) {
+            this(calls, inputTokens, outputTokens, 0L, 0L, calls == 0 ? 0.0 : null,
+                    (int) Math.min(Integer.MAX_VALUE, calls));
+        }
     }
 }

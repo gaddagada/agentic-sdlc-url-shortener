@@ -3,6 +3,8 @@ package com.agenticsdlc.orchestrator.core.agent.llm;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -10,8 +12,10 @@ import java.util.Set;
 import java.util.function.Function;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import com.agenticsdlc.orchestrator.core.agent.AgentRole;
+import com.agenticsdlc.orchestrator.core.agent.AgentSettings;
 import com.agenticsdlc.orchestrator.core.agent.FailureKind;
 import com.agenticsdlc.orchestrator.core.agent.StageAgent;
 import com.agenticsdlc.orchestrator.core.agent.StageContext;
@@ -19,19 +23,24 @@ import com.agenticsdlc.orchestrator.core.agent.StageFailure;
 import com.agenticsdlc.orchestrator.core.agent.StageResult;
 import com.agenticsdlc.orchestrator.core.artifact.ArtifactPayload;
 import com.agenticsdlc.orchestrator.core.artifact.ChangeSet;
+import com.agenticsdlc.orchestrator.core.artifact.Check;
+import com.agenticsdlc.orchestrator.core.artifact.DependencyRecord;
 import com.agenticsdlc.orchestrator.core.artifact.DesignSpec;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.RiskLevel;
+import com.agenticsdlc.orchestrator.core.artifact.SecurityReview;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.agenticsdlc.orchestrator.core.model.ClarificationQuestion;
+import com.agenticsdlc.orchestrator.core.model.RunOptions;
+import com.agenticsdlc.orchestrator.core.model.WorkspaceMode;
 import com.agenticsdlc.orchestrator.core.testsupport.Contexts;
 import com.agenticsdlc.orchestrator.core.testsupport.Payloads;
 
 class LlmStageAgentTest {
 
     /** A scripted client that records requests. */
-    static final class FakeClient implements LlmClient {
+    static class FakeClient implements LlmClient {
         final List<LlmRequest> requests = new ArrayList<>();
         boolean available = true;
         Function<LlmRequest, Object> answer = r -> null;
@@ -515,5 +524,52 @@ class LlmStageAgentTest {
                 .containsExactly(AgentRole.values());
         assertThatThrownBy(() -> new LlmStageAgent<>(AgentRole.PLANNING, DesignSpec.class, client, codec, 10,
                 Duration.ofSeconds(1))).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void securityReviewsGetTheAuthoritativeDependencyInventoryAndCacheUsage(@TempDir Path dir) throws Exception {
+        Files.writeString(dir.resolve("pom.xml"), """
+                <project><groupId>com.acme</groupId><artifactId>app</artifactId><version>1.0</version>
+                  <dependencies>
+                    <dependency><groupId>com.acme</groupId><artifactId>lib</artifactId><version>3.0-SNAPSHOT</version></dependency>
+                  </dependencies>
+                </project>
+                """);
+        SecurityReview fromModel = new SecurityReview(List.of(), List.of(Check.pass("input-validation-in-design",
+                "ok")), List.of(), List.of(), true, List.of(new DependencyRecord("pom.xml", "evil", "invented", "1",
+                "compile", DependencyRecord.Kind.DEPENDENCY)));
+        FakeClient cached = new FakeClient() {
+            @Override
+            @SuppressWarnings("unchecked")
+            public <T> LlmResponse<T> complete(LlmRequest request, Class<T> outputType) {
+                requests.add(request);
+                return new LlmResponse<>((T) fromModel, "{}", new LlmUsage(2000, 100, 1500, 300), 10,
+                        "claude-opus-5-5");
+            }
+        };
+        LlmStageAgent<?> agent = LlmStageAgent.forRole(AgentRole.SECURITY_REVIEW, cached, codec, 4000,
+                Duration.ofSeconds(30)).withScanRunner(null);
+        StageContext repo = Contexts.withSettings(Contexts.of(AgentRole.SECURITY_REVIEW, "x",
+                RunOptions.defaults().withWorkspace(WorkspaceMode.REPO), null, List.of(),
+                Payloads.design(RiskLevel.LOW), Payloads.changeSet("url-shortener/src/main/java/A.java", "class A {}")),
+                new AgentSettings(0.5, false, false, dir, dir.resolve("sb"), Duration.ofMinutes(1)));
+
+        StageResult result = agent.execute(repo);
+
+        assertThat(result).isInstanceOfSatisfying(StageResult.Success.class, s -> {
+            SecurityReview review = (SecurityReview) s.payload();
+            assertThat(review.dependencies()).extracting(DependencyRecord::coordinate)
+                    .containsExactly("com.acme:lib:3.0-SNAPSHOT");
+            assertThat(review.checks()).extracting(Check::name).contains("dependency-inventory");
+            assertThat(review.findings()).anySatisfy(f -> assertThat(f.title()).startsWith("Dependency hygiene: "
+                    + "SNAPSHOT"));
+            assertThat(review.passed()).as("a MEDIUM flag does not fail the review").isTrue();
+            assertThat(s.llm().cacheReadTokens()).isEqualTo(1500);
+            assertThat(s.llm().cacheCreationTokens()).isEqualTo(300);
+        });
+        StageResult greenfield = agent.execute(Contexts.of(AgentRole.SECURITY_REVIEW, "x",
+                Payloads.design(RiskLevel.LOW)));
+        assertThat(((SecurityReview) ((StageResult.Success) greenfield).payload()).dependencies())
+                .as("model-written dependencies are always discarded").isEmpty();
     }
 }

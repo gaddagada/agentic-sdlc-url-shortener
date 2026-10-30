@@ -8,9 +8,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 
+import org.jspecify.annotations.Nullable;
+
 import com.agenticsdlc.orchestrator.core.agent.AgentRole;
 import com.agenticsdlc.orchestrator.core.agent.ClarificationGate;
 import com.agenticsdlc.orchestrator.core.agent.CompensationRequest;
+import com.agenticsdlc.orchestrator.core.agent.DependencyReview;
 import com.agenticsdlc.orchestrator.core.agent.FailureKind;
 import com.agenticsdlc.orchestrator.core.agent.LlmTrace;
 import com.agenticsdlc.orchestrator.core.agent.SandboxMaterializer;
@@ -23,9 +26,12 @@ import com.agenticsdlc.orchestrator.core.artifact.ChangeSet;
 import com.agenticsdlc.orchestrator.core.artifact.InvalidArtifactException;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
+import com.agenticsdlc.orchestrator.core.artifact.SecurityReview;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.agenticsdlc.orchestrator.core.model.ClarificationQuestion;
 import com.agenticsdlc.orchestrator.core.util.Hashes;
+import com.agenticsdlc.orchestrator.core.workspace.BuildRunner;
+import com.agenticsdlc.orchestrator.core.workspace.ProcessBuildRunner;
 
 import tools.jackson.core.JacksonException;
 
@@ -46,7 +52,9 @@ import tools.jackson.core.JacksonException;
  * engages the deterministic fallback. Usage, model
  * and prompt hash are reported for provenance and budgets, also for failed attempts. The requirements role
  * applies the intrinsic clarification gate; approvals and a signature an LLM might put into a release change record
- * are discarded (agents never approve or sign anything).</p>
+ * are discarded (agents never approve or sign anything). A security review gets the dependency inventory of the
+ * workspace and the optional external dependency scan from {@link DependencyReview} after the call: whatever the
+ * model wrote into {@code dependencies} is replaced, so the inventory is always read from the build files.</p>
  *
  * @param <T> payload type
  */
@@ -65,9 +73,11 @@ public final class LlmStageAgent<T extends ArtifactPayload> implements StageAgen
     private final int maxOutputTokens;
     private final Duration timeout;
     private final Map<String, Object> schema;
+    private final @Nullable BuildRunner scanRunner;
 
     /**
-     * Creates the agent.
+     * Creates the agent. A security review agent runs the optional external dependency scan with a
+     * {@link ProcessBuildRunner} ({@link #withScanRunner} replaces it).
      *
      * @param role the role
      * @param payloadType payload record class (must be the role's artifact payload type)
@@ -78,6 +88,13 @@ public final class LlmStageAgent<T extends ArtifactPayload> implements StageAgen
      */
     public LlmStageAgent(AgentRole role, Class<T> payloadType, LlmClient client, JsonCodec codec, int maxOutputTokens,
                          Duration timeout) {
+        this(role, payloadType, client, codec, maxOutputTokens, timeout,
+                role == AgentRole.SECURITY_REVIEW ? new ProcessBuildRunner() : null);
+    }
+
+    private LlmStageAgent(AgentRole role, Class<T> payloadType, LlmClient client, JsonCodec codec, int maxOutputTokens,
+                          Duration timeout, @Nullable BuildRunner scanRunner) {
+        this.scanRunner = scanRunner;
         this.role = Objects.requireNonNull(role, "role");
         this.payloadType = Objects.requireNonNull(payloadType, "payloadType");
         this.client = Objects.requireNonNull(client, "client");
@@ -149,6 +166,17 @@ public final class LlmStageAgent<T extends ArtifactPayload> implements StageAgen
     }
 
     /**
+     * Returns a copy of this agent that runs the optional external dependency scan (security review role only) with
+     * the given runner.
+     *
+     * @param runner the runner, or null to report a configured scan as not executed
+     * @return the copy
+     */
+    public LlmStageAgent<T> withScanRunner(@Nullable BuildRunner runner) {
+        return new LlmStageAgent<>(role, payloadType, client, codec, maxOutputTokens, timeout, runner);
+    }
+
+    /**
      * Returns the payload type.
      *
      * @return the payload record class
@@ -179,11 +207,17 @@ public final class LlmStageAgent<T extends ArtifactPayload> implements StageAgen
         }
         LlmUsage usage = response.usage() == null ? LlmUsage.none() : response.usage();
         LlmTrace trace = new LlmTrace(client.providerId(), response.model() == null || response.model().isBlank()
-                ? client.model() : response.model(), promptHash, usage.inputTokens(), usage.outputTokens());
+                ? client.model() : response.model(), promptHash, usage.inputTokens(), usage.outputTokens(),
+                usage.cacheReadTokens(), usage.cacheCreationTokens());
         T payload = response.output();
         if (payload == null) {
             throw new StageFailure(FailureKind.INVALID_OUTPUT, "the provider returned no structured output", null,
                     trace);
+        }
+        if (payload instanceof SecurityReview review && !review.dependencies().isEmpty()) {
+            // the dependency inventory is never taken from model output: it is read from the build files below
+            payload = payloadType.cast(new SecurityReview(review.threats(), review.checks(), review.findings(),
+                    review.complianceNotes(), review.passed(), List.of()));
         }
         try {
             payload.validate();
@@ -191,6 +225,13 @@ public final class LlmStageAgent<T extends ArtifactPayload> implements StageAgen
             throw new StageFailure(FailureKind.INVALID_OUTPUT, e.getMessage(), e, trace);
         }
         ArtifactPayload accepted = payload;
+        if (payload instanceof SecurityReview review) {
+            try {
+                accepted = DependencyReview.complete(review, context, scanRunner);
+            } catch (StageFailure e) {
+                throw new StageFailure(e.kind(), e.getMessage(), e, trace);
+            }
+        }
         if (payload instanceof RequirementSpec spec) {
             Optional<List<ClarificationQuestion>> questions = ClarificationGate.questionsIfNeeded(spec, context);
             if (questions.isPresent()) {
