@@ -15,6 +15,7 @@ import java.util.SortedSet;
 import java.util.TreeSet;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -33,7 +34,8 @@ import tools.jackson.databind.json.JsonMapper;
  * Keeps the committed contract {@code docs/api/orchestrator.openapi.yaml} in sync with the controllers: every
  * {@code /api/v1} operation the controllers expose must be in the committed file (and in the document springdoc
  * generates), and the committed file must not describe operations that no longer exist. Regenerate the file from
- * a running application with {@code curl http://localhost:8090/v3/api-docs.yaml}.
+ * a running application with {@code curl http://localhost:8090/v3/api-docs.yaml}, or without one with
+ * {@code ./mvnw -pl orchestrator-app test -Dtest=OpenApiContractTest -Dopenapi.regenerate=true}.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -75,6 +77,69 @@ class OpenApiContractTest {
     }
 
     @Test
+    void createOperationsDocument201() throws IOException {
+        for (Map<String, Object> document : List.of(committed(), generated())) {
+            for (String path : List.of("/api/v1/runs", "/api/v1/scenarios/{key}/run")) {
+                Map<String, Object> responses = asMap(operation(document, path, "post").get("responses"));
+                assertThat(responses).as("POST %s", path).containsKey("201").doesNotContainKey("200");
+            }
+        }
+    }
+
+    @Test
+    void governanceOperationsDocumentTheirProblemDetails() throws IOException {
+        Map<String, Object> document = committed();
+        for (String path : List.of("/api/v1/runs/{id}/stages/{stageId}/approve",
+                "/api/v1/runs/{id}/stages/{stageId}/reject", "/api/v1/runs/{id}/clarify", "/api/v1/runs/{id}/replan",
+                "/api/v1/runs/{id}/stop", "/api/v1/runs/{id}/resume")) {
+            Map<String, Object> responses = asMap(operation(document, path, "post").get("responses"));
+            for (String status : List.of("400", "404", "409")) {
+                Map<String, Object> content = asMap(asMap(responses.get(status)).get("content"));
+                assertThat(content).as("POST %s %s", path, status).containsKey("application/problem+json");
+                assertThat(asMap(asMap(content.get("application/problem+json")).get("schema")))
+                        .containsEntry("$ref", "#/components/schemas/ProblemDetail");
+            }
+        }
+        assertThat(asMap(asMap(document.get("components")).get("schemas"))).containsKey("ProblemDetail");
+    }
+
+    @Test
+    void schemaNamesAreUniqueAndTheReviewFieldsAreDocumented() throws IOException {
+        Map<String, Object> schemas = asMap(asMap(committed().get("components")).get("schemas"));
+
+        assertThat(schemas).containsKeys("GraphNodeView", "GraphEdgeView", "LineageNodeView", "LineageEdgeView",
+                "RunScenarioRequest").doesNotContainKeys("NodeView", "EdgeView");
+        assertThat(asMap(asMap(schemas.get("PendingActionView")).get("properties")))
+                .containsKeys("approvalId", "reviewVersion", "reviewHash");
+        assertThat(asMap(asMap(schemas.get("ApproveRequest")).get("properties"))).containsKey("approvalId");
+        assertThat(asMap(asMap(schemas.get("RejectRequest")).get("properties"))).containsKey("approvalId");
+        assertThat(asMap(asMap(schemas.get("ApprovalView")).get("properties"))).containsKey("artifactHash");
+        assertThat(asMap(asMap(schemas.get("StageView")).get("properties"))).containsKey("acceptedVersion");
+    }
+
+    @Test
+    void theApiKeySchemeAppliesToEveryOperation() throws IOException {
+        Map<String, Object> document = committed();
+
+        assertThat(asList(document.get("security"))).anySatisfy(requirement ->
+                assertThat(asMap(requirement)).containsKey("apiKey"));
+        assertThat(asMap(asMap(asMap(document.get("components")).get("securitySchemes")).get("apiKey")))
+                .containsEntry("name", "X-Api-Key").containsEntry("in", "header");
+    }
+
+    /**
+     * Rewrites the committed contract from the generated document (opt-in with {@code -Dopenapi.regenerate=true}).
+     */
+    @Test
+    @EnabledIfSystemProperty(named = "openapi.regenerate", matches = "true")
+    void regenerateCommittedContract() throws IOException {
+        MvcTestResult result = mvc.get().uri("http://localhost:8090/v3/api-docs.yaml").exchange();
+        assertThat(result).hasStatus(HttpStatus.OK);
+        String yaml = new String(result.getResponse().getContentAsByteArray(), StandardCharsets.UTF_8);
+        Files.writeString(CONTRACT, yaml.endsWith("\n") ? yaml : yaml + "\n", StandardCharsets.UTF_8);
+    }
+
+    @Test
     void committedContractIsOpenApi3() throws IOException {
         assertThat(committed().get("openapi").toString()).startsWith("3.");
     }
@@ -99,6 +164,12 @@ class OpenApiContractTest {
             }
         }
         return operations;
+    }
+
+    private static Map<String, Object> operation(Map<String, Object> document, String path, String method) {
+        Map<String, Object> operation = asMap(asMap(asMap(document.get("paths")).get(path)).get(method));
+        assertThat(operation).as("%s %s", method, path).isNotEmpty();
+        return operation;
     }
 
     private Map<String, Object> generated() {

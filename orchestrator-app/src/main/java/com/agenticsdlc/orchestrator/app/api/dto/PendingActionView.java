@@ -17,6 +17,9 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  * @param approvalId approval id (approvals)
  * @param reason why approval is required (approvals)
  * @param ruleIds policy rules that required approval (approvals)
+ * @param reviewVersion artifact version under review (exit approvals); it is accepted only when approved, until
+ *                      then the accepted version of the stage is the previous one
+ * @param reviewHash SHA-256 hash of the artifact version under review (exit approvals)
  * @param requestedAt when the action was requested
  * @param questions the open questions (clarifications)
  */
@@ -28,6 +31,8 @@ public record PendingActionView(
         @Nullable String approvalId,
         @Nullable String reason,
         @Nullable List<String> ruleIds,
+        @Nullable Integer reviewVersion,
+        @Nullable String reviewHash,
         @Nullable Instant requestedAt,
         @Nullable List<ClarificationQuestionView> questions) {
 

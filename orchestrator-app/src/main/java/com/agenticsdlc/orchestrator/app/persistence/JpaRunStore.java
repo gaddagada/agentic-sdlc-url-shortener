@@ -11,6 +11,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
+import com.agenticsdlc.orchestrator.core.audit.AuditSink;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowGraph;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.agenticsdlc.orchestrator.core.model.Run;
@@ -22,10 +24,13 @@ import com.agenticsdlc.orchestrator.core.port.RunStore;
  * (optimistic {@code @Version}), and artifact versions not yet persisted are inserted into the {@code artifacts}
  * table.
  *
- * <p>The engine calls {@link #save(Run)} from its own (virtual) threads while holding the run lock and outside any
- * Spring-managed transaction, so every method demarcates its transaction explicitly with a
- * {@link TransactionTemplate} instead of relying on {@code @Transactional} proxies. The snapshot is serialized
- * synchronously before the transaction starts, so the live run is never read after {@code save} returns.</p>
+ * <p>The engine calls {@link #commit(Run, List, AuditSink)} after every mutation, from its own (virtual) threads
+ * while holding the run lock and outside any Spring-managed transaction, so every method demarcates its
+ * transaction explicitly with a {@link TransactionTemplate} instead of relying on {@code @Transactional} proxies.
+ * {@code commit} saves the snapshot, inserts new artifacts and appends the audit events of the mutation in
+ * <em>one</em> transaction (the JPA audit sink joins it), so a failing audit insert also rolls back the snapshot and
+ * the run state and its audit trail can never diverge. The snapshot is serialized synchronously before the
+ * transaction starts, so the live run is never read after the method returns.</p>
  */
 @Component
 public class JpaRunStore implements RunStore {
@@ -63,15 +68,36 @@ public class JpaRunStore implements RunStore {
     public void save(Run run) {
         RunSnapshot snapshot = run.toSnapshot(codec);
         String json = codec.toJson(snapshot);
+        transactions.executeWithoutResult(status -> persist(snapshot, json));
+    }
+
+    /**
+     * Saves the run snapshot and its new artifacts and appends the audit events of the mutation in one
+     * transaction; when any part fails, nothing is persisted and the exception propagates to the engine.
+     *
+     * @param run the run (live aggregate; serialized before the transaction starts and not retained)
+     * @param events the audit events of the mutation, in sequence order (may be empty)
+     * @param auditSink the engine's audit sink (the JPA sink joins this transaction)
+     */
+    @Override
+    public void commit(Run run, List<AuditEvent> events, AuditSink auditSink) {
+        RunSnapshot snapshot = run.toSnapshot(codec);
+        String json = codec.toJson(snapshot);
+        List<AuditEvent> batch = List.copyOf(events);
         transactions.executeWithoutResult(status -> {
-            RunEntity entity = runs.findById(snapshot.id())
-                    .orElseGet(() -> new RunEntity(snapshot.id(), snapshot.scenarioKey(), snapshot.createdAt()));
-            entity.update(snapshot.status().name(),
-                    snapshot.haltReason() == null ? null : snapshot.haltReason().name(), snapshot.requirement(),
-                    snapshot.planVersion(), snapshot.updatedAt(), snapshot.endedAt(), json);
-            runs.save(entity);
-            insertNewArtifacts(snapshot);
+            persist(snapshot, json);
+            auditSink.append(batch);
         });
+    }
+
+    private void persist(RunSnapshot snapshot, String json) {
+        RunEntity entity = runs.findById(snapshot.id())
+                .orElseGet(() -> new RunEntity(snapshot.id(), snapshot.scenarioKey(), snapshot.createdAt()));
+        entity.update(snapshot.status().name(),
+                snapshot.haltReason() == null ? null : snapshot.haltReason().name(), snapshot.requirement(),
+                snapshot.planVersion(), snapshot.updatedAt(), snapshot.endedAt(), json);
+        runs.save(entity);
+        insertNewArtifacts(snapshot);
     }
 
     private void insertNewArtifacts(RunSnapshot snapshot) {

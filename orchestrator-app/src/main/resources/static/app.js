@@ -305,12 +305,24 @@ function selectRun(id, { fromHash = false } = {}) {
   loops.run?.kick();
 }
 
+/** Versions under review by stage: an exit approval's artifact is accepted only once the approval is granted. */
+function reviewVersions() {
+  const reviewing = new Map();
+  for (const a of asList(App.run?.pendingActions)) {
+    if (a?.type === 'APPROVAL' && a.stageId && isNum(a.reviewVersion)) reviewing.set(a.stageId, a.reviewVersion);
+  }
+  return reviewing;
+}
+
 function selectedSummary() {
   const { stageId, version } = App.artifactSel;
   if (!stageId) return null;
   const versions = App.artifacts.filter((a) => a.stageId === stageId);
   if (version != null) return versions.find((a) => a.version === version) ?? null;
-  return versions.find((a) => a.accepted)
+  // Default: the version awaiting approval (what the operator must review), else the accepted one, else the latest.
+  const review = reviewVersions().get(stageId);
+  return versions.find((a) => review != null && a.version === review)
+    ?? versions.find((a) => a.accepted)
     ?? versions.reduce((best, a) => (!best || (a.version ?? 0) > (best.version ?? 0) ? a : best), null);
 }
 
@@ -374,6 +386,7 @@ async function command(successMessage, path, body, clearKeys = []) {
     toast('success', successMessage);
   } catch (err) {
     toastError(err);
+    if (err?.status === 409) announce('The run changed before your command arrived; the latest state is shown.');
   } finally {
     App.busy = false;
     renderRunView();
@@ -385,13 +398,19 @@ async function command(successMessage, path, body, clearKeys = []) {
 const draftValue = (key) => String(App.drafts[key] ?? '').trim();
 const focusDraft = (key) => findByKey($('actions-card'), key)?.focus();
 
+// Approvals and rejections carry the approvalId that was rendered, so a decision never applies to a newer
+// pending approval (for example after a replan): the server answers 409 and the card refreshes.
 const commands = {
-  approve(stageId) {
+  approve(stageId, approvalId) {
     const comment = draftValue(`comment:${stageId}`);
-    command(`Approved ${stageName(stageId)}`, `${runPath()}/stages/${enc(stageId)}/approve`, comment ? { comment } : {},
+    const body = { ...(comment ? { comment } : {}), ...(approvalId ? { approvalId } : {}) };
+    command(`Approved ${stageName(stageId)}`, `${runPath()}/stages/${enc(stageId)}/approve`, body,
       [`comment:${stageId}`, `reason:${stageId}`]);
   },
-  reject(stageId) {
+  review(stageId, version) {
+    selectArtifact(stageId, version, { reveal: true });
+  },
+  reject(stageId, approvalId) {
     const reason = draftValue(`reason:${stageId}`);
     const disposition = App.drafts[`disposition:${stageId}`] || 'REWORK';
     if (!reason) {
@@ -400,7 +419,8 @@ const commands = {
       return;
     }
     if (disposition === 'ABORT' && !window.confirm(`Reject ${stageName(stageId)} and abort the whole run?`)) return;
-    command(`Rejected ${stageName(stageId)} (${humanize(disposition)})`, `${runPath()}/stages/${enc(stageId)}/reject`, { reason, disposition },
+    command(`Rejected ${stageName(stageId)} (${humanize(disposition)})`, `${runPath()}/stages/${enc(stageId)}/reject`,
+      { reason, disposition, ...(approvalId ? { approvalId } : {}) },
       [`comment:${stageId}`, `reason:${stageId}`, `disposition:${stageId}`]);
   },
   clarify(questionIds) {
@@ -520,19 +540,21 @@ function renderArtifactsTab() {
   const summary = selectedSummary();
   if (summary) ensureArtifactView(summary);
   const selectedKey = summary ? `${summary.stageId}|${summary.version}` : null;
+  const reviewing = reviewVersions();
   const listSig = App.artifacts.map((a) => [a.stageId, a.version, a.accepted, a.kind, a.hash]);
-  renderIfChanged('tab:artifacts', [stages, listSig, App.artifactSel.stageId, selectedKey], () => {
+  renderIfChanged('tab:artifacts', [stages, listSig, [...reviewing], App.artifactSel.stageId, selectedKey], () => {
     const container = $('art-list');
     preservingFocus(container, () => mount(container, V.renderArtifactList({
-      stages, artifacts: App.artifacts, selectedStage: App.artifactSel.stageId, selectedKey,
+      stages, artifacts: App.artifacts, selectedStage: App.artifactSel.stageId, selectedKey, reviewing,
       onSelect: (stageId, version) => selectArtifact(stageId, version),
     })));
   });
   const stage = asList(App.run?.stages).find((s) => s?.id === App.artifactSel.stageId)
     ?? stages.find((s) => s.id === App.artifactSel.stageId) ?? null;
   const state = summary ? App.artifactViews.get(viewKey(summary)) : null;
-  renderIfChanged('tab:artifacts:detail', [stage, summary, state?.status], () => mount($('art-detail'), V.renderArtifactDetail({
-    stage, summary, state, open: App.detailsOpen,
+  const underReview = Boolean(summary && reviewing.get(summary.stageId) === summary.version);
+  renderIfChanged('tab:artifacts:detail', [stage, summary, state?.status, underReview], () => mount($('art-detail'), V.renderArtifactDetail({
+    stage, summary, state, underReview, open: App.detailsOpen,
     onToggle: (name, open) => { App.detailsOpen[name] = open; },
   })));
 }

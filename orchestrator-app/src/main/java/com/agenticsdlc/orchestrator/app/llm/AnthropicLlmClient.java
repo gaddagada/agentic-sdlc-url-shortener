@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
@@ -17,6 +18,7 @@ import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.anthropic.client.AnthropicClient;
 import com.anthropic.client.okhttp.AnthropicOkHttpClient;
 import com.anthropic.core.JsonValue;
+import com.anthropic.core.http.StreamResponse;
 import com.anthropic.errors.AnthropicException;
 import com.anthropic.errors.AnthropicInvalidDataException;
 import com.anthropic.errors.AnthropicIoException;
@@ -24,10 +26,13 @@ import com.anthropic.errors.AnthropicRetryableException;
 import com.anthropic.errors.AnthropicServiceException;
 import com.anthropic.errors.InternalServerException;
 import com.anthropic.errors.RateLimitException;
+import com.anthropic.errors.SseException;
+import com.anthropic.helpers.MessageAccumulator;
 import com.anthropic.models.messages.JsonOutputFormat;
 import com.anthropic.models.messages.Message;
 import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.OutputConfig;
+import com.anthropic.models.messages.RawMessageStreamEvent;
 import com.anthropic.models.messages.StopReason;
 import com.anthropic.models.messages.TextBlock;
 
@@ -43,10 +48,17 @@ import tools.jackson.databind.JsonNode;
  * payload records carry no Jackson 2 annotations and contain {@code Map<String, String>} members, which structured
  * outputs do not accept as-is.</p>
  *
+ * <p>Requests are sent with the streaming Messages API ({@code createStreaming}) and the text deltas are
+ * accumulated into the final {@link Message} with the SDK's {@link MessageAccumulator}: long outputs (up to
+ * {@code sdlc.llm.anthropic.max-output-tokens}, 32k by default) keep the connection busy instead of sitting idle
+ * until a read timeout, and the stop reason and usage are read from the accumulated message exactly as from a
+ * non-streaming response.</p>
+ *
  * <p>Thinking, temperature and effort are left at the model defaults. The SDK's own retries are disabled
  * ({@code maxRetries(0)}): retries, backoff and the deterministic fallback are owned by the engine, and SDK-level
- * retries would multiply the per-attempt stage timeout. Error mapping: rate limits, 408/409/429/5xx, I/O errors and
- * invalid data are retryable; other 4xx, refusals and a missing key are not. The API key is never logged.</p>
+ * retries would multiply the per-attempt stage timeout. Error mapping: rate limits, 408/409/429/5xx, errors sent
+ * inside the stream, I/O errors, invalid data and a stream that ends early are retryable, and so is an output
+ * truncated at {@code max_tokens}; other 4xx, refusals and a missing key are not. The API key is never logged.</p>
  */
 public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
 
@@ -59,7 +71,8 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
             + "coverageMatrix) must be returned as arrays of {\"key\": ..., \"value\": ...} entries.";
 
     /**
-     * Sends a Messages API request (the SDK in production, a stub in tests).
+     * Sends a Messages API request and returns the complete response message (the streaming SDK call in
+     * production, a canned message in tests).
      */
     @FunctionalInterface
     interface MessageSender {
@@ -68,7 +81,7 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
          * Sends the request.
          *
          * @param params request parameters
-         * @return the response message
+         * @return the complete (accumulated) response message
          * @throws AnthropicException on SDK errors
          */
         Message send(MessageCreateParams params);
@@ -197,6 +210,10 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
         if (error instanceof RateLimitException) {
             return new LlmException("anthropic rate limited (HTTP 429)", true, error);
         }
+        if (error instanceof SseException) {
+            // an error event inside an accepted stream (overloaded, api_error): transient by nature
+            return new LlmException("anthropic stream error (" + type + ")", true, error);
+        }
         if (error instanceof InternalServerException e) {
             return new LlmException("anthropic server error (HTTP " + e.statusCode() + ")", true, error);
         }
@@ -234,7 +251,29 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
             }
         }
         AnthropicClient ready = client;
-        return params -> ready.messages().create(params);
+        return params -> {
+            try (StreamResponse<RawMessageStreamEvent> stream = ready.messages().createStreaming(params)) {
+                return accumulate(stream.stream());
+            }
+        };
+    }
+
+    /**
+     * Accumulates the events of a streamed Messages API response into the final message (text deltas, stop reason
+     * and usage).
+     *
+     * @param events the stream events in arrival order
+     * @return the complete message
+     * @throws AnthropicInvalidDataException when the stream ends before {@code message_stop} (retryable)
+     */
+    static Message accumulate(Stream<RawMessageStreamEvent> events) {
+        MessageAccumulator accumulator = MessageAccumulator.create();
+        events.forEach(accumulator::accumulate);
+        try {
+            return accumulator.message();
+        } catch (IllegalStateException e) {
+            throw new AnthropicInvalidDataException("the response stream ended before message_stop", e);
+        }
     }
 
     @Override

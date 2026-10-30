@@ -4,9 +4,14 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import jakarta.persistence.EntityManagerFactory;
+
+import org.hibernate.SessionFactory;
+import org.hibernate.stat.Statistics;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -24,7 +29,7 @@ import com.agenticsdlc.orchestrator.core.audit.AuditEventType;
  * {@link JpaAuditSink} on H2 with the Flyway schema, without a test-managed transaction (the engine appends from
  * its own threads).
  */
-@DataJpaTest
+@DataJpaTest(properties = "spring.jpa.properties.hibernate.generate_statistics=true")
 @Import({JpaAuditSink.class, PersistenceFixtures.class})
 @Transactional(propagation = Propagation.NOT_SUPPORTED)
 class JpaAuditSinkTest {
@@ -36,6 +41,9 @@ class JpaAuditSinkTest {
 
     @Autowired
     private AuditEventRepository events;
+
+    @Autowired
+    private EntityManagerFactory entityManagerFactory;
 
     @AfterEach
     void cleanUp() {
@@ -82,6 +90,25 @@ class JpaAuditSinkTest {
         assertThat(sink.forRun("unknown", 0)).isEmpty();
         assertThat(events.findAll()).filteredOn(e -> e.getRunId().equals("run-a"))
                 .allSatisfy(e -> assertThat(e.getDataJson()).isNull());
+    }
+
+    @Test
+    void pagesAreLimitedByTheDatabaseQuery() {
+        List<AuditEvent> batch = new ArrayList<>();
+        for (long seq = 1; seq <= 6; seq++) {
+            batch.add(event("run-a", seq, AuditEventType.STAGE_READY, "intake", Actor.system(), Map.of()));
+        }
+        sink.append(batch);
+        Statistics statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+        statistics.clear();
+
+        List<AuditEvent> page = sink.forRun("run-a", 1, 2);
+
+        assertThat(page).extracting(AuditEvent::seq).containsExactly(2L, 3L);
+        assertThat(statistics.getEntityLoadCount()).as("rows read from the database").isEqualTo(2L);
+        assertThat(sink.forRun("run-a", 3, 10)).extracting(AuditEvent::seq).containsExactly(4L, 5L, 6L);
+        assertThat(sink.forRun("run-a", 6, 10)).isEmpty();
+        assertThatThrownBy(() -> sink.forRun("run-a", 0, 0)).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

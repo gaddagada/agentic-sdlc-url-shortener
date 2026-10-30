@@ -19,7 +19,10 @@ import org.jspecify.annotations.Nullable;
  * @param endedAt end of the latest attempt
  * @param durationMs duration of the latest attempt
  * @param lastError last error
- * @param artifactVersion accepted artifact version, or null
+ * @param artifactVersion the version to look at: the version under review while an exit approval is pending,
+ *                        else the accepted version, or null
+ * @param acceptedVersion the accepted artifact version, or null (while an exit approval is pending this is the
+ *                        previously accepted version)
  * @param artifactKind artifact kind the stage produces
  * @param approval pending approval, else the latest approval of the stage, or null
  * @param feedback reviewer and verification feedback
@@ -38,6 +41,7 @@ public record StageView(
         @Nullable Long durationMs,
         @Nullable String lastError,
         @Nullable Integer artifactVersion,
+        @Nullable Integer acceptedVersion,
         String artifactKind,
         @Nullable ApprovalView approval,
         List<String> feedback,

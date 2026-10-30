@@ -73,18 +73,18 @@ public class ArtifactViewMapper {
      */
     public LineageView lineage(Run run) {
         Map<String, String> idByStageVersion = new HashMap<>();
-        List<LineageView.NodeView> nodes = new ArrayList<>();
+        List<LineageView.LineageNodeView> nodes = new ArrayList<>();
         for (Artifact a : run.artifacts()) {
             idByStageVersion.put(key(a.stageId(), a.version()), a.id());
-            nodes.add(new LineageView.NodeView(a.id(), a.stageId(), a.kind().name(), a.version(), a.hash(),
+            nodes.add(new LineageView.LineageNodeView(a.id(), a.stageId(), a.kind().name(), a.version(), a.hash(),
                     accepted(run, a)));
         }
-        List<LineageView.EdgeView> edges = new ArrayList<>();
+        List<LineageView.LineageEdgeView> edges = new ArrayList<>();
         for (Artifact a : run.artifacts()) {
             a.provenance().derivedFrom().forEach((stageId, version) -> {
                 String from = idByStageVersion.get(key(stageId, version));
                 if (from != null) {
-                    edges.add(new LineageView.EdgeView(from, a.id()));
+                    edges.add(new LineageView.LineageEdgeView(from, a.id()));
                 }
             });
         }
@@ -96,6 +96,10 @@ public class ArtifactViewMapper {
                 accepted(run, a), a.createdAt(), ProvenanceView.from(a.provenance()));
     }
 
+    /**
+     * Whether an artifact version is the accepted version of its stage. Acceptance happens only after the exit gate
+     * (or its approval), so a version under review is not accepted yet.
+     */
     private static boolean accepted(Run run, Artifact artifact) {
         return Objects.equals(run.acceptedVersions().get(artifact.stageId()), artifact.version());
     }

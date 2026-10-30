@@ -61,6 +61,54 @@ class ApiKeyAuthFilterTest {
     }
 
     @Test
+    void encodedParameterizedAndDotSegmentVariantsOfApiPathsAreProtected() throws Exception {
+        for (String uri : new String[] {"/%61pi/v1/runs", "/api;x=1/v1/runs", "/api/v1//runs", "//api/v1/runs",
+                "/API/v1/runs", "/static/../api/v1/runs", "/api", "/%41%50%49/v1/runs", "/api%2Fv1/runs"}) {
+            MockFilterChain chain = new MockFilterChain();
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            filter.doFilter(request(uri, null), response, chain);
+
+            assertThat(chain.getRequest()).as(uri).isNull();
+            assertThat(response.getStatus()).as(uri).isEqualTo(401);
+        }
+    }
+
+    @Test
+    void theDecodedServletPathDecidesEvenWhenTheRawUriLooksHarmless() throws Exception {
+        MockHttpServletRequest request = request("/console", null);
+        request.setServletPath("/api/v1/runs");
+        MockFilterChain chain = new MockFilterChain();
+        MockHttpServletResponse response = new MockHttpServletResponse();
+
+        filter.doFilter(request, response, chain);
+
+        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(chain.getRequest()).isNull();
+    }
+
+    @Test
+    void lookalikePathsOutsideTheApiAreNotProtected() throws Exception {
+        for (String uri : new String[] {"/apidocs", "/api-v1", "/v3/api-docs", "/swagger-ui/index.html",
+                "/js/api.js"}) {
+            MockFilterChain chain = new MockFilterChain();
+
+            filter.doFilter(request(uri, null), new MockHttpServletResponse(), chain);
+
+            assertThat(chain.getRequest()).as(uri).isNotNull();
+        }
+    }
+
+    @Test
+    void normalizationStripsParametersDuplicateSlashesAndDotSegments() {
+        assertThat(ApiKeyAuthFilter.normalize("/api;x=1/v1;y=2/runs")).isEqualTo("/api/v1/runs");
+        assertThat(ApiKeyAuthFilter.normalize("//api///v1//runs")).isEqualTo("/api/v1/runs");
+        assertThat(ApiKeyAuthFilter.normalize("/a/./b/../../api/v1")).isEqualTo("/api/v1");
+        assertThat(ApiKeyAuthFilter.normalize("/../api/v1")).isEqualTo("/api/v1");
+        assertThat(ApiKeyAuthFilter.normalize("")).isEmpty();
+    }
+
+    @Test
     void aBlankKeyIsRejectedAtConstruction() {
         assertThatThrownBy(() -> new ApiKeyAuthFilter(" ", MAPPER)).isInstanceOf(IllegalArgumentException.class);
     }

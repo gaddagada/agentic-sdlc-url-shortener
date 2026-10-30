@@ -70,8 +70,22 @@ public class RunLauncher {
      * @return a snapshot of the new run
      */
     public Run launch(ScenarioDefinition scenario, @Nullable String provider, Actor operator) {
+        return launch(scenario, provider, null, operator);
+    }
+
+    /**
+     * Starts a run of a catalog scenario with optional budget overrides.
+     *
+     * @param scenario the scenario
+     * @param provider requested provider, or null for the default
+     * @param budget budget overrides, or null for the defaults
+     * @param operator the operator starting the run
+     * @return a snapshot of the new run
+     */
+    public Run launch(ScenarioDefinition scenario, @Nullable String provider,
+                      CreateRunRequest.@Nullable BudgetRequest budget, Actor operator) {
         return start(scenario.requirement(), scenario.key(), scenario.autonomy(), provider, scenario.faults(),
-                scenario.workspace(), null, operator);
+                scenario.workspace(), budget(budget), operator);
     }
 
     private Run start(String requirement, String scenario, AutonomyLevel autonomy, @Nullable String provider,

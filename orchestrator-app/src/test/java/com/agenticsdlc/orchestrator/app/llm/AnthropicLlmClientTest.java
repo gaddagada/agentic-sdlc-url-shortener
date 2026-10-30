@@ -16,6 +16,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
 
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmException;
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmRequest;
@@ -34,12 +36,14 @@ import com.anthropic.errors.InternalServerException;
 import com.anthropic.errors.NotFoundException;
 import com.anthropic.errors.PermissionDeniedException;
 import com.anthropic.errors.RateLimitException;
+import com.anthropic.errors.SseException;
 import com.anthropic.errors.UnauthorizedException;
 import com.anthropic.errors.UnexpectedStatusCodeException;
 import com.anthropic.errors.UnprocessableEntityException;
 import com.anthropic.models.messages.ContentBlock;
 import com.anthropic.models.messages.Message;
 import com.anthropic.models.messages.MessageCreateParams;
+import com.anthropic.models.messages.RawMessageStreamEvent;
 import com.anthropic.models.messages.StopReason;
 import com.anthropic.models.messages.TextBlock;
 import com.anthropic.models.messages.Usage;
@@ -206,6 +210,52 @@ class AnthropicLlmClientTest {
                 });
     }
 
+    @Test
+    void streamedEventsAreAccumulatedIntoTheFinalMessage() throws Exception {
+        Message message = AnthropicLlmClient.accumulate(streamEvents(true));
+
+        assertThat(message.stopReason()).contains(StopReason.END_TURN);
+        assertThat(message.usage().inputTokens()).isEqualTo(1200L);
+        assertThat(message.usage().outputTokens()).isEqualTo(340L);
+        assertThat(message.content()).singleElement().satisfies(block ->
+                assertThat(block.text().orElseThrow().text()).isEqualTo(TEST_PLAN_JSON));
+    }
+
+    @Test
+    void aStreamedResponseIsParsedLikeANonStreamedOne() throws Exception {
+        AnthropicLlmClient client = client(settings(true, "k"), params -> AnthropicLlmClient.accumulate(
+                events(true)));
+
+        LlmResponse<TestPlan> response = client.complete(REQUEST, TestPlan.class);
+
+        assertThat(response.output().coverageMatrix()).containsEntry("FR-1", "TC-1");
+        assertThat(response.usage().inputTokens()).isEqualTo(1200L);
+        assertThat(response.usage().outputTokens()).isEqualTo(340L);
+        assertThat(response.rawText()).isEqualTo(TEST_PLAN_JSON);
+    }
+
+    @Test
+    void aStreamThatEndsBeforeMessageStopIsRetryable() {
+        AnthropicLlmClient client = client(settings(true, "k"), params -> AnthropicLlmClient.accumulate(
+                events(false)));
+
+        assertThatThrownBy(() -> client.complete(REQUEST, TestPlan.class))
+                .isInstanceOfSatisfying(LlmException.class, e -> {
+                    assertThat(e.retryable()).isTrue();
+                    assertThat(e.getCause()).isInstanceOf(AnthropicInvalidDataException.class);
+                });
+    }
+
+    @Test
+    void theDefaultsAllowLongStreamedOutputs() {
+        LlmProperties defaults = new Binder(new MapConfigurationPropertySource(Map.of()))
+                .bindOrCreate("sdlc.llm", LlmProperties.class);
+
+        assertThat(defaults.anthropic().maxOutputTokens()).isEqualTo(32000);
+        assertThat(defaults.anthropic().timeout()).isEqualTo(Duration.ofSeconds(300));
+        assertThat(client(defaults.anthropic(), params -> null).maxOutputTokens()).isEqualTo(32000);
+    }
+
     @ParameterizedTest(name = "{0} -> retryable={1}")
     @MethodSource("sdkErrors")
     void classifiesSdkErrors(AnthropicException error, boolean retryable) {
@@ -230,6 +280,9 @@ class AnthropicLlmClientTest {
                 Arguments.of(PermissionDeniedException.builder().headers(headers).body(body).build(), false),
                 Arguments.of(NotFoundException.builder().headers(headers).body(body).build(), false),
                 Arguments.of(UnprocessableEntityException.builder().headers(headers).body(body).build(), false),
+                Arguments.of(SseException.builder().statusCode(200).headers(headers)
+                        .body(JsonValue.from(Map.of("type", "error", "error", Map.of("type", "overloaded_error"))))
+                        .build(), true),
                 Arguments.of(new AnthropicIoException("connection reset"), true),
                 Arguments.of(new AnthropicInvalidDataException("bad data"), true),
                 Arguments.of(new AnthropicException("unknown"), false));
@@ -246,6 +299,46 @@ class AnthropicLlmClientTest {
 
     private static LlmProperties.Anthropic settings(boolean enabled, String key) {
         return new LlmProperties.Anthropic(enabled, "claude-opus-5-5", key, 16000, Duration.ofSeconds(180));
+    }
+
+    /** The server-sent events of a streamed response carrying {@link #TEST_PLAN_JSON} in two text deltas. */
+    private static Stream<RawMessageStreamEvent> streamEvents(boolean complete) throws Exception {
+        int half = TEST_PLAN_JSON.length() / 2;
+        List<String> events = new ArrayList<>(List.of(
+                "{\"type\": \"message_start\", \"message\": {\"id\": \"msg_stream\", \"type\": \"message\", "
+                        + "\"role\": \"assistant\", \"content\": [], \"model\": \"claude-opus-5-5\", "
+                        + "\"stop_reason\": null, \"stop_sequence\": null, \"usage\": {\"input_tokens\": 1200, "
+                        + "\"output_tokens\": 1, \"cache_creation_input_tokens\": 0, "
+                        + "\"cache_read_input_tokens\": 0}}}",
+                "{\"type\": \"content_block_start\", \"index\": 0, \"content_block\": {\"type\": \"text\", "
+                        + "\"text\": \"\"}}",
+                "{\"type\": \"ping\"}",
+                textDelta(TEST_PLAN_JSON.substring(0, half)),
+                textDelta(TEST_PLAN_JSON.substring(half)),
+                "{\"type\": \"content_block_stop\", \"index\": 0}",
+                "{\"type\": \"message_delta\", \"delta\": {\"stop_reason\": \"end_turn\", "
+                        + "\"stop_sequence\": null}, \"usage\": {\"output_tokens\": 340}}"));
+        if (complete) {
+            events.add("{\"type\": \"message_stop\"}");
+        }
+        List<RawMessageStreamEvent> parsed = new ArrayList<>();
+        for (String event : events) {
+            parsed.add(ObjectMappers.jsonMapper().readValue(event, RawMessageStreamEvent.class));
+        }
+        return parsed.stream();
+    }
+
+    private static Stream<RawMessageStreamEvent> events(boolean complete) {
+        try {
+            return streamEvents(complete);
+        } catch (Exception e) {
+            throw new IllegalStateException("cannot build the test stream", e);
+        }
+    }
+
+    private static String textDelta(String text) throws Exception {
+        return "{\"type\": \"content_block_delta\", \"index\": 0, \"delta\": {\"type\": \"text_delta\", "
+                + "\"text\": " + ObjectMappers.jsonMapper().writeValueAsString(text) + "}}";
     }
 
     private static Message message(String text, StopReason stopReason) {

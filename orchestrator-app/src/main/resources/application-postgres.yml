@@ -1,0 +1,8 @@
+# PostgreSQL persistence: run with --spring.profiles.active=postgres (or SPRING_PROFILES_ACTIVE=postgres).
+# The Flyway schema (db/migration) is portable; the PostgreSQL JDBC driver and Flyway module are on the classpath.
+spring:
+  datasource:
+    url: ${SDLC_DB_URL:jdbc:postgresql://localhost:5432/orchestrator}
+    username: ${SDLC_DB_USER:orchestrator}
+    password: ${SDLC_DB_PASSWORD:}
+    driver-class-name: org.postgresql.Driver

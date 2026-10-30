@@ -11,6 +11,9 @@ info:
 servers:
 - url: http://localhost:8090
   description: Generated server url
+security:
+- apiKey: []
+- {}
 tags:
 - name: Scenarios
   description: Executable demo scenarios
@@ -36,8 +39,8 @@ paths:
       parameters:
       - name: X-Operator-Id
         in: header
-        description: Id of the human operator issuing the request (recorded in the
-          audit trail)
+        description: "Id of the human operator issuing the request (recorded in the\
+          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
         required: true
         schema:
           type: string
@@ -54,6 +57,9 @@ paths:
       tags:
       - Scenarios
       summary: Start a run of a scenario
+      description: The optional body overrides the provider and the budget; the provider
+        may also be given as the provider query parameter (a different provider in
+        the body is refused with 400).
       operationId: runScenario
       parameters:
       - name: key
@@ -72,19 +78,51 @@ paths:
           minLength: 0
       - name: X-Operator-Id
         in: header
-        description: Id of the human operator issuing the request (recorded in the
-          audit trail)
+        description: "Id of the human operator issuing the request (recorded in the\
+          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
         required: true
         schema:
           type: string
           pattern: "[A-Za-z0-9._@-]{1,64}"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunScenarioRequest"
       responses:
-        "200":
-          description: OK
+        "201":
+          description: Created
           content:
             '*/*':
               schema:
                 $ref: "#/components/schemas/RunView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "409":
+          description: "Refused in the current state: wrong run or stage state, stale\
+            \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
+            \ four-eyes rule or unavailable agent provider"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "503":
+          description: The control plane is shutting down
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs:
     get:
       tags:
@@ -108,8 +146,8 @@ paths:
       parameters:
       - name: X-Operator-Id
         in: header
-        description: Id of the human operator issuing the request (recorded in the
-          audit trail)
+        description: "Id of the human operator issuing the request (recorded in the\
+          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
         required: true
         schema:
           type: string
@@ -121,12 +159,33 @@ paths:
               $ref: "#/components/schemas/CreateRunRequest"
         required: true
       responses:
-        "200":
-          description: OK
+        "201":
+          description: Created
           content:
             '*/*':
               schema:
                 $ref: "#/components/schemas/RunView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "409":
+          description: "Refused in the current state: wrong run or stage state, stale\
+            \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
+            \ four-eyes rule or unavailable agent provider"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "503":
+          description: The control plane is shutting down
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/stop:
     post:
       tags:
@@ -141,8 +200,8 @@ paths:
           type: string
       - name: X-Operator-Id
         in: header
-        description: Id of the human operator issuing the request (recorded in the
-          audit trail)
+        description: "Id of the human operator issuing the request (recorded in the\
+          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
         required: true
         schema:
           type: string
@@ -159,11 +218,40 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/RunView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "409":
+          description: "Refused in the current state: wrong run or stage state, stale\
+            \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
+            \ four-eyes rule or unavailable agent provider"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "503":
+          description: The control plane is shutting down
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/stages/{stageId}/reject:
     post:
       tags:
       - Runs
       summary: Reject the pending gate of a stage (rework or abort)
+      description: "Send the approvalId of the reviewed pending action: a stale id\
+        \ is refused with 409."
       operationId: rejectStage
       parameters:
       - name: id
@@ -178,8 +266,8 @@ paths:
           type: string
       - name: X-Operator-Id
         in: header
-        description: Id of the human operator issuing the request (recorded in the
-          audit trail)
+        description: "Id of the human operator issuing the request (recorded in the\
+          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
         required: true
         schema:
           type: string
@@ -197,11 +285,41 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/RunView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "409":
+          description: "Refused in the current state: wrong run or stage state, stale\
+            \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
+            \ four-eyes rule or unavailable agent provider"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "503":
+          description: The control plane is shutting down
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/stages/{stageId}/approve:
     post:
       tags:
       - Runs
       summary: Approve the pending gate of a stage
+      description: "Send the approvalId of the reviewed pending action: a stale id\
+        \ (the stage now awaits another approval, for example after a re-plan or rework)\
+        \ is refused with 409."
       operationId: approveStage
       parameters:
       - name: id
@@ -216,8 +334,8 @@ paths:
           type: string
       - name: X-Operator-Id
         in: header
-        description: Id of the human operator issuing the request (recorded in the
-          audit trail)
+        description: "Id of the human operator issuing the request (recorded in the\
+          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
         required: true
         schema:
           type: string
@@ -234,6 +352,33 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/RunView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "409":
+          description: "Refused in the current state: wrong run or stage state, stale\
+            \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
+            \ four-eyes rule or unavailable agent provider"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "503":
+          description: The control plane is shutting down
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/resume:
     post:
       tags:
@@ -248,8 +393,8 @@ paths:
           type: string
       - name: X-Operator-Id
         in: header
-        description: Id of the human operator issuing the request (recorded in the
-          audit trail)
+        description: "Id of the human operator issuing the request (recorded in the\
+          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
         required: true
         schema:
           type: string
@@ -261,6 +406,33 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/RunView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "409":
+          description: "Refused in the current state: wrong run or stage state, stale\
+            \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
+            \ four-eyes rule or unavailable agent provider"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "503":
+          description: The control plane is shutting down
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/replan:
     post:
       tags:
@@ -275,8 +447,8 @@ paths:
           type: string
       - name: X-Operator-Id
         in: header
-        description: Id of the human operator issuing the request (recorded in the
-          audit trail)
+        description: "Id of the human operator issuing the request (recorded in the\
+          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
         required: true
         schema:
           type: string
@@ -294,6 +466,33 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/RunView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "409":
+          description: "Refused in the current state: wrong run or stage state, stale\
+            \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
+            \ four-eyes rule or unavailable agent provider"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "503":
+          description: The control plane is shutting down
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/clarify:
     post:
       tags:
@@ -308,8 +507,8 @@ paths:
           type: string
       - name: X-Operator-Id
         in: header
-        description: Id of the human operator issuing the request (recorded in the
-          audit trail)
+        description: "Id of the human operator issuing the request (recorded in the\
+          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
         required: true
         schema:
           type: string
@@ -327,6 +526,33 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/RunView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "409":
+          description: "Refused in the current state: wrong run or stage state, stale\
+            \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
+            \ four-eyes rule or unavailable agent provider"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "503":
+          description: The control plane is shutting down
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/workspace/index:
     get:
       tags:
@@ -387,6 +613,12 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/RunView"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/lineage:
     get:
       tags:
@@ -406,6 +638,12 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/LineageView"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/graph:
     get:
       tags:
@@ -425,11 +663,19 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/GraphView"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/audit:
     get:
       tags:
       - Run evidence
       summary: Get the audit trail of a run
+      description: "A page of at most limit events with seq > afterSeq, in sequence\
+        \ order; continue with the seq of the last event."
       operationId: getAudit
       parameters:
       - name: id
@@ -463,6 +709,19 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/AuditEventView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/artifacts:
     get:
       tags:
@@ -484,11 +743,20 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/ArtifactSummaryView"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/runs/{id}/artifacts/{stageId}:
     get:
       tags:
       - Run evidence
       summary: Get an artifact of a stage (accepted version by default)
+      description: "Without a version the accepted version is returned; a version\
+        \ under review is not accepted until its exit gate is approved, so request\
+        \ it by version (pendingActions[].reviewVersion)."
       operationId: getArtifact
       parameters:
       - name: id
@@ -517,6 +785,19 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/ArtifactView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
   /api/v1/providers:
     get:
       tags:
@@ -614,6 +895,38 @@ components:
           type: array
           items:
             type: string
+    BudgetRequest:
+      type: object
+      properties:
+        maxFeedbackLoops:
+          type: integer
+          format: int32
+          maximum: 10
+          minimum: 0
+        maxReplans:
+          type: integer
+          format: int32
+          maximum: 10
+          minimum: 0
+        maxAgentCalls:
+          type: integer
+          format: int32
+          maximum: 500
+          minimum: 1
+        maxLlmTokens:
+          type: integer
+          format: int64
+          maximum: 10000000
+          minimum: 0
+    RunScenarioRequest:
+      type: object
+      properties:
+        provider:
+          type: string
+          maxLength: 32
+          minLength: 0
+        budget:
+          $ref: "#/components/schemas/BudgetRequest"
     ApprovalView:
       type: object
       properties:
@@ -637,6 +950,11 @@ components:
         artifactVersion:
           type: integer
           format: int32
+        previousAcceptedVersion:
+          type: integer
+          format: int32
+        artifactHash:
+          type: string
         requestedAt:
           type: string
           format: date-time
@@ -769,6 +1087,11 @@ components:
           type: array
           items:
             type: string
+        reviewVersion:
+          type: integer
+          format: int32
+        reviewHash:
+          type: string
         requestedAt:
           type: string
           format: date-time
@@ -902,6 +1225,9 @@ components:
         artifactVersion:
           type: integer
           format: int32
+        acceptedVersion:
+          type: integer
+          format: int32
         artifactKind:
           type: string
         approval:
@@ -934,29 +1260,6 @@ components:
         mttrMs:
           type: integer
           format: int64
-    BudgetRequest:
-      type: object
-      properties:
-        maxFeedbackLoops:
-          type: integer
-          format: int32
-          maximum: 10
-          minimum: 0
-        maxReplans:
-          type: integer
-          format: int32
-          maximum: 10
-          minimum: 0
-        maxAgentCalls:
-          type: integer
-          format: int32
-          maximum: 500
-          minimum: 1
-        maxLlmTokens:
-          type: integer
-          format: int64
-          maximum: 10000000
-          minimum: 0
     CreateRunRequest:
       type: object
       properties:
@@ -1035,6 +1338,9 @@ components:
           enum:
           - REWORK
           - ABORT
+        approvalId:
+          type: string
+          pattern: "[A-Za-z0-9._-]{1,64}"
       required:
       - disposition
       - reason
@@ -1045,6 +1351,9 @@ components:
           type: string
           maxLength: 2000
           minLength: 0
+        approvalId:
+          type: string
+          pattern: "[A-Za-z0-9._-]{1,64}"
     ReplanRequest:
       type: object
       properties:
@@ -1178,25 +1487,14 @@ components:
           format: int32
         progress:
           $ref: "#/components/schemas/ProgressView"
-    EdgeView:
+    LineageEdgeView:
       type: object
       properties:
         from:
           type: string
         to:
           type: string
-    LineageView:
-      type: object
-      properties:
-        nodes:
-          type: array
-          items:
-            $ref: "#/components/schemas/NodeView"
-        edges:
-          type: array
-          items:
-            $ref: "#/components/schemas/EdgeView"
-    NodeView:
+    LineageNodeView:
       type: object
       properties:
         artifactId:
@@ -1212,17 +1510,62 @@ components:
           type: string
         accepted:
           type: boolean
+    LineageView:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineageNodeView"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineageEdgeView"
+    GraphEdgeView:
+      type: object
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+    GraphNodeView:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        layer:
+          type: integer
+          format: int32
+        role:
+          type: string
+        activeAgent:
+          type: string
+        attempts:
+          type: integer
+          format: int32
+        approval:
+          $ref: "#/components/schemas/ApprovalView"
+        artifactVersion:
+          type: integer
+          format: int32
+        acceptedVersion:
+          type: integer
+          format: int32
     GraphView:
       type: object
       properties:
         nodes:
           type: array
           items:
-            $ref: "#/components/schemas/NodeView"
+            $ref: "#/components/schemas/GraphNodeView"
         edges:
           type: array
           items:
-            $ref: "#/components/schemas/EdgeView"
+            $ref: "#/components/schemas/GraphEdgeView"
         layers:
           type: array
           items:
@@ -1488,9 +1831,48 @@ components:
         replans:
           type: integer
           format: int64
+    ProblemViolation:
+      type: object
+      description: One validation failure
+      properties:
+        field:
+          type: string
+          description: "Offending field, parameter or header"
+        message:
+          type: string
+          description: Constraint message
+    ProblemDetail:
+      type: object
+      description: "RFC 9457 Problem Detail (application/problem+json); clients should\
+        \ branch on type, not on title or detail"
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Problem type URI
+        title:
+          type: string
+          description: Short summary
+        status:
+          type: integer
+          format: int32
+          description: HTTP status
+        detail:
+          type: string
+          description: Explanation of this occurrence
+        instance:
+          type: string
+          format: uri
+          description: Request path
+        errors:
+          type: array
+          description: Validation failures (validation-error only)
+          items:
+            $ref: "#/components/schemas/ProblemViolation"
   securitySchemes:
     apiKey:
       type: apiKey
-      description: Required on /api/** only when sdlc.security.api-key is configured
+      description: Required on /api/** when sdlc.security.api-key is configured; not
+        checked otherwise (local development mode)
       name: X-Api-Key
       in: header

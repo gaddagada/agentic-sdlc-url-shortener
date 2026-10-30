@@ -3,17 +3,22 @@ package com.agenticsdlc.orchestrator.app.api;
 import java.net.URI;
 import java.util.List;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.Size;
 
 import org.jspecify.annotations.Nullable;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.agenticsdlc.orchestrator.app.api.dto.RunScenarioRequest;
 import com.agenticsdlc.orchestrator.app.api.dto.RunView;
 import com.agenticsdlc.orchestrator.app.api.dto.ScenarioView;
 import com.agenticsdlc.orchestrator.app.scenario.ScenarioCatalog;
@@ -63,16 +68,30 @@ public class ScenarioController {
      * Starts a run of a scenario.
      *
      * @param key scenario key
-     * @param provider optional provider override
+     * @param provider optional provider override (query parameter, kept for the console and scripts)
      * @param operator operator from {@code X-Operator-Id}
+     * @param request optional body with a provider and budget overrides
      * @return 201 with the run
      */
     @PostMapping("/{key}/run")
-    @Operation(summary = "Start a run of a scenario", operationId = "runScenario")
+    @ResponseStatus(HttpStatus.CREATED)
+    @Operation(summary = "Start a run of a scenario", operationId = "runScenario",
+            description = "The optional body overrides the provider and the budget; the provider may also be given "
+                    + "as the provider query parameter (a different provider in the body is refused with 400).")
+    @ProblemResponses({400, 404, 409, 503})
     public ResponseEntity<RunView> run(@PathVariable String key,
                                        @RequestParam(required = false) @Nullable @Size(max = 32) String provider,
-                                       @OperatorId Actor operator) {
-        Run run = launcher.launch(catalog.require(key), provider, operator);
+                                       @OperatorId Actor operator,
+                                       @Valid @RequestBody(required = false) @Nullable RunScenarioRequest request) {
+        String bodyProvider = request == null || request.provider() == null || request.provider().isBlank() ? null
+                : request.provider().strip();
+        String queryProvider = provider == null || provider.isBlank() ? null : provider.strip();
+        if (bodyProvider != null && queryProvider != null && !bodyProvider.equals(queryProvider)) {
+            throw new InvalidRequestException("provider given twice with different values (query parameter '"
+                    + queryProvider + "', body '" + bodyProvider + "')");
+        }
+        Run run = launcher.launch(catalog.require(key), bodyProvider != null ? bodyProvider : queryProvider,
+                request == null ? null : request.budget(), operator);
         return ResponseEntity.created(URI.create("/api/v1/runs/" + run.id())).body(mapper.toView(run));
     }
 }

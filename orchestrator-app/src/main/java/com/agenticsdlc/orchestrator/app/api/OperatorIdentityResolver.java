@@ -1,5 +1,7 @@
 package com.agenticsdlc.orchestrator.app.api;
 
+import java.util.Locale;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 import org.jspecify.annotations.Nullable;
@@ -17,6 +19,10 @@ import com.agenticsdlc.orchestrator.core.audit.Actor;
  * mutating request must name the human operator who issues it, and the id is recorded with every governance
  * action in the audit trail. The identity is asserted, not authenticated (prototype; the production path is
  * SSO/OIDC, see ADR 0009).
+ *
+ * <p>Ids the engine uses for its own actors ({@code engine}, {@code system}, {@code deterministic}, compared
+ * case-insensitively, and anything starting with {@code fallback:}) are reserved and rejected with 400: a human
+ * operator must never be able to pose as the engine or an agent in the audit trail.</p>
  */
 @Component
 public class OperatorIdentityResolver implements HandlerMethodArgumentResolver {
@@ -26,6 +32,9 @@ public class OperatorIdentityResolver implements HandlerMethodArgumentResolver {
 
     /** Allowed operator ids. */
     public static final String PATTERN = "[A-Za-z0-9._@-]{1,64}";
+
+    private static final Set<String> RESERVED_IDS = Set.of("engine", "system", "deterministic");
+    private static final String RESERVED_PREFIX = "fallback:";
 
     private static final Pattern VALID = Pattern.compile(PATTERN);
 
@@ -52,9 +61,24 @@ public class OperatorIdentityResolver implements HandlerMethodArgumentResolver {
             throw new OperatorIdentityException("operator identity required: send the " + HEADER + " header");
         }
         String id = header.strip();
+        if (isReserved(id)) {
+            throw new OperatorIdentityException("operator identity invalid: engine, system, deterministic and "
+                    + "fallback:* are reserved for the engine and its agents");
+        }
         if (!VALID.matcher(id).matches()) {
             throw new OperatorIdentityException("operator identity invalid: " + HEADER + " must match " + PATTERN);
         }
         return Actor.human(id);
+    }
+
+    /**
+     * Returns whether an operator id is reserved for the engine or its agents.
+     *
+     * @param id a stripped operator id
+     * @return true for {@code engine}, {@code system}, {@code deterministic} (any case) and {@code fallback:*}
+     */
+    public static boolean isReserved(String id) {
+        String lower = id.toLowerCase(Locale.ROOT);
+        return RESERVED_IDS.contains(lower) || lower.startsWith(RESERVED_PREFIX);
     }
 }

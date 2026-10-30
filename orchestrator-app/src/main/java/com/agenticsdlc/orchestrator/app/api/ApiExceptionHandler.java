@@ -33,17 +33,20 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 import com.agenticsdlc.orchestrator.app.llm.ProviderUnavailableException;
 import com.agenticsdlc.orchestrator.app.scenario.ScenarioNotFoundException;
 import com.agenticsdlc.orchestrator.core.engine.InvalidCommandException;
+import com.agenticsdlc.orchestrator.core.engine.InvalidRunStateException;
 import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
 
 /**
  * Maps exceptions to RFC 9457 Problem Details ({@code application/problem+json}).
  *
- * <p>Validation failures and a missing operator identity are 400 (validation problems carry an {@code errors}
- * array of {@code {field, message}}); unknown runs, artifacts and scenarios are 404; commands the engine refuses
- * ({@link IllegalStateException} for the wrong state, {@link InvalidCommandException} for invalid commands) and
- * unavailable providers are 409 with the engine's message; everything else is a 500 without internal details.
- * Extends {@link ResponseEntityExceptionHandler} so Spring MVC's own exceptions (405, 406, 415, missing parameters,
- * ...) are rendered consistently.</p>
+ * <p>Validation failures and a missing or reserved operator identity are 400 (validation problems carry an
+ * {@code errors} array of {@code {field, message}}); other {@link IllegalArgumentException}s are 400 with a generic
+ * detail (only {@link InvalidRequestException} messages, written by the control plane, are returned); unknown runs,
+ * artifacts and scenarios are 404; commands the engine refuses ({@link InvalidRunStateException} for the wrong
+ * state, {@link InvalidCommandException} for invalid commands), four-eyes violations and unavailable providers are
+ * 409 with the engine's message; a plain {@link IllegalStateException} (engine closed or shutting down) is 503;
+ * everything else is a 500 without internal details. Extends {@link ResponseEntityExceptionHandler} so Spring
+ * MVC's own exceptions (405, 406, 415, missing parameters, ...) are rendered consistently.</p>
  */
 @RestControllerAdvice
 public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
@@ -73,15 +76,32 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 ex.getMessage()));
     }
 
-    @ExceptionHandler(IllegalStateException.class)
-    ResponseEntity<ProblemDetail> handleIllegalState(IllegalStateException ex) {
+    @ExceptionHandler(InvalidRunStateException.class)
+    ResponseEntity<ProblemDetail> handleInvalidRunState(InvalidRunStateException ex) {
         return respond(problem(HttpStatus.CONFLICT, ProblemTypes.INVALID_STATE, "Command not allowed in this state",
                 ex.getMessage()));
+    }
+
+    /**
+     * A plain {@link IllegalStateException} is what the engine throws once it is closed or shutting down (state
+     * conflicts are {@link InvalidRunStateException}); the message is not returned.
+     */
+    @ExceptionHandler(IllegalStateException.class)
+    ResponseEntity<ProblemDetail> handleIllegalState(IllegalStateException ex) {
+        LOG.warn("request refused while the control plane is unavailable: {}", ex.getMessage());
+        return respond(problem(HttpStatus.SERVICE_UNAVAILABLE, ProblemTypes.SERVICE_UNAVAILABLE,
+                "Service unavailable", "control plane is shutting down"));
     }
 
     @ExceptionHandler(InvalidCommandException.class)
     ResponseEntity<ProblemDetail> handleInvalidCommand(InvalidCommandException ex) {
         return respond(problem(HttpStatus.CONFLICT, ProblemTypes.INVALID_COMMAND, "Command rejected",
+                ex.getMessage()));
+    }
+
+    @ExceptionHandler(FourEyesViolationException.class)
+    ResponseEntity<ProblemDetail> handleFourEyes(FourEyesViolationException ex) {
+        return respond(problem(HttpStatus.CONFLICT, ProblemTypes.FOUR_EYES_VIOLATION, "Four-eyes rule violated",
                 ex.getMessage()));
     }
 
@@ -93,10 +113,20 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return respond(problem);
     }
 
-    @ExceptionHandler(IllegalArgumentException.class)
-    ResponseEntity<ProblemDetail> handleIllegalArgument(IllegalArgumentException ex) {
+    @ExceptionHandler(InvalidRequestException.class)
+    ResponseEntity<ProblemDetail> handleInvalidRequest(InvalidRequestException ex) {
         return respond(problem(HttpStatus.BAD_REQUEST, ProblemTypes.INVALID_ARGUMENT, "Invalid argument",
                 ex.getMessage()));
+    }
+
+    /**
+     * Other illegal arguments may carry library messages, so the detail is generic (the message is logged).
+     */
+    @ExceptionHandler(IllegalArgumentException.class)
+    ResponseEntity<ProblemDetail> handleIllegalArgument(IllegalArgumentException ex) {
+        LOG.info("invalid argument: {}", ex.getMessage());
+        return respond(problem(HttpStatus.BAD_REQUEST, ProblemTypes.INVALID_ARGUMENT, "Invalid argument",
+                "The request contains an invalid argument."));
     }
 
     @ExceptionHandler(Exception.class)

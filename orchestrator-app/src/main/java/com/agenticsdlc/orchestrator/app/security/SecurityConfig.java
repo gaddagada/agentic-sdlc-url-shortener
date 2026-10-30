@@ -1,5 +1,7 @@
 package com.agenticsdlc.orchestrator.app.security;
 
+import jakarta.servlet.DispatcherType;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.condition.ConditionOutcome;
@@ -17,8 +19,10 @@ import com.agenticsdlc.orchestrator.app.config.OrchestratorProperties;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Registers the {@link ApiKeyAuthFilter} for {@code /api/*} when {@code sdlc.security.api-key} is set; otherwise
- * logs a single WARN at startup that the API is unauthenticated (local development mode).
+ * Registers the {@link SecurityHeadersFilter} on every response and, when {@code sdlc.security.api-key} is set,
+ * the {@link ApiKeyAuthFilter} on every path (the filter itself decides on the normalized path whether a request
+ * targets {@code /api/**}); without a key it logs a single WARN at startup that the API is unauthenticated (local
+ * development mode).
  */
 @Configuration(proxyBeanMethods = false)
 public class SecurityConfig {
@@ -26,7 +30,7 @@ public class SecurityConfig {
     private static final Logger LOG = LoggerFactory.getLogger(SecurityConfig.class);
 
     /** Property holding the API key. */
-    static final String API_KEY_PROPERTY = "sdlc.security.api-key";
+    public static final String API_KEY_PROPERTY = "sdlc.security.api-key";
 
     /**
      * Creates the configuration and reports the authentication mode once.
@@ -42,7 +46,24 @@ public class SecurityConfig {
     }
 
     /**
-     * Registers the API-key filter.
+     * Registers the security headers filter first in the chain, for requests and error dispatches.
+     *
+     * @return the registration
+     */
+    @Bean
+    FilterRegistrationBean<SecurityHeadersFilter> securityHeadersFilterRegistration() {
+        FilterRegistrationBean<SecurityHeadersFilter> registration =
+                new FilterRegistrationBean<>(new SecurityHeadersFilter());
+        registration.setName("securityHeadersFilter");
+        registration.addUrlPatterns("/*");
+        registration.setDispatcherTypes(DispatcherType.REQUEST, DispatcherType.ERROR);
+        registration.setOrder(Ordered.HIGHEST_PRECEDENCE);
+        return registration;
+    }
+
+    /**
+     * Registers the API-key filter for every path; it filters only requests whose normalized path is under
+     * {@code /api}.
      *
      * @param properties configuration
      * @param mapper JSON mapper
@@ -55,7 +76,7 @@ public class SecurityConfig {
         FilterRegistrationBean<ApiKeyAuthFilter> registration = new FilterRegistrationBean<>(
                 new ApiKeyAuthFilter(properties.security().apiKey(), mapper));
         registration.setName("apiKeyAuthFilter");
-        registration.addUrlPatterns("/api/*");
+        registration.addUrlPatterns("/*");
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
         return registration;
     }

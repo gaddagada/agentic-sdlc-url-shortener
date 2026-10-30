@@ -31,8 +31,12 @@ public final class ProblemTypes {
     public static final URI INVALID_COMMAND = of("invalid-command");
     /** The requested agent provider cannot serve the run. */
     public static final URI PROVIDER_UNAVAILABLE = of("provider-unavailable");
+    /** Approving would break the four-eyes rule ({@code sdlc.governance.four-eyes}). */
+    public static final URI FOUR_EYES_VIOLATION = of("four-eyes-violation");
     /** Invalid argument. */
     public static final URI INVALID_ARGUMENT = of("invalid-argument");
+    /** The control plane is shutting down (engine closed); retry against a running instance. */
+    public static final URI SERVICE_UNAVAILABLE = of("service-unavailable");
     /** Unexpected server error. */
     public static final URI INTERNAL_ERROR = of("internal-error");
 

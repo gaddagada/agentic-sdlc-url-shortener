@@ -93,25 +93,39 @@ const ACTIVE = ['RUNNING', 'WAITING_HUMAN'];
 const textInput = (key, draft, attrs) =>
   h('input', { type: 'text', 'data-draft': key, 'data-fk': key, value: draft(key), maxlength: 2000, ...attrs });
 
+/** The artifact version an exit approval is about: it is accepted only once approved. */
+function reviewLine(action, on) {
+  if (!isNum(action.reviewVersion)) return null;
+  const hash = action.reviewHash ? String(action.reviewHash) : '';
+  return h('p', { class: 'action-review' },
+    h('span', {}, 'Under review: '),
+    chip(`${action.stageId} v${action.reviewVersion}`, 'mono chip-review', 'Not accepted until this gate is approved'),
+    hash ? h('span', { class: 'mono muted small', title: hash }, `#${hash.slice(0, 12)}`) : null,
+    h('button', { type: 'button', class: 'btn small', 'data-fk': `review:${action.stageId}`, onclick: () => on.review(action.stageId, action.reviewVersion) }, `Open v${action.reviewVersion}`));
+}
+
 function approvalAction(action, draft, stageName, on) {
   const stage = stageName(action.stageId);
   const key = (field) => `${field}:${action.stageId}`;
   const disposition = draft(key('disposition'), 'REWORK');
-  return h('article', { class: 'action approval' },
+  const version = isNum(action.reviewVersion) ? ` v${action.reviewVersion}` : '';
+  // The decision is bound to the approval rendered here: the server refuses it (409) once another approval is pending.
+  return h('article', { class: 'action approval', 'data-approval-id': action.approvalId ?? null },
     h('header', { class: 'action-head' },
       h('h3', {}, `Approval required: ${stage}`),
       chip(action.gateKind && `${humanize(action.gateKind)} gate`),
       action.requestedAt ? h('time', { class: 'muted small', datetime: action.requestedAt, title: fmtDateTime(action.requestedAt) }, `requested ${fmtTime(action.requestedAt)}`) : null),
     action.reason ? h('p', { class: 'action-reason' }, action.reason) : null,
+    reviewLine(action, on),
     h('div', { class: 'action-row' },
       textInput(key('comment'), draft, { placeholder: 'Comment (optional)', 'aria-label': `Approval comment for ${stage}` }),
-      h('button', { type: 'button', class: 'btn ok', onclick: () => on.approve(action.stageId) }, 'Approve')),
+      h('button', { type: 'button', class: 'btn ok', onclick: () => on.approve(action.stageId, action.approvalId) }, `Approve${version}`)),
     h('div', { class: 'action-row' },
       textInput(key('reason'), draft, { placeholder: 'Rejection reason (required)', 'aria-label': `Rejection reason for ${stage}` }),
       h('select', { 'aria-label': `Rejection disposition for ${stage}`, 'data-draft': key('disposition'), 'data-fk': key('disposition') },
         h('option', { value: 'REWORK', selected: disposition === 'REWORK' }, 'Rework'),
         h('option', { value: 'ABORT', selected: disposition === 'ABORT' }, 'Abort run')),
-      h('button', { type: 'button', class: 'btn danger', onclick: () => on.reject(action.stageId) }, 'Reject')));
+      h('button', { type: 'button', class: 'btn danger', onclick: () => on.reject(action.stageId, action.approvalId) }, `Reject${version}`)));
 }
 
 function clarificationAction(action, draft, stageName, on) {
@@ -181,7 +195,12 @@ export function renderActions(run, { drafts, busy, stageName, on }) {
 
 // ---------------------------------------------------------------- artifacts
 
-export function renderArtifactList({ stages, artifacts, selectedStage, selectedKey, onSelect }) {
+const versionState = (a, reviewing) => {
+  if (a.accepted) return 'accepted';
+  return reviewing?.get(a.stageId) === a.version ? 'under review' : 'superseded';
+};
+
+export function renderArtifactList({ stages, artifacts, selectedStage, selectedKey, reviewing, onSelect }) {
   const byStage = new Map();
   for (const a of artifacts) (byStage.get(a.stageId) ?? byStage.set(a.stageId, []).get(a.stageId)).push(a);
   const rows = [...stages];
@@ -198,10 +217,11 @@ export function renderArtifactList({ stages, artifacts, selectedStage, selectedK
       h('span', { class: 'versions' }, versions.length
         ? versions.map((a) => {
           const selected = selectedKey === `${a.stageId}|${a.version}`;
+          const state = versionState(a, reviewing);
           return h('button', {
-            type: 'button', class: `vchip${a.accepted ? ' accepted' : ''}${selected ? ' selected' : ''}`,
+            type: 'button', class: `vchip${a.accepted ? ' accepted' : ''}${state === 'under review' ? ' review' : ''}${selected ? ' selected' : ''}`,
             'aria-pressed': selected ? 'true' : 'false', 'data-fk': `ver:${a.stageId}:${a.version}`,
-            title: `${humanize(a.kind)} v${a.version} \u2014 ${a.accepted ? 'accepted' : 'superseded'}${a.hash ? `\n${a.hash}` : ''}`,
+            title: `${humanize(a.kind)} v${a.version} \u2014 ${state}${a.hash ? `\n${a.hash}` : ''}`,
             onclick: () => onSelect(a.stageId, a.version),
           }, `v${a.version ?? '?'}`);
         })
@@ -244,16 +264,20 @@ function artifactBody(summary, state, open, onToggle) {
   ];
 }
 
-export function renderArtifactDetail({ stage, summary, state, open, onToggle }) {
+export function renderArtifactDetail({ stage, summary, state, underReview = false, open, onToggle }) {
   if (!stage && !summary) return placeholder('Select a stage or a version chip, or click a node in the pipeline graph.');
   const s = stage ?? {};
   const art = state?.view ?? summary;
+  const acceptance = (accepted) => {
+    if (accepted) return chip('accepted', 'chip-ok');
+    return underReview ? chip('under review', 'chip-review', 'Accepted only once the pending approval is granted') : chip('superseded', 'chip-muted');
+  };
   return [
     h('header', { class: 'art-head' },
       h('h3', {}, s.name || s.id || summary?.stageId),
       art ? chip(`v${art.version ?? '?'}`, 'mono') : null,
       art?.kind ? chip(humanize(art.kind)) : null,
-      typeof art?.accepted === 'boolean' ? chip(art.accepted ? 'accepted' : 'superseded', art.accepted ? 'chip-ok' : 'chip-muted') : null,
+      typeof art?.accepted === 'boolean' ? acceptance(art.accepted) : null,
       art?.hash ? h('span', { class: 'mono muted small', title: art.hash }, `#${String(art.hash).slice(0, 12)}`) : null,
       art?.createdAt ? h('span', { class: 'muted small', title: fmtDateTime(art.createdAt) }, fmtWhen(art.createdAt)) : null),
     stage ? facts([['Status', statusPill(s.status)], ['Attempts', fmtNum(s.attempts)], ['Agent', s.activeAgent || DASH], ['Duration', fmtMs(s.durationMs)]]) : null,

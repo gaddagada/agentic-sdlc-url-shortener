@@ -57,6 +57,7 @@ public class RunArtifactController {
      */
     @GetMapping("/artifacts")
     @Operation(summary = "List the artifact versions of a run", operationId = "listArtifacts")
+    @ProblemResponses(404)
     public List<ArtifactSummaryView> artifacts(@PathVariable String id) {
         return mapper.summaries(engine.get(id));
     }
@@ -70,7 +71,11 @@ public class RunArtifactController {
      * @return the artifact
      */
     @GetMapping("/artifacts/{stageId}")
-    @Operation(summary = "Get an artifact of a stage (accepted version by default)", operationId = "getArtifact")
+    @Operation(summary = "Get an artifact of a stage (accepted version by default)", operationId = "getArtifact",
+            description = "Without a version the accepted version is returned; a version under review is not "
+                    + "accepted until its exit gate is approved, so request it by version "
+                    + "(pendingActions[].reviewVersion).")
+    @ProblemResponses({400, 404})
     public ArtifactView artifact(@PathVariable String id, @PathVariable String stageId,
                                  @RequestParam(required = false) @Nullable @Min(1) Integer version) {
         Run run = engine.get(id);
@@ -89,6 +94,7 @@ public class RunArtifactController {
      */
     @GetMapping("/lineage")
     @Operation(summary = "Get the artifact lineage of a run", operationId = "getLineage")
+    @ProblemResponses(404)
     public LineageView lineage(@PathVariable String id) {
         return mapper.lineage(engine.get(id));
     }
@@ -102,11 +108,14 @@ public class RunArtifactController {
      * @return events
      */
     @GetMapping("/audit")
-    @Operation(summary = "Get the audit trail of a run", operationId = "getAudit")
+    @Operation(summary = "Get the audit trail of a run", operationId = "getAudit",
+            description = "A page of at most limit events with seq > afterSeq, in sequence order; continue with the "
+                    + "seq of the last event.")
+    @ProblemResponses({400, 404})
     public List<AuditEventView> audit(@PathVariable String id,
                                       @RequestParam(defaultValue = "0") @Min(0) long afterSeq,
                                       @RequestParam(defaultValue = "500") @Min(1) @Max(5000) int limit) {
         engine.get(id);
-        return auditSink.forRun(id, afterSeq).stream().limit(limit).map(AuditEventView::from).toList();
+        return auditSink.forRun(id, afterSeq, limit).stream().map(AuditEventView::from).toList();
     }
 }

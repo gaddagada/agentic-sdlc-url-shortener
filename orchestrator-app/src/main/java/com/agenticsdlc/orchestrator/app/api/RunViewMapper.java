@@ -103,15 +103,15 @@ public class RunViewMapper {
      * @return the graph view
      */
     public GraphView toGraph(Run run) {
-        List<GraphView.NodeView> nodes = new ArrayList<>();
+        List<GraphView.GraphNodeView> nodes = new ArrayList<>();
         for (StageDefinition def : graph.stages()) {
             StageExecution exec = run.stage(def.id());
-            nodes.add(new GraphView.NodeView(def.id(), def.name(), exec.status().name(), graph.layerOf(def.id()),
-                    def.role().name(), exec.activeAgent(), exec.attempts(), approval(run, exec),
-                    run.acceptedVersions().get(def.id())));
+            nodes.add(new GraphView.GraphNodeView(def.id(), def.name(), exec.status().name(),
+                    graph.layerOf(def.id()), def.role().name(), exec.activeAgent(), exec.attempts(),
+                    approval(run, exec), shownVersion(run, exec), run.acceptedVersions().get(def.id())));
         }
-        List<GraphView.EdgeView> edges = graph.edges().stream()
-                .map(e -> new GraphView.EdgeView(e.getKey(), e.getValue())).toList();
+        List<GraphView.GraphEdgeView> edges = graph.edges().stream()
+                .map(e -> new GraphView.GraphEdgeView(e.getKey(), e.getValue())).toList();
         return new GraphView(List.copyOf(nodes), edges, graph.layers());
     }
 
@@ -129,12 +129,13 @@ public class RunViewMapper {
             Approval approval = exec.pendingApproval();
             if (exec.status() == StageStatus.AWAITING_APPROVAL && approval != null) {
                 actions.add(new PendingActionView(PendingActionView.APPROVAL, def.id(), approval.kind().name(),
-                        approval.id(), approval.reason(), approval.ruleIds(), approval.requestedAt(), null));
+                        approval.id(), approval.reason(), approval.ruleIds(), approval.artifactVersion(),
+                        approval.artifactHash(), approval.requestedAt(), null));
             } else if (exec.status() == StageStatus.AWAITING_CLARIFICATION && run.clarification() != null
                     && !run.clarification().answered()) {
                 Clarification clarification = run.clarification();
                 actions.add(new PendingActionView(PendingActionView.CLARIFICATION, def.id(), null, null, null, null,
-                        clarification.requestedAt(),
+                        null, null, clarification.requestedAt(),
                         clarification.questions().stream().map(ClarificationQuestionView::from).toList()));
             }
         }
@@ -145,8 +146,20 @@ public class RunViewMapper {
         StageExecution exec = run.stage(def.id());
         return new StageView(def.id(), def.name(), def.role().name(), List.copyOf(def.dependsOn()),
                 exec.status().name(), exec.attempts(), exec.activeAgent(), exec.startedAt(), exec.endedAt(),
-                exec.durationMs(), exec.lastError(), run.acceptedVersions().get(def.id()),
+                exec.durationMs(), exec.lastError(), shownVersion(run, exec), run.acceptedVersions().get(def.id()),
                 def.role().artifactKind().name(), approval(run, exec), exec.feedback(), exec.nextAttemptAt());
+    }
+
+    /**
+     * The artifact version an operator should look at: the version under review while an exit approval is
+     * pending (it is accepted only when approved), else the accepted version.
+     */
+    private static @Nullable Integer shownVersion(Run run, StageExecution exec) {
+        Approval pending = exec.pendingApproval();
+        if (exec.status() == StageStatus.AWAITING_APPROVAL && pending != null && pending.artifactVersion() != null) {
+            return pending.artifactVersion();
+        }
+        return run.acceptedVersions().get(exec.stageId());
     }
 
     /** The pending approval of a stage, else its most recent approval (any status), else null. */

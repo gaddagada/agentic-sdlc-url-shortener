@@ -8,7 +8,9 @@ spring:
     virtual:
       enabled: true
   datasource:
-    url: jdbc:h2:file:./data/orchestrator;AUTO_SERVER=TRUE
+    # Embedded file database owned by this process (no AUTO_SERVER: no TCP listener for other processes).
+    # PostgreSQL: run with the "postgres" profile (application-postgres.yml).
+    url: jdbc:h2:file:./data/orchestrator
     username: sa
     password: ""
   jpa:
@@ -32,7 +34,9 @@ management:
         include: health,info,metrics
   endpoint:
     health:
-      show-details: always
+      # Component statuses (db, diskSpace, workspaceIndex, ...) are shown; their details are not.
+      show-details: never
+      show-components: always
 
 springdoc:
   api-docs:
@@ -59,13 +63,16 @@ sdlc:
     enabled: true
   agents:
     default-provider: deterministic         # deterministic | anthropic | ollama
+  governance:
+    # true: the release-readiness gate cannot be approved by the operator who started the run or approved its design
+    four-eyes: false
   llm:
     anthropic:
       enabled: true
       model: claude-opus-5-5
       api-key: ${ANTHROPIC_API_KEY:}
-      max-output-tokens: 16000
-      timeout: 180s
+      max-output-tokens: 32000             # responses are streamed
+      timeout: 300s
     ollama:
       enabled: true
       base-url: http://localhost:11434

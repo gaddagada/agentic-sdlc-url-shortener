@@ -33,6 +33,7 @@ import com.agenticsdlc.orchestrator.app.llm.ProviderCatalog;
 import com.agenticsdlc.orchestrator.app.llm.ProviderUnavailableException;
 import com.agenticsdlc.orchestrator.core.audit.Actor;
 import com.agenticsdlc.orchestrator.core.engine.InvalidCommandException;
+import com.agenticsdlc.orchestrator.core.engine.InvalidRunStateException;
 import com.agenticsdlc.orchestrator.core.engine.OrchestrationEngine;
 import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowDefinitions;
@@ -56,6 +57,7 @@ class RunControllerTest {
     private static final WorkflowGraph GRAPH = new WorkflowGraph(WorkflowDefinitions.defaultSdlc());
     private static final String REQUIREMENT = "Build a URL shortener with click analytics and expiry.";
     private static final String OPERATOR = "alice@example.com";
+    private static final String APPROVAL_ID = "7f1d2c3b-0000-4000-8000-000000000001";
 
     @Autowired
     private MockMvcTester mvc;
@@ -94,7 +96,7 @@ class RunControllerTest {
         assertThat(post("/api/v1/runs", """
                 {"requirement": "%s", "scenario": "fault-retry", "autonomy": "FULL_AUTO", "provider": "ollama",
                  "workspace": "NONE", "faults": [{"stageId": "implement", "failTimes": 2, "kind": "TRANSIENT"}],
-                 "budget": {"maxAgentCalls": 25, "maxReplans": 1}}
+                 "budget": {"maxAgentCalls": 25, "maxReplans": 1, "maxLlmTokens": 50000}}
                 """.formatted(REQUIREMENT))).hasStatus(HttpStatus.CREATED);
 
         ArgumentCaptor<RunOptions> captor = ArgumentCaptor.forClass(RunOptions.class);
@@ -112,6 +114,7 @@ class RunControllerTest {
         assertThat(options.budgetOverride().maxAgentCalls()).isEqualTo(25);
         assertThat(options.budgetOverride().maxReplans()).isEqualTo(1);
         assertThat(options.budgetOverride().maxFeedbackLoops()).isEqualTo(2);
+        assertThat(options.budgetOverride().maxLlmTokens()).isEqualTo(50_000L);
     }
 
     @Test
@@ -184,21 +187,68 @@ class RunControllerTest {
 
     @Test
     void approvePassesTheHumanOperatorAndComment() {
-        when(engine.approve(eq("run-1"), eq("design"), any(), any())).thenReturn(run("run-1", RunOptions.defaults()));
+        when(engine.approve(eq("run-1"), eq("design"), any(), any(), any()))
+                .thenReturn(run("run-1", RunOptions.defaults()));
 
         assertThat(post("/api/v1/runs/run-1/stages/design/approve", "{\"comment\": \"looks good\"}"))
                 .hasStatus(HttpStatus.OK);
 
-        verify(engine).approve("run-1", "design", Actor.human(OPERATOR), "looks good");
+        verify(engine).approve("run-1", "design", Actor.human(OPERATOR), "looks good", null);
+    }
+
+    @Test
+    void approvePassesTheReviewedApprovalId() {
+        when(engine.approve(eq("run-1"), eq("design"), any(), any(), any()))
+                .thenReturn(run("run-1", RunOptions.defaults()));
+
+        assertThat(post("/api/v1/runs/run-1/stages/design/approve",
+                "{\"comment\": \"ok\", \"approvalId\": \"" + APPROVAL_ID + "\"}")).hasStatus(HttpStatus.OK);
+
+        verify(engine).approve("run-1", "design", Actor.human(OPERATOR), "ok", APPROVAL_ID);
+    }
+
+    @Test
+    void approveWithAStaleApprovalIdIs409WithTheEngineMessage() {
+        when(engine.approve(eq("run-1"), eq("design"), any(), any(), eq("stale-id")))
+                .thenThrow(new InvalidRunStateException("approval stale-id is no longer pending; the stage now awaits "
+                        + "approval " + APPROVAL_ID));
+
+        MvcTestResult result = post("/api/v1/runs/run-1/stages/design/approve", "{\"approvalId\": \"stale-id\"}");
+
+        assertThat(result).hasStatus(HttpStatus.CONFLICT)
+                .hasContentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(result).bodyJson().extractingPath("$.type").isEqualTo(ProblemTypes.INVALID_STATE.toString());
+        assertThat(result).bodyJson().extractingPath("$.detail").asString()
+                .startsWith("approval stale-id is no longer pending");
+    }
+
+    @Test
+    void approveRejectsAMalformedApprovalId() {
+        MvcTestResult result = post("/api/v1/runs/run-1/stages/design/approve", "{\"approvalId\": \"a b<c>\"}");
+
+        assertThat(result).hasStatus(HttpStatus.BAD_REQUEST);
+        assertThat(result).bodyJson().extractingPath("$.errors[*].field").asArray().contains("approvalId");
+        verifyNoInteractions(engine);
     }
 
     @Test
     void approveWithoutBodyIsAllowed() {
-        when(engine.approve(eq("run-1"), eq("design"), any(), isNull())).thenReturn(run("run-1",
+        when(engine.approve(eq("run-1"), eq("design"), any(), isNull(), isNull())).thenReturn(run("run-1",
                 RunOptions.defaults()));
 
         assertThat(mvc.post().uri("/api/v1/runs/run-1/stages/design/approve")
                 .header(OperatorIdentityResolver.HEADER, OPERATOR).exchange()).hasStatus(HttpStatus.OK);
+    }
+
+    @Test
+    void reservedOperatorIdsAreRejected() {
+        for (String reserved : new String[] {"engine", "System", "deterministic", "fallback:deterministic"}) {
+            MvcTestResult result = mvc.post().uri("/api/v1/runs/run-1/stages/design/approve")
+                    .header(OperatorIdentityResolver.HEADER, reserved).exchange();
+
+            assertOperatorIdentityProblem(result);
+        }
+        verifyNoInteractions(engine);
     }
 
     @Test
@@ -212,13 +262,17 @@ class RunControllerTest {
     }
 
     @Test
-    void rejectPassesReasonAndDisposition() {
-        when(engine.reject(any(), any(), any(), any(), any())).thenReturn(run("run-1", RunOptions.defaults()));
+    void rejectPassesReasonDispositionAndApprovalId() {
+        when(engine.reject(any(), any(), any(), any(), any(), any())).thenReturn(run("run-1", RunOptions.defaults()));
 
         assertThat(post("/api/v1/runs/run-1/stages/design/reject",
                 "{\"reason\": \"needs caching\", \"disposition\": \"REWORK\"}")).hasStatus(HttpStatus.OK);
+        assertThat(post("/api/v1/runs/run-1/stages/design/reject", "{\"reason\": \"no\", \"disposition\": "
+                + "\"ABORT\", \"approvalId\": \"" + APPROVAL_ID + "\"}")).hasStatus(HttpStatus.OK);
 
-        verify(engine).reject("run-1", "design", Actor.human(OPERATOR), "needs caching", RejectDisposition.REWORK);
+        verify(engine).reject("run-1", "design", Actor.human(OPERATOR), "needs caching", RejectDisposition.REWORK,
+                null);
+        verify(engine).reject("run-1", "design", Actor.human(OPERATOR), "no", RejectDisposition.ABORT, APPROVAL_ID);
     }
 
     @Test
@@ -246,7 +300,7 @@ class RunControllerTest {
     @Test
     void commandInTheWrongStateIs409WithTheEngineMessage() {
         when(engine.resume(eq("run-1"), any()))
-                .thenThrow(new IllegalStateException("a policy denial cannot be resumed; re-plan with a changed "
+                .thenThrow(new InvalidRunStateException("a policy denial cannot be resumed; re-plan with a changed "
                         + "requirement"));
 
         MvcTestResult result = post("/api/v1/runs/run-1/resume", "{}");
@@ -268,6 +322,32 @@ class RunControllerTest {
         assertThat(result).hasStatus(HttpStatus.CONFLICT);
         assertThat(result).bodyJson().extractingPath("$.type").isEqualTo(ProblemTypes.INVALID_COMMAND.toString());
         assertThat(result).bodyJson().extractingPath("$.detail").isEqualTo("re-plan budget exhausted (3)");
+    }
+
+    @Test
+    void aClosedEngineIs503WithoutTheEngineMessage() {
+        when(engine.stop(eq("run-1"), any(), any())).thenThrow(new IllegalStateException("orchestration engine is "
+                + "closed"));
+
+        MvcTestResult result = post("/api/v1/runs/run-1/stop", "{}");
+
+        assertThat(result).hasStatus(HttpStatus.SERVICE_UNAVAILABLE)
+                .hasContentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(result).bodyJson().extractingPath("$.type")
+                .isEqualTo(ProblemTypes.SERVICE_UNAVAILABLE.toString());
+        assertThat(result).bodyJson().extractingPath("$.detail").isEqualTo("control plane is shutting down");
+    }
+
+    @Test
+    void illegalArgumentsAre400WithAGenericDetail() {
+        when(engine.replan(eq("run-1"), any(), anyString()))
+                .thenThrow(new IllegalArgumentException("internal detail from a library"));
+
+        MvcTestResult result = post("/api/v1/runs/run-1/replan", "{\"requirement\": \"" + REQUIREMENT + "\"}");
+
+        assertThat(result).hasStatus(HttpStatus.BAD_REQUEST);
+        assertThat(result).bodyJson().extractingPath("$.type").isEqualTo(ProblemTypes.INVALID_ARGUMENT.toString());
+        assertThat(result).bodyJson().extractingPath("$.detail").isEqualTo("The request contains an invalid argument.");
     }
 
     @Test
@@ -323,6 +403,11 @@ class RunControllerTest {
         @Bean
         Clock clock() {
             return Clock.fixed(NOW, ZoneOffset.UTC);
+        }
+
+        @Bean
+        FourEyesGuard fourEyesGuard() {
+            return FourEyesGuard.of(false);
         }
     }
 }

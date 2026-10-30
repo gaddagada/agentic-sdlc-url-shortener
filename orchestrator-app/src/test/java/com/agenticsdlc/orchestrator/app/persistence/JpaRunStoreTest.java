@@ -1,11 +1,13 @@
 package com.agenticsdlc.orchestrator.app.persistence;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Predicate;
 
 import org.junit.jupiter.api.AfterEach;
@@ -13,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,7 +23,9 @@ import org.springframework.transaction.annotation.Transactional;
 import com.agenticsdlc.orchestrator.core.agent.AgentRegistry;
 import com.agenticsdlc.orchestrator.core.agent.deterministic.DeterministicAgents;
 import com.agenticsdlc.orchestrator.core.audit.Actor;
+import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
 import com.agenticsdlc.orchestrator.core.audit.AuditEventType;
+import com.agenticsdlc.orchestrator.core.audit.AuditSink;
 import com.agenticsdlc.orchestrator.core.engine.EngineConfig;
 import com.agenticsdlc.orchestrator.core.engine.OrchestrationEngine;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowGraph;
@@ -48,6 +53,7 @@ class JpaRunStoreTest {
             + "URLs with optional expiry, redirect with HTTP 302, record click analytics and expose health checks. "
             + "The service must prevent redirects to private networks.";
     private static final Actor ALICE = Actor.human("alice");
+    private static final Instant T0 = Instant.parse("2026-10-01T10:00:00Z");
 
     @Autowired
     private JpaRunStore store;
@@ -166,6 +172,59 @@ class JpaRunStoreTest {
     }
 
     @Test
+    void commitPersistsTheSnapshotAndTheAuditEventsTogether() {
+        Run run = Run.create("atomic-ok", graph, "custom", GREENFIELD, RunOptions.defaults(), T0);
+
+        store.commit(run, List.of(event("atomic-ok", 1), event("atomic-ok", 2)), auditSink);
+
+        assertThat(store.load("atomic-ok")).isPresent();
+        assertThat(auditSink.forRun("atomic-ok", 0)).extracting(AuditEvent::seq).containsExactly(1L, 2L);
+    }
+
+    @Test
+    void aFailingAuditInsertRollsBackTheSnapshotSave() {
+        Run run = Run.create("atomic", graph, "custom", GREENFIELD, RunOptions.defaults(), T0);
+        store.commit(run, List.of(event("atomic", 1)), auditSink);
+        long version = runs.findById("atomic").orElseThrow().getVersion();
+        String snapshot = runs.findById("atomic").orElseThrow().getSnapshotJson();
+
+        run.markStarted(T0.plusSeconds(5));
+        run.touch(T0.plusSeconds(5));
+        // seq 2 is new, seq 1 violates the unique (run_id, seq) constraint: the whole commit must roll back
+        assertThatThrownBy(() -> store.commit(run, List.of(event("atomic", 2), event("atomic", 1)), auditSink))
+                .isInstanceOf(DataIntegrityViolationException.class);
+
+        RunEntity row = runs.findById("atomic").orElseThrow();
+        assertThat(row.getVersion()).as("snapshot update rolled back").isEqualTo(version);
+        assertThat(row.getSnapshotJson()).isEqualTo(snapshot);
+        assertThat(store.load("atomic").orElseThrow().startedAt()).isNull();
+        assertThat(auditSink.forRun("atomic", 0)).extracting(AuditEvent::seq).as("seq 2 rolled back too")
+                .containsExactly(1L);
+    }
+
+    @Test
+    void aThrowingAuditSinkLeavesNoRunBehind() {
+        Run run = Run.create("atomic-new", graph, "custom", GREENFIELD, RunOptions.defaults(), T0);
+        AuditSink failing = new AuditSink() {
+            @Override
+            public void append(List<AuditEvent> batch) {
+                throw new IllegalStateException("audit store unavailable");
+            }
+
+            @Override
+            public List<AuditEvent> forRun(String runId, long afterSeq) {
+                return List.of();
+            }
+        };
+
+        assertThatThrownBy(() -> store.commit(run, List.of(event("atomic-new", 1)), failing))
+                .isInstanceOf(IllegalStateException.class).hasMessage("audit store unavailable");
+
+        assertThat(runs.findById("atomic-new")).isEmpty();
+        assertThat(store.load("atomic-new")).isEmpty();
+    }
+
+    @Test
     void loadOfAnUnknownRunIsEmptyAndCorruptSnapshotsAreSkipped() {
         store.save(Run.create("good", graph, "custom", GREENFIELD, RunOptions.defaults(), Instant.now()));
         RunEntity corrupt = new RunEntity("corrupt", "custom", Instant.now());
@@ -183,6 +242,11 @@ class JpaRunStoreTest {
 
         assertThat(runs.findById("long").orElseThrow().getRequirement()).hasSize(RunEntity.REQUIREMENT_MAX);
         assertThat(store.load("long").orElseThrow().requirement()).isEqualTo(requirement);
+    }
+
+    private static AuditEvent event(String runId, long seq) {
+        return new AuditEvent(seq, T0.plusSeconds(seq), runId, null, AuditEventType.RUN_CREATED, Actor.system(),
+                "event #" + seq, Map.of());
     }
 
     private JpaRunStore freshStore() {

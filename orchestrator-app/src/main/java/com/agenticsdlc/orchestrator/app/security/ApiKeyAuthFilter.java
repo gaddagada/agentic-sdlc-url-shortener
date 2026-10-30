@@ -5,6 +5,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import jakarta.servlet.FilterChain;
@@ -14,7 +15,9 @@ import jakarta.servlet.http.HttpServletResponse;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.http.MediaType;
+import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.web.util.UriUtils;
 
 import tools.jackson.databind.json.JsonMapper;
 
@@ -23,6 +26,12 @@ import tools.jackson.databind.json.JsonMapper;
  * a missing or wrong key is answered with a 401 Problem Detail. The static console, actuator and OpenAPI endpoints
  * are never behind the key. Keys are compared as SHA-256 digests with {@link MessageDigest#isEqual} (constant time,
  * no length leak) and never logged.
+ *
+ * <p>The filter is registered for every path ({@code /*}) and decides itself whether a request is an API request,
+ * on <em>normalized</em> paths only: the container's decoded {@code servletPath + pathInfo} and, as a fail-closed
+ * second opinion, the request URI after percent-decoding. Both views are stripped of {@code ;} path parameters,
+ * dot segments and duplicate slashes and compared case-insensitively, so encodings such as {@code /%61pi/v1/runs},
+ * {@code /api;x=1/v1/runs} or {@code /api/v1//runs} cannot route to a controller without the key.</p>
  */
 public final class ApiKeyAuthFilter extends OncePerRequestFilter {
 
@@ -32,7 +41,7 @@ public final class ApiKeyAuthFilter extends OncePerRequestFilter {
     /** Problem type of a 401 answer. */
     static final String PROBLEM_TYPE = "https://agenticsdlc.dev/problems/unauthorized";
 
-    private static final String PROTECTED_PREFIX = "/api/";
+    private static final String PROTECTED_ROOT = "/api";
 
     private final byte[] expectedDigest;
     private final JsonMapper mapper;
@@ -53,8 +62,83 @@ public final class ApiKeyAuthFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        String path = request.getRequestURI().substring(request.getContextPath().length());
-        return !path.startsWith(PROTECTED_PREFIX);
+        return !isApiRequest(request);
+    }
+
+    /**
+     * Returns whether a request targets the protected API, judged on normalized paths only (never on the raw URI
+     * text alone): the decoded servlet path plus path info, and the percent-decoded request URI.
+     *
+     * @param request the request
+     * @return true when either normalized view of the path is {@code /api} or below it
+     */
+    static boolean isApiRequest(HttpServletRequest request) {
+        String servletView = (request.getServletPath() == null ? "" : request.getServletPath())
+                + (request.getPathInfo() == null ? "" : request.getPathInfo());
+        if (isProtected(normalize(servletView))) {
+            return true;
+        }
+        String uri = request.getRequestURI() == null ? "" : request.getRequestURI();
+        String contextPath = request.getContextPath() == null ? "" : request.getContextPath();
+        if (!contextPath.isEmpty() && uri.startsWith(contextPath)) {
+            uri = uri.substring(contextPath.length());
+        }
+        String decoded;
+        try {
+            decoded = UriUtils.decode(stripPathParameters(uri), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            // malformed percent-encoding: judge the undecoded text (the container rejects such requests anyway)
+            decoded = uri;
+        }
+        return isProtected(normalize(decoded));
+    }
+
+    /**
+     * Normalizes a decoded path: removes {@code ;} parameters from every segment, turns backslashes into slashes,
+     * collapses duplicate slashes and resolves {@code .} and {@code ..} segments.
+     *
+     * @param path a decoded path
+     * @return the normalized path (starting with {@code /}, or empty)
+     */
+    static String normalize(String path) {
+        if (path.isEmpty()) {
+            return path;
+        }
+        String cleaned = stripPathParameters(path.replace('\\', '/')).replaceAll("/{2,}", "/");
+        cleaned = StringUtils.cleanPath(cleaned);
+        if (!cleaned.startsWith("/")) {
+            cleaned = "/" + cleaned;
+        }
+        // dot segments that climb above the root cannot be resolved; drop them (fail closed)
+        while (cleaned.equals("/..") || cleaned.startsWith("/../")) {
+            cleaned = cleaned.length() == 3 ? "/" : cleaned.substring(3);
+        }
+        return cleaned;
+    }
+
+    private static String stripPathParameters(String path) {
+        if (path.indexOf(';') < 0) {
+            return path;
+        }
+        StringBuilder out = new StringBuilder(path.length());
+        boolean inParameter = false;
+        for (int i = 0; i < path.length(); i++) {
+            char c = path.charAt(i);
+            if (c == '/') {
+                inParameter = false;
+                out.append(c);
+            } else if (c == ';') {
+                inParameter = true;
+            } else if (!inParameter) {
+                out.append(c);
+            }
+        }
+        return out.toString();
+    }
+
+    private static boolean isProtected(String normalizedPath) {
+        String lower = normalizedPath.toLowerCase(Locale.ROOT);
+        return lower.equals(PROTECTED_ROOT) || lower.startsWith(PROTECTED_ROOT + "/");
     }
 
     @Override

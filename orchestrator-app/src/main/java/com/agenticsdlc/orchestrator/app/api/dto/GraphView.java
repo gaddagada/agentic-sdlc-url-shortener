@@ -11,7 +11,7 @@ import org.jspecify.annotations.Nullable;
  * @param edges dependency edges (from predecessor to successor)
  * @param layers stage ids per layer (longest-path layering)
  */
-public record GraphView(List<NodeView> nodes, List<EdgeView> edges, List<List<String>> layers) {
+public record GraphView(List<GraphNodeView> nodes, List<GraphEdgeView> edges, List<List<String>> layers) {
 
     /**
      * A stage node.
@@ -24,11 +24,13 @@ public record GraphView(List<NodeView> nodes, List<EdgeView> edges, List<List<St
      * @param activeAgent agent of the latest attempt
      * @param attempts attempts of the current activation
      * @param approval pending approval, else the latest approval of the stage, or null
-     * @param artifactVersion accepted artifact version, or null
+     * @param artifactVersion the version under review while an exit approval is pending, else the accepted
+     *                        version, or null
+     * @param acceptedVersion the accepted artifact version, or null
      */
-    public record NodeView(String id, String name, String status, int layer, String role,
-                           @Nullable String activeAgent, int attempts, @Nullable ApprovalView approval,
-                           @Nullable Integer artifactVersion) {
+    public record GraphNodeView(String id, String name, String status, int layer, String role,
+                                @Nullable String activeAgent, int attempts, @Nullable ApprovalView approval,
+                                @Nullable Integer artifactVersion, @Nullable Integer acceptedVersion) {
     }
 
     /**
@@ -37,6 +39,6 @@ public record GraphView(List<NodeView> nodes, List<EdgeView> edges, List<List<St
      * @param from predecessor stage id
      * @param to successor stage id
      */
-    public record EdgeView(String from, String to) {
+    public record GraphEdgeView(String from, String to) {
     }
 }

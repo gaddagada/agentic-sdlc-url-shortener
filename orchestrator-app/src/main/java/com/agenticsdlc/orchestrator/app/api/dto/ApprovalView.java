@@ -17,7 +17,10 @@ import com.agenticsdlc.orchestrator.core.model.Approval;
  * @param ruleIds policy rules that required it
  * @param riskLevel run risk when requested
  * @param planVersion plan version when requested
- * @param artifactVersion artifact version under review (exit gates)
+ * @param artifactVersion artifact version under review (exit gates); accepted only once approved
+ * @param previousAcceptedVersion version that was accepted when approval was requested (stays accepted until the
+ *                                version under review is approved)
+ * @param artifactHash SHA-256 hash of the artifact version under review (exit gates)
  * @param requestedAt request time
  * @param decidedAt decision time
  * @param decidedBy deciding operator
@@ -34,6 +37,8 @@ public record ApprovalView(
         String riskLevel,
         int planVersion,
         @Nullable Integer artifactVersion,
+        @Nullable Integer previousAcceptedVersion,
+        @Nullable String artifactHash,
         Instant requestedAt,
         @Nullable Instant decidedAt,
         @Nullable String decidedBy,
@@ -50,7 +55,7 @@ public record ApprovalView(
     public static ApprovalView from(Approval approval) {
         return new ApprovalView(approval.id(), approval.kind().name(), approval.status().name(), approval.reason(),
                 approval.ruleIds(), approval.riskLevel().name(), approval.planVersion(), approval.artifactVersion(),
-                approval.requestedAt(), approval.decidedAt(), approval.decidedBy(), approval.comment(),
+                approval.previousAcceptedVersion(), approval.artifactHash(), approval.requestedAt(), approval.decidedAt(), approval.decidedBy(), approval.comment(),
                 approval.revokedAt(), approval.revokedReason());
     }
 }

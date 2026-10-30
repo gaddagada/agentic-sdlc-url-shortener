@@ -115,8 +115,8 @@ const lockGlyph = (approval, x, y) =>
     svg('path', { class: 'shackle', d: 'M3.5 7V4.5a3 3 0 0 1 6 0V7' }),
     svg('rect', { x: 1.5, y: 7, width: 10, height: 8, rx: 1.5 }));
 
-const versionChip = (version, x, y) =>
-  svg('g', { class: 'vtag', transform: `translate(${x},${y})` },
+const versionChip = (version, x, y, review = false) =>
+  svg('g', { class: `vtag${review ? ' review' : ''}`, transform: `translate(${x},${y})` },
     svg('rect', { width: 24, height: 15, rx: 7.5 }),
     svg('text', { x: 12, y: 11, 'text-anchor': 'middle' }, `v${version}`));
 
@@ -125,10 +125,12 @@ function pipelineNode(node, p, isSelected, onSelect) {
   const name = node.name || node.id;
   const approval = node.approval && typeof node.approval === 'object' ? node.approval : null;
   const attempts = isNum(node.attempts) && node.attempts > 1 ? ` \u00b7 attempt ${node.attempts}` : '';
+  // While an exit approval is pending, artifactVersion is the version under review (not accepted yet).
+  const review = isNum(node.artifactVersion) && node.status === 'AWAITING_APPROVAL' && node.artifactVersion !== node.acceptedVersion;
   const label = [
     `${name}: ${humanize(node.status)}${attempts}`,
     approval && `approval ${humanize(approval.status)} (${approval.kind ?? 'gate'})`,
-    isNum(node.artifactVersion) && `artifact v${node.artifactVersion}`,
+    isNum(node.artifactVersion) && `artifact v${node.artifactVersion}${review ? ' under review' : ''}`,
   ].filter(Boolean).join(', ');
   const activate = () => onSelect?.(node.id);
   return svg('g', {
@@ -143,7 +145,7 @@ function pipelineNode(node, p, isSelected, onSelect) {
   wrapWords(name, 17, 2).map((line, i) => svg('text', { class: 'name', x: 10, y: 18 + i * 14 }, line)),
   svg('text', { class: 'status', x: 10, y: 50 }, `${humanize(node.status)}${attempts}`),
   svg('text', { class: 'agent', x: 10, y: 65 }, clip(node.activeAgent ?? '', 18)),
-  isNum(node.artifactVersion) ? versionChip(node.artifactVersion, w - 30, height - 21) : null,
+  isNum(node.artifactVersion) ? versionChip(node.artifactVersion, w - 30, height - 21, review) : null,
   approval ? lockGlyph(approval, w - 20, 6) : null);
 }
 

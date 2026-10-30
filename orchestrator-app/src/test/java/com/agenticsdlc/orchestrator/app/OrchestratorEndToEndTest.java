@@ -23,6 +23,8 @@ import org.springframework.test.web.servlet.assertj.MockMvcTester;
 import org.springframework.test.web.servlet.assertj.MvcTestResult;
 
 import com.agenticsdlc.orchestrator.app.api.OperatorIdentityResolver;
+import com.agenticsdlc.orchestrator.app.api.ProblemTypes;
+import com.agenticsdlc.orchestrator.app.scenario.ScenarioCatalog;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -187,6 +189,119 @@ class OrchestratorEndToEndTest {
     }
 
     @Test
+    void theVersionUnderReviewIsShownButNotAcceptedUntilApproved() {
+        String id = startScenario("greenfield");
+
+        JsonNode atDesign = awaitRun(id, r -> hasPendingApproval(r, "design"));
+        JsonNode action = pendingApproval(atDesign, "design");
+        int reviewVersion = action.path("reviewVersion").asInt();
+        assertThat(reviewVersion).isEqualTo(1);
+        assertThat(action.path("reviewHash").asString()).hasSize(64);
+        JsonNode design = stage(atDesign, "design");
+        assertThat(design.path("artifactVersion").asInt()).isEqualTo(reviewVersion);
+        assertThat(design.path("acceptedVersion").isIntegralNumber()).as("nothing accepted yet").isFalse();
+        assertThat(design.path("approval").path("artifactVersion").asInt()).isEqualTo(reviewVersion);
+        assertThat(design.path("approval").path("artifactHash").asString())
+                .isEqualTo(action.path("reviewHash").asString());
+        JsonNode graphNode = node(get("/api/v1/runs/" + id + "/graph"), "design");
+        assertThat(graphNode.path("artifactVersion").asInt()).isEqualTo(reviewVersion);
+        assertThat(graphNode.path("acceptedVersion").isIntegralNumber()).isFalse();
+        JsonNode summary = artifactSummary(get("/api/v1/runs/" + id + "/artifacts"), "design", reviewVersion);
+        assertThat(summary.path("accepted").asBoolean()).isFalse();
+        assertThat(summary.path("hash").asString()).isEqualTo(action.path("reviewHash").asString());
+        assertThat(mvc.get().uri("/api/v1/runs/" + id + "/artifacts/design").exchange())
+                .as("no accepted version yet").hasStatus(HttpStatus.NOT_FOUND);
+        assertThat(get("/api/v1/runs/" + id + "/artifacts/design?version=" + reviewVersion).path("accepted")
+                .asBoolean()).isFalse();
+
+        assertThat(command(id, "/stages/design/approve",
+                "{\"approvalId\": \"" + action.path("approvalId").asString() + "\"}")).hasStatus(HttpStatus.OK);
+
+        JsonNode approved = get("/api/v1/runs/" + id);
+        assertThat(stage(approved, "design").path("acceptedVersion").asInt()).isEqualTo(reviewVersion);
+        assertThat(artifactSummary(get("/api/v1/runs/" + id + "/artifacts"), "design", reviewVersion)
+                .path("accepted").asBoolean()).isTrue();
+        assertThat(get("/api/v1/runs/" + id + "/artifacts/design").path("version").asInt()).isEqualTo(reviewVersion);
+    }
+
+    @Test
+    void aStaleApprovalIdAfterAReplanIs409AndTheFreshIdSucceeds() {
+        String id = startScenario("greenfield");
+        JsonNode atDesign = awaitRun(id, r -> hasPendingApproval(r, "design"));
+        String staleId = pendingApproval(atDesign, "design").path("approvalId").asString();
+
+        assertThat(command(id, "/replan",
+                json.writeValueAsString(Map.of("requirement", ScenarioCatalog.REPLAN_REQUIREMENT))))
+                .hasStatus(HttpStatus.OK);
+        JsonNode replanned = awaitRun(id, r -> hasPendingApproval(r, "design")
+                && !staleId.equals(pendingApproval(r, "design").path("approvalId").asString()));
+        JsonNode fresh = pendingApproval(replanned, "design");
+        String freshId = fresh.path("approvalId").asString();
+
+        MvcTestResult stale = command(id, "/stages/design/approve", "{\"approvalId\": \"" + staleId + "\"}");
+        assertThat(stale).hasStatus(HttpStatus.CONFLICT)
+                .hasContentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(stale).bodyJson().extractingPath("$.type").isEqualTo(ProblemTypes.INVALID_STATE.toString());
+        assertThat(stale).bodyJson().extractingPath("$.detail").asString().contains(staleId)
+                .contains("no longer pending");
+        MvcTestResult staleReject = command(id, "/stages/design/reject",
+                "{\"reason\": \"old\", \"disposition\": \"REWORK\", \"approvalId\": \"" + staleId + "\"}");
+        assertThat(staleReject).hasStatus(HttpStatus.CONFLICT);
+        assertThat(pendingApproval(get("/api/v1/runs/" + id), "design").path("approvalId").asString())
+                .as("the refused commands changed nothing").isEqualTo(freshId);
+
+        assertThat(command(id, "/stages/design/approve", "{\"approvalId\": \"" + freshId + "\"}"))
+                .hasStatus(HttpStatus.OK);
+        JsonNode approved = get("/api/v1/runs/" + id);
+        assertThat(stage(approved, "design").path("approval").path("id").asString()).isEqualTo(freshId);
+        assertThat(stage(approved, "design").path("approval").path("status").asString()).isEqualTo("APPROVED");
+        assertThat(stage(approved, "design").path("acceptedVersion").asInt())
+                .isEqualTo(fresh.path("reviewVersion").asInt());
+    }
+
+    @Test
+    void scenarioRunsAcceptBudgetOverridesInAnOptionalBody() {
+        MvcTestResult started = mvc.post().uri("/api/v1/scenarios/greenfield/run?provider=deterministic")
+                .header(OperatorIdentityResolver.HEADER, OPERATOR).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"provider\": \"deterministic\", \"budget\": {\"maxLlmTokens\": 12345, "
+                        + "\"maxAgentCalls\": 77}}").exchange();
+
+        assertThat(started).hasStatus(HttpStatus.CREATED);
+        JsonNode run = body(started);
+        assertThat(run.path("provider").asString()).isEqualTo("deterministic");
+        assertThat(run.path("budget").path("maxLlmTokens").asLong()).isEqualTo(12345L);
+        assertThat(run.path("budget").path("maxAgentCalls").asInt()).isEqualTo(77);
+
+        MvcTestResult conflicting = mvc.post().uri("/api/v1/scenarios/greenfield/run?provider=deterministic")
+                .header(OperatorIdentityResolver.HEADER, OPERATOR).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"provider\": \"ollama\"}").exchange();
+        assertThat(conflicting).hasStatus(HttpStatus.BAD_REQUEST);
+        assertThat(conflicting).bodyJson().extractingPath("$.detail").asString().contains("provider given twice");
+
+        MvcTestResult invalid = mvc.post().uri("/api/v1/scenarios/greenfield/run")
+                .header(OperatorIdentityResolver.HEADER, OPERATOR).contentType(MediaType.APPLICATION_JSON)
+                .content("{\"budget\": {\"maxAgentCalls\": 0, \"maxLlmTokens\": -1}}").exchange();
+        assertThat(invalid).hasStatus(HttpStatus.BAD_REQUEST);
+        assertThat(invalid).bodyJson().extractingPath("$.errors[*].field").asArray()
+                .contains("budget.maxAgentCalls", "budget.maxLlmTokens");
+    }
+
+    @Test
+    void auditPagesAreBoundedByTheLimit() {
+        String id = startScenario("greenfield");
+        awaitRun(id, r -> hasPendingApproval(r, "design"));
+
+        JsonNode firstPage = get("/api/v1/runs/" + id + "/audit?limit=3");
+        assertThat(firstPage.size()).isEqualTo(3);
+        long lastSeq = firstPage.get(2).path("seq").asLong();
+        JsonNode next = get("/api/v1/runs/" + id + "/audit?afterSeq=" + lastSeq + "&limit=2");
+        assertThat(next.size()).isEqualTo(2);
+        assertThat(next.get(0).path("seq").asLong()).isGreaterThan(lastSeq);
+        assertThat(mvc.get().uri("/api/v1/runs/" + id + "/audit?limit=0").exchange())
+                .hasStatus(HttpStatus.BAD_REQUEST);
+    }
+
+    @Test
     void unknownScenarioIs404AndUnavailableProviderIs409() {
         assertThat(mvc.post().uri("/api/v1/scenarios/nope/run").header(OperatorIdentityResolver.HEADER, OPERATOR)
                 .exchange()).hasStatus(HttpStatus.NOT_FOUND);
@@ -257,6 +372,34 @@ class OrchestratorEndToEndTest {
             }
         }
         return false;
+    }
+
+    private static JsonNode pendingApproval(JsonNode run, String stageId) {
+        for (JsonNode action : run.path("pendingActions")) {
+            if ("APPROVAL".equals(action.path("type").asString())
+                    && stageId.equals(action.path("stageId").asString())) {
+                return action;
+            }
+        }
+        throw new AssertionError("no pending approval for " + stageId);
+    }
+
+    private static JsonNode node(JsonNode graph, String stageId) {
+        for (JsonNode node : graph.path("nodes")) {
+            if (stageId.equals(node.path("id").asString())) {
+                return node;
+            }
+        }
+        throw new AssertionError("no graph node " + stageId);
+    }
+
+    private static JsonNode artifactSummary(JsonNode artifacts, String stageId, int version) {
+        for (JsonNode artifact : artifacts) {
+            if (stageId.equals(artifact.path("stageId").asString()) && artifact.path("version").asInt() == version) {
+                return artifact;
+            }
+        }
+        throw new AssertionError("no artifact " + stageId + " v" + version);
     }
 
     private static JsonNode stage(JsonNode run, String stageId) {

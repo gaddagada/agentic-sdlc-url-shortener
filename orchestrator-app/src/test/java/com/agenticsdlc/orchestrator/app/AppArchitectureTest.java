@@ -9,6 +9,7 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.agenticsdlc.orchestrator.core.engine.InvalidCommandException;
+import com.agenticsdlc.orchestrator.core.engine.InvalidRunStateException;
 import com.agenticsdlc.orchestrator.core.engine.OrchestrationEngine;
 import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
 import com.tngtech.archunit.base.DescribedPredicate;
@@ -57,7 +58,7 @@ class AppArchitectureTest {
             .that().resideOutsideOfPackages(ROOT + ".config..")
             .should().dependOnClassesThat(are(resideInAPackage(CORE_ENGINE)).and(DescribedPredicate.not(
                     JavaClass.Predicates.belongToAnyOf(OrchestrationEngine.class, RunNotFoundException.class,
-                            InvalidCommandException.class))))
+                            InvalidCommandException.class, InvalidRunStateException.class))))
             .as("core engine internals are only used via OrchestrationEngine");
 
     /** Controllers live in the api package. */

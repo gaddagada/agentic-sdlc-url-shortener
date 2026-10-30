@@ -22,6 +22,7 @@ import org.springframework.validation.annotation.Validated;
  * @param security API protection
  * @param console operator console
  * @param agents agent provider selection
+ * @param governance governance rules enforced by the control plane on top of the engine's policies
  */
 @Validated
 @ConfigurationProperties(prefix = "sdlc")
@@ -30,7 +31,8 @@ public record OrchestratorProperties(
         @DefaultValue @Valid @NotNull Engine engine,
         @DefaultValue @Valid @NotNull Security security,
         @DefaultValue @Valid @NotNull Console console,
-        @DefaultValue @Valid @NotNull Agents agents) {
+        @DefaultValue @Valid @NotNull Agents agents,
+        @DefaultValue @Valid @NotNull Governance governance) {
 
     /**
      * Workspace settings.
@@ -101,5 +103,14 @@ public record OrchestratorProperties(
      *                        or {@code ollama})
      */
     public record Agents(@DefaultValue("deterministic") @NotBlank String defaultProvider) {
+    }
+
+    /**
+     * Governance rules of the control plane.
+     *
+     * @param fourEyes when true, the release-readiness gate cannot be approved by the operator who started the run
+     *                 or by the operator who approved the design (separation of duties)
+     */
+    public record Governance(@DefaultValue("false") boolean fourEyes) {
     }
 }

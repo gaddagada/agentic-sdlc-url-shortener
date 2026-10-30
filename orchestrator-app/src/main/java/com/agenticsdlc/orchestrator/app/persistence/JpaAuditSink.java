@@ -4,6 +4,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -20,7 +21,8 @@ import tools.jackson.core.type.TypeReference;
 /**
  * JPA implementation of the engine's append-only {@link AuditSink}. The engine appends the events of one command in
  * a single batch while holding the run lock, from threads outside any Spring transaction, so transactions are
- * demarcated explicitly with a {@link TransactionTemplate}.
+ * demarcated explicitly with a {@link TransactionTemplate} (propagation REQUIRED: when {@link JpaRunStore} commits a
+ * mutation, the append joins the transaction that saves the run snapshot, so both are atomic).
  */
 @Component
 public class JpaAuditSink implements AuditSink {
@@ -61,6 +63,24 @@ public class JpaAuditSink implements AuditSink {
     public List<AuditEvent> forRun(String runId, long afterSeq) {
         List<AuditEventEntity> rows = readTransactions.execute(
                 status -> events.findByRunIdAndSeqGreaterThanOrderBySeqAsc(runId, afterSeq));
+        return rows == null ? List.of() : rows.stream().map(this::toEvent).toList();
+    }
+
+    /**
+     * Returns a page of events with the limit applied by the database query.
+     *
+     * @param runId run id
+     * @param afterSeq exclusive lower bound (0 for all)
+     * @param limit maximum number of events (positive)
+     * @return at most {@code limit} events in sequence order
+     */
+    @Override
+    public List<AuditEvent> forRun(String runId, long afterSeq, int limit) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException("limit must be positive: " + limit);
+        }
+        List<AuditEventEntity> rows = readTransactions.execute(
+                status -> events.findByRunIdAndSeqGreaterThanOrderBySeqAsc(runId, afterSeq, Limit.of(limit)));
         return rows == null ? List.of() : rows.stream().map(this::toEvent).toList();
     }
 
