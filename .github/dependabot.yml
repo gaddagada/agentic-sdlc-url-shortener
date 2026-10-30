@@ -5,6 +5,10 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # The Maven wrapper is pinned to the 3.9 line with a verified checksum; bump deliberately.
+      - dependency-name: "org.apache.maven:apache-maven"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     groups:
       spring:
         patterns:
@@ -27,3 +31,9 @@ updates:
       - "/orchestrator-app"
     schedule:
       interval: weekly
+    ignore:
+      # The project targets Java 25 LTS; do not propose non-LTS JDK base images.
+      - dependency-name: "maven"
+        versions: ["*temurin-26*", "*temurin-27*"]
+      - dependency-name: "eclipse-temurin"
+        versions: ["26*", "27*"]
