@@ -1,6 +1,7 @@
 # ADR 0008: Shortener choices: 302 redirects, random Base62 codes, salted IP hashing, no DNS-time SSRF check
 
-Status: Accepted (2026-10-29)
+Status: Accepted (2026-10-29). The DNS decision is amended by
+[ADR 0012](0012-shortener-bulk-api-and-rate-limiter-spi.md), which adds an opt-in resolve-time check.
 
 ## Context
 

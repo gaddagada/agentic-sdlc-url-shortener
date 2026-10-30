@@ -2,12 +2,12 @@
 
 The control plane ships a catalog of seven executable scenarios
 ([`ScenarioCatalog`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/scenario/ScenarioCatalog.java),
-`GET /api/v1/scenarios`). The three required by the assignment come first, each described the same way:
+`GET /api/v1/scenarios`). The three core scenarios come first, each described the same way:
 requirement, decomposition, orchestration, validation, final state and how to run it. The four failure-path
 scenarios and a live re-planning walkthrough follow, and the last section shows the brownfield scenario with Claude
 as the agent provider.
 
-<p align="center"><img src="images/scenarios.svg" width="100%" alt="The three required scenarios and what each demonstrates in decomposition, orchestration and validation."></p>
+<p align="center"><img src="images/scenarios.svg" width="100%" alt="The three core scenarios and what each demonstrates in decomposition, orchestration and validation."></p>
 
 **How to run any scenario.** In the console (http://localhost:8090/) pick it under *Scenario* and press
 **Run scenario**; or `scripts/demo.sh <key>` / `scripts\demo.ps1 -Scenario <key>`, which approve every gate as
@@ -26,7 +26,10 @@ before the last engine refinements described in [ORCHESTRATION.md](ORCHESTRATION
 exit gate and any approval, the engine's risk floor): on a fresh build `ARTIFACT_ACCEPTED` follows
 `GATE_EVALUATED` instead of preceding it, sequence numbers shift accordingly, and a design can carry a higher
 risk with `engine:` factors (the ambiguous run's design, for example, touches a filter and a configuration class,
-which the floor rates HIGH).
+which the floor rates HIGH). Two later changes also postdate these runs: verification now runs eight structural
+checks (nine when a codebase index is present) instead of the seven quoted below, all of them blocking, and the
+default feedback-loop budget is 3 instead of 2 ([ORCHESTRATION.md](ORCHESTRATION.md) section 7). The brownfield
+excerpts were recorded before the shortener had a bulk endpoint of its own (section 2 explains what changes).
 Hashes do not differ between runs of the same input: the intake, implementation and test-plan artifacts of four
 separate runs of the greenfield requirement (including the retry and fallback runs) have identical SHA-256 hashes
 (`942d01b10ed5...`, `cb8ff95c4100...`, `5c93c0f3ab73...`).
@@ -138,7 +141,25 @@ rules, and respect the existing per-client rate limit. Existing single-link endp
 working unchanged."
 
 Autonomy `GUIDED`, workspace `REPO`: the agents receive the index of the real source tree
-(`GET /api/v1/workspace/index`: 371 types, 26 endpoints, 2 migrations).
+(`GET /api/v1/workspace/index`: 371 types, 26 endpoints, 2 migrations when run `8cdf6dda` was recorded).
+
+**The requirement now meets a real implementation.** The scenario text in
+[`ScenarioCatalog`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/scenario/ScenarioCatalog.java)
+is unchanged, but since commit `cef62d5` the shortener has its own `POST /api/v1/links/bulk`
+([`BulkLinkController`](../url-shortener/src/main/java/com/agenticsdlc/shortener/api/BulkLinkController.java),
+[`BulkLinkService`](../url-shortener/src/main/java/com/agenticsdlc/shortener/service/BulkLinkService.java)), written
+outside the orchestrator. Everything below was recorded against the tree before that commit, where the endpoint did
+not exist. On the current tree the run is asked to add an API that is already there, so it becomes a review and
+extension task against real code: the deterministic impact analysis over the same requirement now ranks
+`BulkLinkController`, `BulkLinkService`, `LinkController` and `LinkService` at 1.00 and reports 30 directly impacted
+components, 42 regression risks and 4 affected endpoints (checked by running `ImpactAnalyzer` on the committed
+tree); with an LLM provider, implementation, verification and security review see the source of the impacted files
+as far as the 120 000-character budget allows. What a reviewer should expect from a good run is a small change or
+none, plus an explicit statement of how the existing code meets each clause. One clause deserves a reviewer's
+attention: "accept up to 100 URLs per request" and "respect the existing per-client rate limit" cannot both hold for
+one request with the default settings, because a bulk request costs one token per item and the default bucket holds
+20 tokens; the implementation answers larger batches with `422 batch-too-large` and documents that the capacity
+bounds the batch size.
 
 ### Decomposition
 
@@ -446,11 +467,12 @@ makes checkable:
 
 - It states that `/api/v1/links/bulk` "inherits auth and rate-limit filtering" and that `RateLimitFilter` "charges
   1 token as it does today". In the code the model analysed, `RateLimitFilter.shouldNotFilter` matched only
-  `POST /api/v1/links` exactly, so the new path would not have been rate limited. (The filter has since been
-  changed to cover every `POST` under `/api/v1/links` on the normalized path, so the claim holds for the current
-  code; at review time it was a defect to catch.)
-- It specifies `401 Unauthorized` and "the same authentication" as the single-link endpoint; the shortener has no
-  authentication.
+  `POST /api/v1/links` exactly, so the new path would not have been rate limited. (The filter was later changed
+  to cover every `POST` under `/api/v1/links` on the normalized path; the bulk endpoint that exists now is exempt
+  from that per-request charge and is charged one token per item instead. At review time it was a defect to
+  catch.)
+- It specifies `401 Unauthorized` and "the same authentication" as the single-link endpoint; at review time the
+  shortener had no authentication. (An optional `X-Api-Key` for `/api/v1/links/**` was added later.)
 - It names the item field `alias`; `CreateLinkRequest` calls it `customAlias`.
 
 Structural validation cannot see these; the human design gate is where they are caught, which is the argument for
@@ -500,8 +522,33 @@ same uncertainty in its `risks` ("hunks are written without visible source ... m
 - Two engineering changes followed from run 2: implementation outputs are streamed with a 64 000-token limit, and a
   skeleton plan (the deterministic fallback) is verified structurally instead of by an LLM, because an LLM verifier
   rejects a plan on every loop and the run can never converge.
-- The remaining gap is a context gap, not a governance gap: the implementation agent only sees the codebase
-  index (types, paths, endpoints), not the source of the files it modifies, so it cannot author correct diffs for
-  `MODIFY` changes. Giving it the source of the directly impacted files (bounded by size) is the next step; until
-  then, LLM runs on brownfield changes are expected to end at the verification gate for a human decision, while
-  the deterministic path remains the reproducible baseline.
+- The remaining gap was a context gap, not a governance gap: the implementation agent only saw the codebase
+  index (types, paths, endpoints), not the source of the files it modified, so it could not author correct diffs
+  for `MODIFY` changes. The deterministic path remained the reproducible baseline.
+
+### What changed after these runs
+
+Commit `6980e5b` addresses that root cause in three ways
+([ORCHESTRATION.md](ORCHESTRATION.md) sections 7, 8 and 11):
+
+- **Impacted sources in the prompt.** Implementation, verification and security review now receive the current
+  source of the files the change touches under "Source of impacted files (authoritative; write diffs against
+  exactly this text)": `MODIFY` targets first, then `EXTEND` components, then regression risks while the budget has
+  room, at most 20 000 characters per file and 120 000 per prompt. The implementation guidance states how hunk
+  headers are counted on that text, and the verifier is told to compare every hunk with it.
+- **Real diff application.** With the sandbox enabled, `DIFF` changes are applied to the files instead of being
+  written next to them; a hunk that does not match rejects the whole change set as `INVALID_OUTPUT`, and the retry
+  sees the hunk, the path, the nearest mismatch and that file's source.
+- **Advisory checks.** Only blocking findings fail a verification. A finding like run 3's performance test in the
+  default build (test placement) can be reported as advisory and no longer costs a feedback loop, and the default
+  budget is now three loops instead of two.
+
+A re-run of the Claude-backed brownfield scenario on the hardened build is pending at the time of writing.
+
+The re-run will meet the current tree, where the bulk endpoint already exists (section 2), so its artifacts will
+not be directly comparable with runs 1 to 3: a good result is a review of the existing implementation and a small
+change set (or none), not a new endpoint. The same commit also added the per-provider circuit breaker, which counts
+consecutive provider failures across stages: in run 1, the two `test-design` failures and the truncated
+`implement` attempt between them would have opened it, after which every new attempt for that provider runs on
+the deterministic agents for 10 minutes (`FALLBACK_ENGAGED`, reason `circuit open`). A re-run's audit log has to be
+read with that in mind.

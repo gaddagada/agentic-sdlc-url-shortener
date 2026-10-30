@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1100" height="560" viewBox="0 0 1100 560" font-family="Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" fill="#1f2328" role="img" aria-labelledby="title desc">
   <title id="title">Controlled autonomy: the per-stage governance loop</title>
-  <desc id="desc">A requirement passes a policy screen (SEC and CMP rules) at run start; a DENY safe-stops the run. Each stage agent then executes within retries, timeout and budgets, its artifact is validated, and the exit gate applies policy and risk. ALLOW accepts the artifact directly; REQUIRE_APPROVAL waits for a human approval that records operator identity; the accepted artifact enters context with a hash and provenance (lineage), and the next stage starts. Side exits: retry with backoff, fallback to the deterministic agent, rollback (compensations plus checkpoint restore) followed by SAFE_STOP, and re-plan (downstream stages STALE, approvals revoked). Budgets: attempts per stage, 2 feedback loops, 3 re-plans, 40 agent calls, 200k LLM tokens, 2 hours active time.</desc>
+  <desc id="desc">A requirement passes a policy screen (SEC and CMP rules) at run start; a DENY safe-stops the run. Each stage agent then executes within retries, timeout and budgets, its artifact is validated, and the exit gate applies policy and risk. ALLOW accepts the artifact directly; REQUIRE_APPROVAL waits for a human approval that records operator identity; the accepted artifact enters context with a hash and provenance (lineage), and the next stage starts. Side exits: retry with backoff, fallback to the deterministic agent, rollback (compensations plus checkpoint restore) followed by SAFE_STOP, and re-plan (downstream stages STALE, approvals revoked). Budgets: attempts per stage, 3 feedback loops, 3 re-plans, 40 agent calls, 600k LLM tokens, 2 hours active time.</desc>
   <defs>
     <style type="text/css"><![CDATA[
       text { font-family: Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
@@ -155,14 +155,14 @@
   <rect class="tile" x="48" y="464" width="184" height="28" rx="6"/>
   <text class="tv" x="60" y="483">2–3</text><text class="cd" x="104" y="482">attempts per stage</text>
   <rect class="tile" x="244" y="464" width="184" height="28" rx="6"/>
-  <text class="tv" x="256" y="483">2</text><text class="cd" x="300" y="482">feedback loops</text>
+  <text class="tv" x="256" y="483">3</text><text class="cd" x="300" y="482">feedback loops</text>
   <rect class="tile" x="440" y="464" width="184" height="28" rx="6"/>
   <text class="tv" x="452" y="483">3</text><text class="cd" x="496" y="482">re-plans</text>
 
   <rect class="tile" x="48" y="500" width="184" height="28" rx="6"/>
   <text class="tv" x="60" y="519">40</text><text class="cd" x="104" y="518">agent calls</text>
   <rect class="tile" x="244" y="500" width="184" height="28" rx="6"/>
-  <text class="tv" x="256" y="519">200k</text><text class="cd" x="300" y="518">LLM tokens</text>
+  <text class="tv" x="256" y="519">600k</text><text class="cd" x="300" y="518">LLM tokens</text>
   <rect class="tile" x="440" y="500" width="184" height="28" rx="6"/>
   <text class="tv" x="452" y="519">2 h</text><text class="cd" x="496" y="518">active time</text>
 

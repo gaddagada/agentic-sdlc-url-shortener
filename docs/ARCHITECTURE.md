@@ -25,7 +25,7 @@ control plane can index the shortener's source tree from disk; nothing at runtim
 | Package | Responsibility | Key types |
 |---|---|---|
 | `graph` | Versioned workflow definition and the validated DAG (cycle detection, layers, closures) | `WorkflowDefinitions`, `WorkflowGraph`, `StageDefinition`, `RetryPolicy`, `ApprovalRequirement` |
-| `engine` | Commands, scheduling, gates, execution, retries, fallback, rollback, re-planning, recovery | `OrchestrationEngine`, `Scheduler`, `GateEvaluator`, `StageExecutor`, `RollbackService`, `ReplanService`, `RunControl`, `RunRegistry` |
+| `engine` | Commands, scheduling, gates, execution, retries, fallback, provider circuit breakers, rollback, re-planning, recovery | `OrchestrationEngine`, `Scheduler`, `GateEvaluator`, `StageExecutor`, `ProviderCircuits`, `RollbackService`, `ReplanService`, `RunControl`, `RunRegistry` |
 | `agent` | Agent contract, context, results, failures, registry; fault injection | `StageAgent`, `StageContext`, `StageResult`, `AgentRegistry`, `ClarificationGate`, `FaultInjectingStageAgent` |
 | `agent.deterministic` | Ten rule-based agents: default provider and fallback of every stage | `RequirementsAgent`, `PlanningAgent`, `ArchitectureAgent`, `VerificationAgent`, `ReleaseAgent`, ... |
 | `agent.llm` | Provider SPI, prompt templates, JSON schema derivation, the generic LLM stage agent | `LlmClient`, `LlmStageAgent`, `PromptTemplates`, `JsonSchemas` |
@@ -35,7 +35,7 @@ control plane can index the shortener's source tree from disk; nothing at runtim
 | `audit` | Append-only audit events and actors | `AuditEvent`, `AuditEventType` (31 types), `Actor`, `AuditSink` |
 | `port` | Persistence SPI with in-memory implementations | `RunStore`, `InMemoryRunStore` |
 | `metrics` | Reliability metrics from run snapshots; recorder SPI | `MetricsCalculator`, `ReliabilityMetrics`, `MetricsRecorder` |
-| `workspace` | Codebase index, impact analysis, sandbox and build runner | `CodebaseIndexer`, `ImpactAnalyzer`, `WorkspaceSandbox`, `ProcessBuildRunner` |
+| `workspace` | Codebase index, impact analysis, bounded reading of impacted sources, unified-diff parsing and application, sandbox and build runner | `CodebaseIndexer`, `ImpactAnalyzer`, `ImpactedSources`, `UnifiedDiff`, `WorkspaceSandbox`, `ProcessBuildRunner` |
 | `json`, `util` | Canonical JSON and hashing; leaf helpers and secret patterns | `JsonCodec`, `Hashes`, `SecretPatterns` |
 
 Boundaries are executable: [`CoreArchitectureTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/CoreArchitectureTest.java)
@@ -61,10 +61,14 @@ persistence code, and forbids field injection, standard streams and generic exce
 
 ### 1.3 `url-shortener` packages (`com.agenticsdlc.shortener`)
 
-`api` (controllers, DTOs, Problem Details, redirect metrics) depends on `service` (link lifecycle, URL validation,
-codes, idempotency, analytics, click recording, retention), which depends on `repository` (Spring Data JPA) and
-`domain` (entities); `config` holds properties, cache, the bounded click-recorder executor, scheduling, the
-rate-limit filter and the security-headers filter.
+`api` (controllers including `BulkLinkController`, DTOs, Problem Details through one `ProblemMapper` shared by the
+exception handler, the filters and the per-item bulk errors, redirect metrics) depends on `service` (link lifecycle,
+bulk creation, URL validation with the optional `HostResolver`, codes, idempotency, analytics, click recording,
+retention, and the `RateLimiter` SPI), which depends on `repository` (Spring Data JPA) and `domain` (entities);
+`config` holds properties, cache, the bounded click-recorder executor, scheduling, the security-headers, API-key and
+rate-limit filters, the two `RateLimiter` implementations (`TokenBucketRateLimiter` in memory, `RedisRateLimiter`
+over `ratelimit/token-bucket.lua`) and `RedisBackendAutoConfigurationFilter`, which keeps Spring Boot's Redis
+auto-configuration out unless `shortener.rate-limit.backend=redis`.
 [`ArchitectureTest`](../url-shortener/src/test/java/com/agenticsdlc/shortener/ArchitectureTest.java) enforces the
 layering and keeps the service layer transport-agnostic.
 
@@ -74,7 +78,11 @@ layering and keeps the service layer transport-agnostic.
   `WorkflowDefinitions.defaultSdlc()` and validated by `WorkflowGraph` ([ADR 0003](adr/0003-static-lifecycle-dag-with-dynamic-invalidation.md)).
 - **Stage execution.** A stage starts when all predecessors have `SUCCEEDED` and its entry gate allows it; its
   agent runs with a timeout; failures are classified (TRANSIENT, TIMEOUT, INVALID_OUTPUT, FATAL), retried with
-  exponential backoff and then handed to the deterministic fallback.
+  exponential backoff and then handed to the deterministic fallback; while a provider's circuit is open (three
+  consecutive provider failures across runs), attempts go to the deterministic agent without calling it.
+- **Context.** Each attempt gets an immutable context; implementation, verification and security review of `REPO`
+  runs also get the bounded source of the impacted files, and with the sandbox enabled a change set's diffs are
+  applied to a copy of the workspace or rejected as a whole.
 - **Gates.** The exit gate combines policy findings, the stage's approval requirement and the autonomy level; the
   result is ALLOW, REQUIRE_APPROVAL (a human decides) or DENY (rollback and safe-stop) ([ADR 0005](adr/0005-risk-based-approvals-and-autonomy-levels.md)).
 - **Artifacts and lineage.** Accepted payloads are hashed over canonical JSON and carry provenance; downstream
@@ -171,6 +179,7 @@ applications use `ddl-auto: validate`, so Flyway is the only schema author.
 | Per-run `ReentrantLock` (`RunRegistry`) | serializes commands and completions of one run; different runs proceed independently | consistent aggregate and gap-free audit sequence ([ADR 0007](adr/0007-virtual-threads-and-per-run-locking.md)) |
 | Shortener `click-recorder-*` pool (8 threads, queue of 10 000) | persist click events after the redirect response; when saturated, a click is dropped and counted (`shortener.clicks.dropped`) | a redirect never waits for analytics, and click recording cannot take more than 8 database connections |
 | Shortener scheduled jobs | hourly purge of expired idempotency records and of click events beyond retention | bounded storage and data minimization |
+| Shortener `host-resolver-*` daemon threads (8, queue of 64, started on first use) | DNS lookups of the optional resolve-time SSRF check; the caller waits at most `shortener.resolve-timeout` | `InetAddress.getAllByName` has no timeout; a full pool refuses lookups instead of growing |
 
 Results of attempts carry a token; a result whose token is no longer current (cancelled, timed out or superseded)
 is dropped, even if the agent ignored the interrupt.
@@ -198,10 +207,10 @@ control plane implements it and registers one `LlmStageAgent` per role for every
 
 | Concern | Implementation |
 |---|---|
-| Prompt | System prompt: role, governance constraints (reference only indexed files, never include secrets, JSON only, upper-case enum values); user prompt: requirement, clarification answers, accepted upstream artifacts as JSON, codebase index for codebase-aware roles, feedback, previous error, output schema |
+| Prompt | Three parts (`LlmRequest`): system prompt (role, governance constraints: reference only indexed files, never include secrets, JSON only, upper-case enum values); run-stable context (requirement, clarification answers, accepted requirement specification, codebase index for codebase-aware roles); stage part (direct predecessors' artifacts as JSON, summaries of the others, the source of the impacted files for implementation, verification and security review, feedback, previous error, output schema). Both adapters send the stable context and the stage part as one user message for now |
 | Output contract | JSON schema derived from the payload record (`JsonSchemas`): all properties required, `additionalProperties: false`, enums as string enums; Anthropic receives it as structured output (`StructuredOutputSchema` adapts maps to entry arrays), Ollama as `format` |
 | Validation | the same `validate()` invariants and exit gates as deterministic output; approvals an LLM writes into a change record are discarded |
-| Errors | unavailable provider or non-retryable error: FATAL, immediate fallback; rate limits, 408/409/429/5xx, I/O and truncation: retryable; unparsable or invalid output: INVALID_OUTPUT with the error in the next prompt |
+| Errors | unavailable provider or non-retryable error: FATAL, immediate fallback; rate limits, 408/409/429/5xx, I/O and truncation: retryable; unparsable or invalid output, or a change set the sandbox rejects: INVALID_OUTPUT with the error in the next prompt; three consecutive TRANSIENT, TIMEOUT or INVALID_OUTPUT failures open the provider's circuit for 10 minutes |
 | Accounting | model, prompt hash (SHA-256), input and output tokens and latency go into provenance, counters and the token budget, also for failed attempts |
 | Selection | per run (`provider`), default `sdlc.agents.default-provider=deterministic`; `ProviderCatalog` refuses a run for an unavailable provider (409) |
 
@@ -241,9 +250,11 @@ JaCoCo reports, then builds both container images.
 | [0005](adr/0005-risk-based-approvals-and-autonomy-levels.md) | Risk-based approvals, autonomy levels, non-removable release gate | oversight proportional to risk |
 | [0006](adr/0006-aggregate-snapshot-persistence-with-audit-and-artifact-tables.md) | JSON snapshot plus append-only audit and artifact tables | simple restore and recovery without event-sourcing machinery |
 | [0007](adr/0007-virtual-threads-and-per-run-locking.md) | Virtual threads per attempt, lock per run | real parallelism with serializable state transitions, no infrastructure |
-| [0008](adr/0008-shortener-redirect-code-and-privacy-choices.md) | 302, random Base62, salted IP hashing, no DNS-time SSRF check | correct analytics and expiry, no enumeration, privacy by default |
+| [0008](adr/0008-shortener-redirect-code-and-privacy-choices.md) | 302, random Base62, salted IP hashing, no DNS-time SSRF check (made an opt-in by 0012) | correct analytics and expiry, no enumeration, privacy by default |
 | [0009](adr/0009-prototype-security-model.md) | Mandatory operator identity, optional API key; SSO later | attributable approvals today, authentication as a deployment decision |
 | [0010](adr/0010-java-25-and-spring-boot-4.1-baseline.md) | Java 25 and Spring Boot 4.1.2 | current, supported baseline with mature virtual threads |
+| [0011](adr/0011-source-aware-prompts-and-real-diff-application.md) | Bounded impacted sources in LLM prompts, real diff application, blocking and advisory checks, provider circuit breaker | LLM change sets must be written against, and checked against, the real code |
+| [0012](adr/0012-shortener-bulk-api-and-rate-limiter-spi.md) | Bulk creation charged per item, rate limiter SPI with a Redis backend that fails open, optional API key, opt-in resolve-time SSRF check | the brownfield feature for real; scaling and abuse gaps closed as options |
 
 ## 11. What would change for production
 
@@ -256,4 +267,4 @@ JaCoCo reports, then builds both container images.
 | Generated code | optional sandbox build in a directory copy | ephemeral container or VM without credentials, egress denied, resource limits |
 | Observability | Micrometer meters through Actuator, structured logs | OpenTelemetry traces across API, engine and provider calls; dashboards and alerts on the reliability metrics |
 | Console | polling | server-sent events (the engine already publishes a copy after every mutation through `EngineListener`) |
-| Shortener | per-node limiter and cache, no DNS-time SSRF check, unauthenticated management API | shared limiter and cache invalidation, egress or resolve-time checks, gateway authentication |
+| Shortener | per-node cache; shared Redis limiter optional and failing open; opt-in resolve-time SSRF check; optional shared API key | cache invalidation across nodes, the Redis limiter with alerting on fail-open, egress policy, gateway or OIDC authentication |

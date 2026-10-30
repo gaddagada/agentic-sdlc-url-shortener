@@ -40,7 +40,7 @@ includes the first attempt and applies per activation and per agent (the fallbac
 | `design` | ARCHITECTURE, `DesignSpec` | decompose, impact | NEVER / RISK_BASED | GOV-001, CMP-001, SEC-002 | 3 | 3 min |
 | `implement` | IMPLEMENTATION, `ChangeSet` | design | NEVER / RISK_BASED | SEC-003, CHG-001, SEC-002 | 3 | 5 min |
 | `test-design` | TEST_DESIGN, `TestPlan` | design | NEVER / NEVER | SEC-002 | 3 | 3 min |
-| `verify` | VERIFICATION, `VerificationReport` | implement, test-design | NEVER / NEVER (failed report starts a feedback loop) | SEC-002 | 2 | 10 min |
+| `verify` | VERIFICATION, `VerificationReport` | implement, test-design | NEVER / NEVER (a report with a failed blocking check starts a feedback loop) | SEC-002 | 2 | 10 min |
 | `document` | DOCUMENTATION, `DocumentationBundle` | implement | NEVER / NEVER | SEC-002 | 3 | 3 min |
 | `security-scan` | SECURITY_REVIEW, `SecurityReview` | implement | NEVER / NEVER (failed review becomes NO_GO) | SEC-002 | 2 | 3 min |
 | `release-readiness` | RELEASE, `ReleaseReadiness` | verify, document, security-scan | NEVER / ALWAYS | CHG-002, CHG-003, GOV-003, SEC-002 | 2 | 3 min |
@@ -175,7 +175,9 @@ stateDiagram-v2
   transactional adapter can override it to write both in one transaction. A failed commit reaches the caller;
   the in-memory run keeps the mutation and the next successful commit persists the complete state again
   (`aCommitFailureOnALaterCommandReachesTheCallerAndTheStoreCatchesUpLater`), and a start whose first commit fails
-  leaves no run behind (`aStartWhoseFirstCommitFailsLeavesNoGhostRun`). Audit sequence numbers are per run and
+  leaves no run behind (`aStartWhoseFirstCommitFailsLeavesNoGhostRun`): the run is marked discarded before it is
+  unregistered, so an attempt of that run that finishes in the meantime cannot commit it either
+  (`anAttemptThatFinishesWhileTheFirstCommitFailsNeverPersistsTheDiscardedRun`). Audit sequence numbers are per run and
   gap-free (the GUIDED test asserts 1..n).
 
 ```mermaid
@@ -340,6 +342,26 @@ switches the active agent to `fallback:deterministic`, resets the attempt count,
 fault-injected; an activation can use up to twice its max attempts
 (`wrongPayloadKindIsInvalidOutputAndExhaustsAttemptsAndFallback`: six calls, four retries, one fallback).
 
+**Provider circuit breaker.** [`ProviderCircuits`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/ProviderCircuits.java) keeps one
+circuit per LLM provider id, engine-wide and shared by all runs
+([`EngineConfig.ProviderCircuitBreaker`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/EngineConfig.java): by default 3 consecutive
+failures and a 10 min cooldown; a threshold of 0 disables it). Only TRANSIENT, TIMEOUT and INVALID_OUTPUT failures
+of attempts that really called the provider's agent count; injected faults, FATAL failures and cancelled attempts
+are inconclusive, and a success or a clarification request resets the count and closes the circuit. While the
+circuit is open, an attempt that would call that provider runs the role's deterministic agent instead: the stage
+switches to `fallback:deterministic` with a fresh attempt count, `counters.fallbacks` is incremented, and
+`FALLBACK_ENGAGED` is audited with `reason: circuit open`, the provider id, the number of consecutive failures,
+`openedAt`, `retryAt` and the last failure, without calling the provider. After the cooldown the circuit is
+half-open: one attempt at a time tries the provider again; a success closes the circuit, a counted failure re-opens
+it for another cooldown. The state lives in memory only (a restart closes every circuit);
+`OrchestrationEngine.providerCircuits()` returns a snapshot per provider (`CLOSED`, `OPEN` or `HALF_OPEN`, failure
+count, `openedAt`, `retryAt`). Because the count spans stages and runs, a provider that returns three invalid
+outputs in a row (for example, with the sandbox enabled, change sets whose diffs do not apply) is bypassed by
+every run for the cooldown.
+Proven by [`ProviderCircuitBreakerTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/ProviderCircuitBreakerTest.java)
+(`consecutiveFailuresAcrossRunsOpenTheCircuitAndTheCooldownLetsOneTrialCloseOrReopenIt`,
+`injectedFaultsAndFatalErrorsDoNotCountAndASuccessResetsTheCount`, `aDisabledBreakerNeverOpens`).
+
 **Checkpoints and rollback.** Each activation (first start, approved entry) records a checkpoint; retries,
 fallbacks, clarifications and exit reworks continue it. When a stage fails, [`RollbackService`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/RollbackService.java)
 uses the stage's latest checkpoint of the current plan version (a checkpoint of a superseded plan is ignored, so
@@ -388,13 +410,25 @@ before; unregistered runs load lazily on first access (`recoverInterruptedSafeSt
 ## 7. Non-linear execution
 
 **Verification feedback loop.** A `VerificationReport` with `passed = false` is a valid artifact, not a failure.
-After its exit gate (which can still deny it, for example for a leaked secret), the engine keeps it in history
-without accepting it, increments `counters.feedbackLoops`, appends each
-`feedbackForImplementation` entry to `implement` prefixed with the report reference (for example
+Each structural check is *blocking* (the default) or *advisory* ([`Check`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/artifact/Check.java)
+`blocking`, `Check.advisory(...)`; JSON written before the flag existed reads as blocking). `passed` means that no
+blocking check failed, no functional requirement is uncovered and the build, if one ran, succeeded
+(`VerificationReport.computePassed`, enforced by `validate()`). A failed advisory check (style, test placement,
+optional improvements) is listed in the report's Severity column and in its "Advisory findings (do not fail
+verification)" section, but never fails verification or starts a loop
+(`advisoryFindingsAreReportedWithoutStartingAFeedbackLoop`,
+`advisoryFailuresDoNotFailVerificationButBlockingFailuresAndUncoveredRequirementsDo`). Every check of the
+deterministic verifier is blocking (`everyDeterministicCheckIsBlocking`); the LLM verifier is told to mark style,
+test placement, performance tuning and optional improvements as advisory, and a DIFF hunk that does not match the
+shown source as a blocking failure. After the exit gate of a failed report (which can still deny it, for example
+for a leaked secret), the engine keeps it in history without accepting it, increments `counters.feedbackLoops`,
+appends each `feedbackForImplementation` entry to `implement` prefixed with the report reference (for example
 `[verify@v1] Add tests for: Feature`), audits `FEEDBACK_LOOP`, resets `verify` and invalidates `implement` with
-all its successors; `implement` re-runs with the feedback. `maxFeedbackLoops` (default 2) bounds the loop: the
-failure that pushes the counter above it fails `verify`, rolls back and safe-stops with `AGENT_FAILURE_EXHAUSTED`
-(`verificationThatKeepsFailingExhaustsTheFeedbackBudgetAndSafeStops`: three reports, three implementations).
+all its successors; `implement` re-runs with the feedback. `maxFeedbackLoops` (default 3,
+`RunBudget.DEFAULT_MAX_FEEDBACK_LOOPS`; it was 2 until live LLM runs used both loops on diff hunks and test gaps)
+bounds the loop: the failure that pushes the counter above it fails `verify`, rolls back and safe-stops with
+`AGENT_FAILURE_EXHAUSTED` (`verificationThatKeepsFailingExhaustsTheFeedbackBudgetAndSafeStops`: four reports, four
+implementations).
 
 **Rework after rejection.** `reject` with REWORK checks the same budget (refused when exhausted, with the hint to
 abort or re-plan), marks the approval `REJECTED`, appends `[review by <operator>] <reason>` to the stage feedback,
@@ -419,7 +453,30 @@ the re-execution. Identical content (same canonical hash) leaves successors unto
 **Context.** `StageExecutor.buildContext` builds an immutable [`StageContext`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/StageContext.java) under the lock: active and
 original requirement, answered clarification questions, accepted artifacts of all transitive predecessors in
 topological order, the stage's feedback, attempt number, plan version, previous error, the codebase index for
-`REPO` runs, run options, approvals granted in the current plan version and agent settings. Nothing else.
+`REPO` runs, run options, approvals granted in the current plan version, agent settings and, for the
+implementation, verification and security-review roles of `REPO` runs with a workspace root, the bounded source of
+the impacted files with notes about what was cut or left out. Nothing else.
+
+**Impacted sources.** `StageExecutor.impactedSourceRequests` decides which files an attempt sees, by priority:
+`MODIFY` targets first (the `MODIFY` changes of the accepted and of the latest change set, files of those change
+sets or other repository paths named in the stage feedback or the previous error, `MODIFY` components of the
+accepted impact analysis, `DELETE` changes), then `EXTEND` components, then `REGRESSION_RISK` components. Component
+paths the codebase index does not know are resolved by path suffix or type name.
+[`ImpactedSources`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/workspace/ImpactedSources.java)
+reads them from the workspace root (not from a sandbox) within two limits from
+[`EngineConfig`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/EngineConfig.java):
+`sourceContextPerFileChars` (default 20 000) and `sourceContextTotalChars` (default 120 000). A cut file ends with a
+`[truncated]` marker line; a regression risk is read only when the remaining budget holds it whole (or, for a file
+above the per-file limit, a full per-file slice); a fragment under 400 characters is omitted rather than cut.
+Absolute paths, `..` segments, paths that resolve outside the root (also through symbolic links), secret-bearing
+files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.jks`) and files under the directories a sandbox copy skips
+(`WorkspaceSandbox.SKIPPED_DIRECTORIES`, for example `.git`, `target`, `data`) are refused; binary files (a NUL
+byte, or not valid UTF-8) are skipped. Every file not shown in full gets a note ("truncated", "not found",
+"refused", "skipped", "omitted"), which the prompt lists under "Not shown in full"
+([`ImpactedSourcesTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/workspace/ImpactedSourcesTest.java),
+`implementationVerificationAndSecurityReviewSeeBoundedImpactedSources`,
+`runsWithoutTheRepositoryWorkspaceOrWithoutAWorkspaceRootGetNoSources`). Because the previous error is one of the
+inputs, the retry after a diff that did not apply shows the source of exactly that file.
 
 **Versions and hashing.** Versions are per stage, start at 1 and never repeat: `Run.nextArtifactVersion` takes
 the higher of the history's maximum and a per-stage counter persisted in the snapshot, so rejected, failed and
@@ -430,7 +487,8 @@ identical inputs give identical hashes across runs (`identicalRunsProduceIdentic
 
 **Provenance.** `derivedFrom` (upstream stage to exact version), `agentRole`, `agentId` and `providerId` (for
 example `deterministic`, `fallback:deterministic`, `anthropic:<model>`, `engine`), `model` and `promptHash`
-(SHA-256 of system plus user prompt, null for deterministic agents), `inputTokens`, `outputTokens`, `latencyMs`,
+(SHA-256 of the system prompt, the stable context and the user prompt, null for deterministic agents),
+`inputTokens`, `outputTokens`, `latencyMs`,
 `attempt`, `planVersion`. Each `derivedFrom` entry is an edge from an exact upstream version to the derived
 artifact, so a run's lineage graph is the union of these edges over its artifact history; the control plane
 exposes it as nodes and edges ([spec](design/engineering-spec.md) section 6.2). `STAGE_STARTED` audits the same map before the agent runs.
@@ -461,7 +519,7 @@ invalidations a re-plan causes.
 | `maxAgentCalls` ([`RunBudget`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/model/RunBudget.java)) | 40 | before every attempt (first, retry, fallback, rework, clarification re-run) | `BUDGET_EXCEEDED`, safe-stop |
 | `maxLlmTokens` (input plus output) | 600 000 | before every attempt, once any tokens were used | same |
 | `maxActiveDuration` (elapsed minus human wait) | 2 h | before every attempt | same |
-| `maxFeedbackLoops` (verify loops and REWORK) | 2 | on a failed report; on REWORK | stage fails, or rejection refused |
+| `maxFeedbackLoops` (verify loops and REWORK) | 3 | on a failed report (a failed blocking check or an uncovered requirement); on REWORK | stage fails, or rejection refused |
 | `maxReplans` | 3 | on `replan` | command refused |
 | Attempts per activation and agent | `RetryPolicy` (2 or 3) | on each failure | fallback, then stage failure |
 | Attempt timeout | 3, 5 or 10 min per stage | while the attempt runs | TIMEOUT failure |
@@ -474,8 +532,13 @@ budget, so it re-stops at the next activation while the budget is still exhauste
 ([`EngineConfig`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/EngineConfig.java)): ambiguity threshold 0.5, backoff scale 1.0, maximum backoff 30 s, sandbox and sandbox
 build disabled, sandbox root `./sandbox`, build timeout 10 min, build command `./mvnw -B -ntp -q verify` (the only
 command a sandbox build runs; agent-supplied commands are ignored), LLM timeout scale 3.0 (stage timeouts are
-multiplied by it whenever an LLM provider executes the attempt). The Anthropic adapter streams responses of up to
-32 000 output tokens with a 300 s request timeout. The safe-stop triggers are the six halt reasons of section 6.
+multiplied by it whenever an LLM provider executes the attempt), impacted-source limits of 20 000 characters per
+file and 120 000 per stage context (section 8), and the provider circuit breaker (3 consecutive failures, 10 min
+cooldown; section 6). The control plane sets the ambiguity threshold, backoff scale, sandbox and sandbox-build
+switches, sandbox root, build command and LLM timeout scale from `sdlc.engine.*`; everything else runs with these
+defaults. The Anthropic adapter streams responses of up to 64 000 output tokens
+(`sdlc.llm.anthropic.max-output-tokens`) with a 900 s request timeout. The safe-stop triggers are the six halt
+reasons of section 6.
 
 ## 10. Reliability metrics
 
@@ -531,12 +594,14 @@ The ten deterministic agents are the default provider and the fallback; they are
 - **Implementation** ([`ImplementationAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/deterministic/ImplementationAgent.java)). Skeletons with `// TODO implement` markers, Flyway DDL
   per data model change, a test skeleton per production file, build command `./mvnw -pl url-shortener verify`
   and a rollback plan; with sandboxes enabled for `REPO` runs it materializes the change set and returns a
-  `DELETE_SANDBOX` compensation.
+  `DELETE_SANDBOX` compensation (see "Sandbox and diff application" below).
 - **Test design** ([`TestDesignAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/deterministic/TestDesignAgent.java)). Positive and negative cases per criterion, NFR cases, coverage matrix.
-- **Verification** ([`VerificationAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/deterministic/VerificationAgent.java)). Seven structural checks: paths within allowed roots, no
-  secrets, tests accompany production changes, a migration when the data model changes, designed endpoints
-  present in controllers, content present, every functional requirement traced by a test case; optionally a
-  sandbox build. Each failed check yields imperative feedback.
+- **Verification** ([`VerificationAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/deterministic/VerificationAgent.java)). Eight structural checks, nine with a codebase
+  index: paths within allowed roots, no secrets, no `CREATE` of an indexed file (only with an index), tests
+  accompany production changes, tests assert (`tests-are-not-vacuous`), a migration when the data model changes,
+  designed endpoints present in request mappings (`api-changes-implemented`, or `api-changes-planned` for skeleton
+  change sets), content present, every functional requirement traced by a test case; optionally a sandbox build.
+  All of them are blocking. Each failed check yields imperative feedback.
 - **Documentation** ([`DocumentationAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/deterministic/DocumentationAgent.java)). README section, API reference, runbook, changelog, one ADR per decision.
 - **Security review** ([`SecurityReviewAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/deterministic/SecurityReviewAgent.java)). STRIDE threats from the API changes and data handling;
   checks for input validation (HIGH), SSRF and open-redirect guard (HIGH), protected personal data (HIGH), rate
@@ -548,21 +613,63 @@ The ten deterministic agents are the default provider and the fallback; they are
   failed items; otherwise GO. Change-record approvals are left to the engine.
 
 **LLM agents.** [`LlmStageAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/llm/LlmStageAgent.java) serves any role through the `LlmClient` SPI (`providerId`, `model`,
-`isAvailable`, `complete(request, outputType)`); the Anthropic and Ollama clients live in the control plane. The
-system prompt ([`PromptTemplates`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/llm/PromptTemplates.java)) states the role, governance constraints (reference only indexed
-files, never include secrets, JSON only) and role guidance; the user prompt carries the requirement,
-clarification answers, accepted upstream artifacts as JSON (at most 60 000 characters each), the codebase index
-for analysis, architecture and implementation (at most 400 types), feedback, the previous error and the output
-schema from `JsonSchemas` (all properties required, `additionalProperties: false`). Categorical artifact fields
+`isAvailable`, `complete(request, outputType)`); the Anthropic and Ollama clients live in the control plane. A
+prompt ([`PromptTemplates`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/llm/PromptTemplates.java)) has three parts, ordered from most to least stable and sent as
+one [`LlmRequest`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/llm/LlmRequest.java)`(system, stableContext, user, ...)`:
+
+| Part | Content | Stable across |
+|---|---|---|
+| `system` | role, governance constraints (reference only indexed files, never include secrets, JSON only, upper-case enum values), output size and role guidance | every attempt of a role |
+| `stableContext` | the active requirement, clarification answers, the accepted requirement specification as full JSON and, for analysis, architecture and implementation, the codebase index (at most 400 types) | every attempt and feedback loop of a role; shared by all stages of a run that get the same index (none, or the codebase-aware roles) |
+| `user` | full JSON of the direct predecessors' artifacts (at most 60 000 characters each), summaries of the other upstream artifacts, "Source of impacted files (authoritative; write diffs against exactly this text)" for implementation, verification and security review (section 8), feedback, the previous error and the output schema from `JsonSchemas` (all properties required, `additionalProperties: false`) | one attempt |
+
+The split exists so that a provider can cache the prefix (system prompt plus stable context) across the attempts
+and stages of a run (`thePromptIsSplitIntoSystemRunStableContextAndStageSpecificUserContent`); `LlmStageAgent`
+computes the prompt hash over all three parts. Today both clients send
+`LlmRequest.userWithContext()`, the stable context followed by the stage part in one user message, so no cache
+breakpoint is set yet. The implementation guidance carries the diff rules (`--- a/<path>` and `+++ b/<path>`
+headers, correct `@@ -a,b +c,d @@` numbers counted on the shown source, three verbatim context lines around every
+change, FULL content for new files); the verifier is told to compare every DIFF hunk with the shown source and to
+separate blocking from advisory findings
+(`implementationPromptShowsTheImpactedSourcesAndTheIntakePromptDoesNot`,
+`verifierPromptComparesDiffsWithTheSourceAndSeparatesBlockingFromAdvisoryFindings`). Categorical artifact fields
 are enums (`RequirementSpec.Category`, `ImpactAnalysis.ComponentType`, `ReleaseReadiness.ChecklistStatus`,
 `SecurityReview.StrideCategory`, `SecurityReview.ThreatStatus`, among others), so the schema sent to a provider
 carries `enum` constraints; the system prompt states that enum fields use the upper-case values of the schema,
 and [`JsonCodec`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/json/JsonCodec.java) parses enum values case-insensitively (`ACCEPT_CASE_INSENSITIVE_ENUMS`), while an unknown
 value is still INVALID_OUTPUT (`lowerCaseEnumValuesInModelOutputAreAcceptedAndUnknownValuesAreInvalidOutput`). Output passes the same
 `validate()` as deterministic output, and again the engine's checks. An unavailable provider or non-retryable
-error is FATAL (immediate fallback), a retryable `LlmException` TRANSIENT, unparsable or invalid output
-INVALID_OUTPUT. Usage, model and prompt hash reach provenance, counters and the token budget, also for failed
-attempts; the requirements role applies the same clarification gate.
+error is FATAL (immediate fallback), a retryable `LlmException` TRANSIENT, unparsable or invalid output and a
+change set the sandbox rejects INVALID_OUTPUT. Usage, model and prompt hash reach provenance, counters and the
+token budget, also for failed attempts; the requirements role applies the same clarification gate.
+
+**Sandbox and diff application.** With `sdlc.engine.sandbox-enabled` (off by default) and a `REPO` run, both
+implementation agents hand their change set to
+[`SandboxMaterializer`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/SandboxMaterializer.java), which copies the workspace to
+`<sandboxRoot>/<runId>` and applies it with
+[`WorkspaceSandbox.apply`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/workspace/WorkspaceSandbox.java): `CREATE` writes a new file (a `CREATE`
+of an existing file is rejected), `MODIFY` with FULL content overwrites, `MODIFY` with SKELETON content is written
+next to the file as `<file>.skeleton` for human completion, `DELETE` deletes, and DIFF content (`MODIFY`, or a
+`CREATE` whose diff starts from `--- /dev/null`) is parsed and applied by
+[`UnifiedDiff`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/workspace/UnifiedDiff.java). Parsing tolerates what models typically get wrong
+(preamble lines, hunk counts that do not add up, `@@ @@` headers without numbers, context lines without their
+leading space, trailing code fences). Each hunk is placed in order, never before the end of the previous one: an
+exact match at the declared position (shifted by the offset of earlier hunks), then a whitespace-insensitive match
+there, then the nearest exact and then whitespace-insensitive match within 50 lines, then a unique exact match
+anywhere after the previous hunk; context lines keep the file's own text, and the line separator (LF or CRLF) and
+the trailing newline are preserved. The whole change set is checked, and every diff applied in memory, before
+anything is written: one hunk that cannot be placed rejects the change set, `SandboxMaterializer` deletes the
+partly prepared sandbox and fails the attempt with INVALID_OUTPUT. The message names the hunk, the path, the first
+expected line that does not match and the nearest mismatch in the file (for example `hunk 2/2 of
+.../LinkService.java (@@ -12,5 +13,6 @@ ...): context line '...' (hunk line 2) not found in the file; nearest
+match at line 13 differs: '...'`), and it reaches the retry as the previous error together with that file's
+source (section 8). There are no `.diff` sidecars any more
+([`UnifiedDiffTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/workspace/UnifiedDiffTest.java),
+`appliesDiffsOverwritesFullContentKeepsSkeletonSidecarsCreatesAndDeletes`,
+`aDiffThatDoesNotApplyRejectsTheChangeSetWithHunkDiagnosticsAndWritesNothing`,
+`theMaterializerFeedsHunkDiagnosticsBackAsInvalidOutput`). Without the sandbox, which is the default, change sets
+are not applied anywhere: whether their diffs fit the code is judged by the verifier against the impacted
+sources, and only a sandbox build proves that they compile.
 
 **Fault injection.** A run may carry `FaultSpec`s (stage, `failTimes`, kind TRANSIENT, FATAL, TIMEOUT or
 INVALID_OUTPUT); unknown stages are rejected at start. Under the lock the engine wraps only the primary agent in
@@ -592,7 +699,7 @@ through the control plane, with its audit sequence and artifacts, is in [SCENARI
 6. **Build-out.** `test-design` (13 cases on 6 levels) and `implement` (21 skeleton files, 585 lines) complete;
    the `implement` exit passes with the note "risk HIGH already accepted by the approval of design in plan v1".
    `verify`, `document` and `security-scan` run concurrently (security passes with one LOW finding, verification
-   passes all 7 checks); the last of the three releases the final join.
+   passes all 8 checks, every one of them blocking); the last of the three releases the final join.
 7. **Release waits.** Decision GO_WITH_CONDITIONS (skeleton code waived); `POLICY_FINDING` CHG-002,
    `GATE_EVALUATED` EXIT REQUIRE_APPROVAL ("exit gate ALWAYS requires approval"), `APPROVAL_REQUESTED`.
 8. **Completion.** `APPROVAL_GRANTED`, `ARTIFACT_ACCEPTED release-readiness@v1` after approval,
@@ -624,3 +731,8 @@ same run stops only at the release gate (`fullAutoGreenfieldOnlyNeedsTheReleaseA
 | Completion | change record finalized in place | a new engine-authored `release-readiness` version, excluded from agent-latency metrics |
 | Human-wait time | `WAITING_HUMAN` intervals | `WAITING_HUMAN` and `SAFE_STOPPED` intervals |
 | Retry wake-up | stage set back to `RUNNING` via `pump` | the wake-up submits the attempt directly, guarded by the stage token |
+| Budget defaults | `maxFeedbackLoops=2`, `maxLlmTokens=200_000` (spec 5.3) | 3 feedback loops and 600 000 tokens, after live Claude-backed runs exhausted both |
+| Verification verdict | `passed` when all structural checks passed (spec 5.6.7) | `passed` when no blocking check failed and nothing is uncovered; failed advisory checks are reported only |
+| Fallback trigger | attempts exhausted (spec 5.5) | also, before the provider is called, an open per-provider circuit shared by all runs |
+| Sandbox materialization | the change set is materialized into the sandbox (spec 5.6.5) | DIFF content is applied to the file; a hunk that does not match rejects the whole change set as INVALID_OUTPUT before anything is written |
+| LLM prompt | system prompt plus one user prompt with requirement, answers, upstream artifacts and index (spec 5.6.11) | system prompt, run-stable context and stage part; the stage part adds the bounded source of the impacted files for implementation, verification and security review |

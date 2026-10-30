@@ -79,7 +79,7 @@
   <!-- feedback loop verify -> implement -->
   <path d="M1040,204 C1040,174 816,174 816,203" fill="none" stroke="#9a6700" stroke-width="1.75" stroke-dasharray="6 4" marker-end="url(#arrow-amber)"/>
   <rect x="813" y="148" width="230" height="22" rx="11" fill="#fff8c5" stroke="#9a6700" stroke-opacity="0.45"/>
-  <text class="fb" x="928" y="163" text-anchor="middle">feedback loop (bounded: max 2)</text>
+  <text class="fb" x="928" y="163" text-anchor="middle">feedback loop (bounded: max 3)</text>
 
   <!-- nodes -->
   <g filter="url(#shadow)">

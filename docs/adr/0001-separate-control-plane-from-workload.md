@@ -4,7 +4,7 @@ Status: Accepted (2026-10-29)
 
 ## Context
 
-The assignment asks for two things at once: a production-grade URL shortener and an agentic
+The project has two goals at once: a production-grade URL shortener and an agentic
 orchestration layer that drives the SDLC of such a service. Putting both into one Spring Boot
 application (the approach of the earlier prototype) blurs responsibilities: the orchestrator ends up
 deployed inside the system it is supposed to govern, and the shortener's dependency footprint grows

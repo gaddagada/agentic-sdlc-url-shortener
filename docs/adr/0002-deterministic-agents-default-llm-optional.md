@@ -4,9 +4,9 @@ Status: Accepted (2026-10-29)
 
 ## Context
 
-Reviewers must be able to run the prototype end-to-end without API keys, and every governance path
+Anyone must be able to run the platform end-to-end without API keys, and every governance path
 (retries, fallback, rollback, re-planning) must be reproducible in automated tests. At the same time
-the assignment values realistic outputs, which large language models produce far better than
+a design goal is realistic outputs, which large language models produce far better than
 templates.
 
 ## Decision

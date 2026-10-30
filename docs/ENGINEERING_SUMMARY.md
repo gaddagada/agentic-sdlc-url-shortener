@@ -1,15 +1,15 @@
-# Final Engineering Summary
+# Engineering Summary
 
-Assignment: *Build an Agentic Software Engineering System – URL Shortener*. This summary states how the
-assignment was interpreted, how the work was planned and decomposed, what was delivered and where, the decisions
+The project: *an agentic SDLC orchestration platform demonstrated on a production-grade URL shortener*. This
+summary states the design goals, how the work was planned and decomposed, what was built and where, the decisions
 that shape it, the risks and how they are controlled, the assumptions made, the limitations that remain, and what
 we would do next.
 
-## 1. Interpretation of the requirement
+## 1. Design goals
 
-The assignment asks for two things that are easy to conflate: an agentic system that performs software engineering,
-and a URL shortener. We read it as **a control plane that governs the delivery of changes to a real service**, with
-the URL shortener as that service. Three consequences follow.
+The project combines two things that are easy to conflate: an agentic system that performs software engineering,
+and a URL shortener. It is built as **a control plane that governs the delivery of changes to a real service**,
+with the URL shortener as that service. Three consequences follow.
 
 1. **The orchestrator is the product; agents are workers inside it.** The hard problem in a regulated delivery
    setting is not generating text or code, it is deciding what may be accepted, by whom, with what evidence, and what
@@ -18,13 +18,13 @@ the URL shortener as that service. Three consequences follow.
 2. **The shortener must be real.** It is built to production conventions (validation, abuse controls, privacy,
    observability, contract tests) and doubles as the codebase that brownfield runs reason over, so "codebase
    reasoning" reads actual source rather than a fixture.
-3. **Everything must run without secrets.** Reviewers must be able to execute every scenario, and CI must prove
-   every governance path, without an API key. LLMs are therefore optional providers behind the same contracts, with
-   deterministic agents as default and fallback.
+3. **Everything must run without secrets.** Anyone who clones the repository must be able to execute every
+   scenario, and CI must prove every governance path, without an API key. LLMs are therefore optional providers
+   behind the same contracts, with deterministic agents as default and fallback.
 
-The eight core requirements were normalized into testable statements before design:
+The eight platform capabilities were stated as testable design goals before design:
 
-| # | Requirement | Normalized as |
+| # | Capability | Design goal |
 |---|---|---|
 | 1 | Requirement understanding | classify, extract prioritized and measurable requirements with acceptance criteria, score ambiguity, ask before planning when the score reaches a threshold |
 | 2 | Task decomposition | a task DAG with dependencies, critical path and parallel groups, validated like any other artifact |
@@ -33,7 +33,7 @@ The eight core requirements were normalized into testable statements before desi
 | 5 | Engineering output | typed artifacts for every stage (spec, plan, impact, design, change set, tests, verification, docs, security review, release decision) and a production-grade service |
 | 6 | Validation and risk control | artifact invariants, verification and security review as stages, policy rules at every gate, a release checklist, a risk register |
 | 7 | Controlled autonomy | autonomy levels, risk-based human approvals, a non-removable release gate, budgets, operator identity on every decision |
-| 8 | Final engineering summary | this document |
+| 8 | Documented decisions | every decision recorded with its rationale, risks and limitations: this summary, the ADRs, the risk register and the engineering specification |
 
 ## 2. Plan and decomposition
 
@@ -46,7 +46,7 @@ console, persistence, LLM adapters, scenario catalog).
 
 | Phase | Output | Exit criterion |
 |---|---|---|
-| 1. Interpretation and decisions | requirement-to-design mapping, ten ADRs | every open question decided and recorded |
+| 1. Goals and decisions | goal-to-design mapping, ten ADRs | every open question decided and recorded |
 | 2. Specification | [engineering specification](design/engineering-spec.md): packages, state machines, contracts, policy rules, test obligations | written and reviewed before the modules were built |
 | 3. Workload | `url-shortener` with tests and OpenAPI contract | `./mvnw verify` green; contract matches controllers |
 | 4. Engine | `orchestrator-core`: graph, scheduler, gates, failure handling, re-planning, metrics | behaviour proven by engine tests with fake agents (latches, fault injection), independent of any real agent |
@@ -54,14 +54,15 @@ console, persistence, LLM adapters, scenario catalog).
 | 6. Control plane | API, JPA persistence, recovery, providers, console, scenario catalog | all seven scenarios pass end to end through the API |
 | 7. Hardening | fixes from a critical review: denied artifacts discarded, operator-attributed run creation, budget extension on resume, sandbox environment scrubbing, broader secret and policy patterns, enum-typed artifact fields, retention job, engine-computed risk floor, rate-limit path normalization | regression tests for every fix |
 | 8. Documentation and demonstration | README, these documents, demo scripts, live runs and screenshots | every statement checked against the code or a live run |
+| 9. Second pass from the live LLM runs | source-aware LLM stages, real diff application, blocking and advisory checks, a per-provider circuit breaker ([ADR 0011](adr/0011-source-aware-prompts-and-real-diff-application.md)); the bulk API for real, a rate limiter SPI with a Redis backend, an optional API key and an opt-in resolve-time SSRF check in the shortener ([ADR 0012](adr/0012-shortener-bulk-api-and-rate-limiter-spi.md)); a console walkthrough recording | 960 tests green (shortener 441, core 365, app 154), plus 15 Redis tests where Docker is available |
 
 The stage graph mirrors this decomposition: understanding, planning and impact analysis feed a design that a human
 approves at sufficient risk; implementation and test design run in parallel; verification, documentation and
 security review gate a release decision that always needs a human.
 
-## 3. Deliverables and where they are
+## 3. Capabilities and where they are
 
-| Assignment item | Location |
+| Capability | Location |
 |---|---|
 | Runnable prototype | `./mvnw -B verify`, then two `java -jar` commands ([README](../README.md#quick-start)); Dockerfiles and `docker-compose.yml` |
 | Three scenarios (greenfield, brownfield, ambiguous) | [`ScenarioCatalog`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/scenario/ScenarioCatalog.java), runnable from the console, `scripts/demo.sh`, `scripts/demo.ps1` or the API; walkthroughs in [SCENARIOS.md](SCENARIOS.md) |
@@ -73,7 +74,7 @@ security review gate a release decision that always needs a human.
 | 5. Engineering output | the ten artifact types in `orchestrator-core/.../artifact`; the [`url-shortener`](../url-shortener) service |
 | 6. Validation and risk control | `verify`, `security-scan` and `release-readiness` stages; [`PolicyEngine`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/policy/PolicyEngine.java) and eleven rules; [RISKS_AND_TRADEOFFS.md](RISKS_AND_TRADEOFFS.md) |
 | 7. Controlled autonomy | [`GateEvaluator`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/GateEvaluator.java), [`AutonomyLevel`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/model/AutonomyLevel.java), [`RunBudget`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/model/RunBudget.java), `X-Operator-Id` on every governance command |
-| 8. Final engineering summary | this document |
+| 8. Documented decisions | this summary, [RISKS_AND_TRADEOFFS.md](RISKS_AND_TRADEOFFS.md), the [engineering specification](design/engineering-spec.md) |
 | Architecture and decisions | [ARCHITECTURE.md](ARCHITECTURE.md), [ADRs](adr/) |
 | API contracts | [orchestrator.openapi.yaml](api/orchestrator.openapi.yaml), [url-shortener.openapi.yaml](api/url-shortener.openapi.yaml), each checked against its controllers by a test |
 | Tests and CI | [TESTING.md](TESTING.md), [`ci.yml`](../.github/workflows/ci.yml) |
@@ -89,11 +90,13 @@ security review gate a release decision that always needs a human.
 | Risk-based approvals, three autonomy levels, release gate that cannot be removed | oversight proportional to risk without a bypass for releases | [ADR 0005](adr/0005-risk-based-approvals-and-autonomy-levels.md) |
 | JSON snapshot plus append-only audit and artifact tables | simple restore and crash recovery; full audit trail | [ADR 0006](adr/0006-aggregate-snapshot-persistence-with-audit-and-artifact-tables.md) |
 | Virtual threads per attempt, a lock per run | real parallel branches, serializable state transitions, no extra infrastructure | [ADR 0007](adr/0007-virtual-threads-and-per-run-locking.md) |
-| 302 redirects, random codes, pseudonymous analytics, no DNS-time SSRF check | correct expiry and analytics, no enumeration, privacy by default | [ADR 0008](adr/0008-shortener-redirect-code-and-privacy-choices.md) |
+| 302 redirects, random codes, pseudonymous analytics, no DNS-time SSRF check by default | correct expiry and analytics, no enumeration, privacy by default | [ADR 0008](adr/0008-shortener-redirect-code-and-privacy-choices.md) |
 | Mandatory operator identity, optional API key, SSO as the production path | attributable approvals now; authentication as a deployment decision | [ADR 0009](adr/0009-prototype-security-model.md) |
 | Java 25 and Spring Boot 4.1.2 | current supported baseline with mature virtual threads | [ADR 0010](adr/0010-java-25-and-spring-boot-4.1-baseline.md) |
+| Bounded source of the impacted files in LLM prompts, diffs applied for real, blocking and advisory checks, an engine-wide circuit per provider | live Claude runs failed at verification because diffs were written without the source; advisory findings should not cost a loop; an outage should not cost every stage its retries | [ADR 0011](adr/0011-source-aware-prompts-and-real-diff-application.md) |
+| Bulk creation charged one token per item, a rate limiter SPI whose Redis backend fails open, an optional API key, an opt-in resolve-time SSRF check | the brownfield feature exists for real; horizontal scaling and abuse controls become configuration, with the costs stated | [ADR 0012](adr/0012-shortener-bulk-api-and-rate-limiter-spi.md) |
 
-Smaller decisions that matter to reviewers are recorded where the behaviour is specified: an artifact denied by a
+Smaller decisions that matter in a review are recorded where the behaviour is specified: an artifact denied by a
 policy gate is discarded rather than kept; more budget is granted only by an explicit human resume; the engine
 computes a deterministic risk floor so an agent cannot under-report risk to skip an approval; and the requirement
 text is re-checked by policy at the intake exit, because clarification answers can change it
@@ -118,7 +121,7 @@ the control in the code and the residual risk. The five that matter most for a p
 
 Validation is layered so that no single check carries the weight: typed invariants on every artifact, policy at run
 start and at every gate, structural verification and a STRIDE review as stages, a release checklist, risk-based and
-mandatory human approvals, budgets, and an append-only audit log. 768 automated tests prove the behaviour, including
+mandatory human approvals, budgets, and an append-only audit log. 960 automated tests prove the behaviour, including
 every failure path the documentation describes ([TESTING.md](TESTING.md)).
 
 **Observed in live runs** ([SCENARIOS.md](SCENARIOS.md)): the deterministic greenfield run completes with
@@ -126,19 +129,21 @@ every failure path the documentation describes ([TESTING.md](TESTING.md)).
 at intake with four targeted questions; the unsafe requirement is stopped before any agent runs and recovers only
 through a compliant re-plan; injected faults recover through retries (MTTR about 6 s with the default backoff) or the
 fallback; a re-plan revokes the earlier design approval and the change record lists only current approvals; a
-Claude-backed run produced substantially richer artifacts and was safe-stopped by the token budget.
+Claude-backed run produced substantially richer artifacts and was safe-stopped by the token budget, and two
+follow-up runs stopped at the verification gate because their diffs were written without the source, which the
+second pass addresses.
 
-## 6. Where to look for each review criterion
+## 6. Where to look for each quality attribute
 
-| Criterion | Evidence in the repository |
+| Quality attribute | Evidence in the repository |
 |---|---|
 | Effectiveness of agentic orchestration | a ten-stage DAG with real parallel branches and joins, gates, retries, fallback, rollback, re-planning and lineage ([ORCHESTRATION.md](ORCHESTRATION.md)); seven runnable scenarios, including failure paths ([SCENARIOS.md](SCENARIOS.md)) |
 | Architecture quality | three modules with enforced boundaries (ArchUnit in every module), a framework-free engine behind ports, adapters for persistence and providers ([ARCHITECTURE.md](ARCHITECTURE.md)) |
 | Depth of decomposition and execution | typed artifacts for ten stages, each with invariants; a task DAG with critical path; impact analysis over the real source; live excerpts of every stage in [SCENARIOS.md](SCENARIOS.md) |
 | Realism of outputs | a working URL shortener with production controls; deterministic artifacts that are honest about being skeletons; a Claude-backed run quoted with its tokens, latencies, errors and the mistakes a reviewer had to catch |
 | Validation and risk rigor | layered checks (section 5), a twenty-entry risk register with residual risk stated per entry, failure scenarios each proven by a named test ([RISKS_AND_TRADEOFFS.md](RISKS_AND_TRADEOFFS.md)) |
-| Clarity and defensibility of decisions | ten ADRs with context and consequences; trade-offs with the alternative considered and when to revisit; a table of where the code refines the specification |
-| Engineering principles | tests before trust (768 tests, no network in CI), immutable artifacts with canonical hashing, durability before visibility, least privilege for agents, explicit failure semantics |
+| Clarity and defensibility of decisions | twelve ADRs with context and consequences; trade-offs with the alternative considered and when to revisit; a table of where the code refines the specification |
+| Engineering principles | tests before trust (960 tests, no external services needed by default), immutable artifacts with canonical hashing, durability before visibility, least privilege for agents, explicit failure semantics |
 | Engineering judgment | deterministic-first agents so governance is reproducible; a release gate that cannot be configured away; limitations stated next to the features they limit |
 
 ## 7. Assumptions
@@ -151,7 +156,7 @@ Claude-backed run produced substantially richer artifacts and was safe-stopped b
   day, not identities.
 - One engine node is enough for the prototype's load; runs are long-lived and dominated by human wait.
 - LLM providers are optional and may be unavailable; the deterministic path must always complete.
-- Reviewers have JDK 25; Docker, Ollama and an Anthropic key are optional.
+- Users have JDK 25; Docker, Ollama and an Anthropic key are optional.
 
 ## 8. Limitations
 
@@ -162,35 +167,44 @@ Stated plainly, with the production path in [RISKS_AND_TRADEOFFS.md](RISKS_AND_T
   complete" waived; LLM output is not guaranteed to compile; the sandbox build that would prove it is off by default.
 - Policy rules and ambiguity scoring are keyword heuristics, with documented false positives and negatives; the
   deterministic architecture agent can misread a requirement (the re-planning walkthrough shows one case).
-- No DNS-time SSRF check; per-node rate limiter; no authentication on the shortener API; header-asserted operator
-  identity on the control plane (API key optional).
+- Shortener: the resolve-time SSRF check is opt-in and cannot stop DNS rebinding; the rate limiter is per node
+  unless the Redis backend is chosen, which fails open; the management API key is optional and one shared secret;
+  with the default bucket a bulk request carries at most 20 items. Header-asserted operator identity on the control
+  plane (API key optional).
 - A failed store commit leaves the in-memory run ahead of the store.
 - The console polls; Ollama on a CPU is slow and can hit stage timeouts, after which the fallback takes over.
-- LLM-backed brownfield runs did not converge to a verified change set within the default two feedback loops:
-  the Claude verifier rejected diffs that the implementation agent wrote without the modified files' source in
-  view, and the engine safe-stopped as designed. The deterministic path is the reproducible baseline; the
-  defaults are now 600 000 tokens and 64 000 streamed output tokens, and prompts summarize non-adjacent artifacts.
+- LLM-backed brownfield runs did not converge to a verified change set within the then-default two feedback
+  loops: the Claude verifier rejected diffs that the implementation agent wrote without the modified files' source
+  in view, and the engine safe-stopped as designed. The second pass gives those stages the source, applies diffs
+  for real in the sandbox, stops advisory findings from costing a loop and allows three loops; whether Claude now
+  converges is recorded in [SCENARIOS.md](SCENARIOS.md#the-same-scenario-with-an-llm-provider). The deterministic
+  path is the reproducible baseline; the defaults are 600 000 tokens and 64 000 streamed output tokens, and prompts
+  summarize non-adjacent artifacts.
+- Source-aware prompts send up to 120 000 characters of repository source per implementation, verification and
+  security-review attempt; files are filtered by name, not scanned for credentials. The provider circuit breaker
+  is engine-wide and in memory.
 
 ## 9. With more time
 
-In order of value for a bank's delivery organization:
+In order of value for a regulated delivery organization:
 
 1. **Identity and authorization:** Spring Security with OIDC, roles for approvers, and a four-eyes rule (requester is
    not approver, design approver is not release approver). The engine already binds an exit approval to the hash of
    the artifact under review; the console should show that hash and send the id of the approval the operator read.
 2. **Real verification:** run the sandbox build in an ephemeral container without credentials or egress, add static
    analysis and dependency scanning as stages, and make "Code complete" a checked item instead of a waiver.
-3. **LLM operations:** give the implementation agent the source of the directly impacted files (bounded by size)
-   so `MODIFY` diffs are authored against real code; per-provider budgets and a cross-stage circuit breaker; split
-   implementation into one change set per task; prompt-injection hardening by delimiting untrusted text; pin
-   verification and security review to deterministic agents in regulated runs; an evaluation set that scores
-   artifacts per role.
+3. **LLM operations:** (the source of the impacted files and a per-provider circuit breaker are in place since the
+   second pass) send cache breakpoints for the stable prompt prefix; per-provider budgets; split implementation
+   into one change set per task; prompt-injection hardening by delimiting untrusted text, now including repository
+   sources; scan impacted sources for credentials before they leave the engine; pin verification and security
+   review to deterministic agents in regulated runs; an evaluation set that scores artifacts per role.
 4. **Persistence and scale:** PostgreSQL for the control plane with snapshot and audit in one transaction, a
    hash-chained audit log, and a work queue or workflow engine for multi-node execution.
 5. **Operations:** OpenTelemetry traces across API, engine and provider calls; dashboards and alerts on the
    reliability metrics; server-sent events for the console.
-6. **Shortener:** shared rate limiter and cache, gateway authentication, URL reputation checks, and a load test of the
-   redirect path in a staging environment.
+6. **Shortener:** cache invalidation across nodes, OIDC or gateway authentication instead of one shared key,
+   alerting on the Redis limiter failing open, URL reputation checks, and a load test of the redirect path in a
+   staging environment.
 
 ---
 

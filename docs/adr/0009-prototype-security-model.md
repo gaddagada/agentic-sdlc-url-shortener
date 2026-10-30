@@ -1,6 +1,7 @@
 # ADR 0009: Prototype security model: API-key filter and mandatory operator identity; SSO is the production path
 
-Status: Accepted (2026-10-29)
+Status: Accepted (2026-10-29). The shortener part is amended by
+[ADR 0012](0012-shortener-bulk-api-and-rate-limiter-spi.md), which adds an optional shared `X-Api-Key`.
 
 ## Context
 
@@ -29,4 +30,4 @@ governance story.
 ## Consequences
 
 - Attribution exists end-to-end today; authentication strength is a deployment decision.
-- Reviewers can run everything locally without configuring identity.
+- Anyone can run everything locally without configuring identity.

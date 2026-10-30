@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1200" height="390" viewBox="0 0 1200 390" font-family="Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" fill="#1f2328" role="img" aria-labelledby="title desc">
-  <title id="title">Required scenarios: greenfield, brownfield, ambiguous</title>
-  <desc id="desc">Three required scenarios with their decomposition, orchestration and validation. Greenfield builds a new URL shortener service; brownfield adds a bulk link creation API to the existing shortener using impact analysis over the real source tree; ambiguous ("Make the shortener faster and more reliable.") scores at least 0.5 for ambiguity, pauses at the clarification gate, and continues on the brownfield path. Four more executable scenarios: policy-denial, fault-retry, fault-fallback and replan.</desc>
+  <title id="title">Core scenarios: greenfield, brownfield, ambiguous</title>
+  <desc id="desc">Three core scenarios with their decomposition, orchestration and validation. Greenfield builds a new URL shortener service; brownfield adds a bulk link creation API to the existing shortener using impact analysis over the real source tree; ambiguous ("Make the shortener faster and more reliable.") scores at least 0.5 for ambiguity, pauses at the clarification gate, and continues on the brownfield path. Four more executable scenarios: policy-denial, fault-retry, fault-fallback and replan.</desc>
   <defs>
     <style type="text/css"><![CDATA[
       text { font-family: Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
@@ -30,7 +30,7 @@
   <!-- canvas -->
   <rect x="0.5" y="0.5" width="1199" height="389" rx="16" fill="#f6f8fa" stroke="#d0d7de"/>
   <text class="h1" x="32" y="36">Scenarios</text>
-  <text class="lead" x="32" y="58">The three required scenarios, each executable from the scenario catalog (<tspan class="mono" fill="#1f2328">POST /api/v1/scenarios/{key}/run</tspan>) with deterministic agents by default.</text>
+  <text class="lead" x="32" y="58">The three core scenarios, each executable from the scenario catalog (<tspan class="mono" fill="#1f2328">POST /api/v1/scenarios/{key}/run</tspan>) with deterministic agents by default.</text>
 
   <g filter="url(#shadow)">
     <rect class="card" x="32" y="76" width="360" height="262" rx="12"/>

@@ -1,15 +1,17 @@
 <h1 align="center">Agentic SDLC Orchestrator · URL Shortener</h1>
 
 <p align="center">
-A control plane that takes a software requirement through a governed, ten-stage delivery pipeline
-(agents do the work, policy and people decide what is accepted), demonstrated on a production-grade URL shortener.
+An agentic SDLC orchestration platform demonstrated on a production-grade URL shortener: a control plane that takes
+a software requirement through a governed, ten-stage delivery pipeline (agents do the work, policy and people decide
+what is accepted).
 </p>
 
 <p align="center">
   <a href="https://github.com/gaddagada/agentic-sdlc-url-shortener/actions/workflows/ci.yml"><img src="https://github.com/gaddagada/agentic-sdlc-url-shortener/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/Java-25-007396?logo=openjdk&logoColor=white" alt="Java 25">
   <img src="https://img.shields.io/badge/Spring%20Boot-4.1.2-6DB33F?logo=springboot&logoColor=white" alt="Spring Boot 4.1.2">
-  <img src="https://img.shields.io/badge/tests-768-brightgreen" alt="768 tests">
+  <img src="https://img.shields.io/badge/tests-960-brightgreen" alt="960 tests">
+  <img src="https://img.shields.io/badge/line%20coverage-93.4%25-brightgreen" alt="Line coverage 93.4%">
 </p>
 
 **What this is**
@@ -18,12 +20,38 @@ A control plane that takes a software requirement through a governed, ten-stage 
   into a reviewable engineering outcome: normalized requirements, a task plan, codebase impact, a design, a change
   set, tests, verification, documentation, a security review and a release decision, each a typed, hashed and
   versioned artifact with provenance, behind policy gates, human approvals, budgets and an append-only audit log.
-- **A production-grade workload** (`url-shortener`): a Spring Boot service with SSRF-guarded link creation,
-  302 redirects, privacy-preserving click analytics, idempotency, rate limiting and a PostgreSQL profile. It is
-  also the real codebase the orchestrator reasons over in brownfield runs.
-- **Runnable scenarios**: the three required scenarios (greenfield, brownfield, ambiguous) plus policy denial,
+- **A production-grade workload** (`url-shortener`): a Spring Boot service with SSRF-guarded single and bulk link
+  creation, 302 redirects, privacy-preserving click analytics, idempotency, rate limiting (per node or shared through
+  Redis), an optional API key and a PostgreSQL profile. It is also the real codebase the orchestrator reasons over
+  in brownfield runs.
+- **Runnable scenarios**: the three core scenarios (greenfield, brownfield, ambiguous) plus policy denial,
   retry, fallback and re-planning, from the console, a demo script or the REST API. Deterministic agents need no
   API key; Claude (Anthropic) and Ollama are optional providers.
+
+## 15-minute tour
+
+One row per platform capability: read the linked section, open the test that proves it, then watch it in the
+console (http://localhost:8090/ after the [Quick start](#quick-start)) or call the API. Scenarios start with
+**Run scenario** in the console or `POST /api/v1/scenarios/{key}/run`; paths starting with `.../` are under
+`/api/v1/runs/{id}`.
+
+| Capability | Read | Proven by | See it |
+|---|---|---|---|
+| Requirement intake and clarification | [ORCHESTRATION §11](docs/ORCHESTRATION.md#11-agents), [SCENARIOS §3](docs/SCENARIOS.md#3-ambiguous-clarification-before-planning) | `RequirementsAgentTest`, `OrchestratorEndToEndTest` | scenario `ambiguous`; `POST .../clarify` |
+| Task decomposition | [ORCHESTRATION §11](docs/ORCHESTRATION.md#11-agents) (Planning) | `PlanningAgentTest` | scenario `greenfield`; `GET .../artifacts/decompose` |
+| Static DAG with parallel branches and joins | [ORCHESTRATION §2](docs/ORCHESTRATION.md#2-the-dependency-graph) | `WorkflowGraphTest`, `OrchestrationEngineTest` | console pipeline graph; `GET /api/v1/workflows/default`, `GET .../graph` |
+| Risk-based gates and human approvals | [ORCHESTRATION §4](docs/ORCHESTRATION.md#4-gates-and-controlled-autonomy) | `OrchestrationEngineTest`, `RiskFloorTest` | scenario `greenfield` (GOV-001, CHG-002); `POST .../stages/{stageId}/approve` |
+| Retries, fallback, circuit breaker | [ORCHESTRATION §6](docs/ORCHESTRATION.md#6-failure-handling) | `OrchestrationEngineGovernanceTest`, `ProviderCircuitBreakerTest` | scenarios `fault-retry`, `fault-fallback` |
+| Rollback and safe-stop | [ORCHESTRATION §6](docs/ORCHESTRATION.md#6-failure-handling), [ADR 0004](docs/adr/0004-saga-rollback-and-safe-stop.md) | `OrchestrationEngineTest`, `RollbackServiceTest` | scenario `policy-denial` (safe-stopped; `POST .../resume` answers 409) |
+| Re-planning | [ORCHESTRATION §7](docs/ORCHESTRATION.md#7-non-linear-execution) | `OrchestrationEngineTest` | scenario `replan`; `POST .../replan` |
+| Artifact lineage and audit trail | [ORCHESTRATION §8](docs/ORCHESTRATION.md#8-cross-stage-context-and-decision-lineage) | `DeterministicPipelineTest`, `OrchestratorEndToEndTest`, `JpaAuditSinkTest` | console Lineage and Audit tabs; `GET .../lineage`, `GET .../audit` |
+| Policy rules | [ORCHESTRATION §5](docs/ORCHESTRATION.md#5-policy-guardrails) | `PolicyRulesTest`, `PolicyEngineTest` | scenario `policy-denial` (SEC-001, CMP-002) |
+| Reliability metrics | [ORCHESTRATION §10](docs/ORCHESTRATION.md#10-reliability-metrics) | `MetricsCalculatorTest`, `MicrometerMetricsRecorderTest` | console Metrics tab; `GET /api/v1/metrics/reliability` |
+| LLM providers | [ARCHITECTURE §7](docs/ARCHITECTURE.md#7-llm-provider-adapters), [ADR 0011](docs/adr/0011-source-aware-prompts-and-real-diff-application.md) | `LlmStageAgentTest`, `AnthropicLlmClientTest`, `OllamaLlmClientTest` | console **Provider** field; `GET /api/v1/providers` |
+| The URL shortener | [the service section below](#the-url-shortener-service), [ADR 0012](docs/adr/0012-shortener-bulk-api-and-rate-limiter-spi.md) | `UrlShortenerIntegrationTest`, `BulkLinkIntegrationTest`, `UrlValidatorTest` | Swagger UI at http://localhost:8080/swagger-ui.html; `POST /api/v1/links`, `POST /api/v1/links/bulk` |
+
+Every test class named here runs in `./mvnw -B verify`; [docs/TESTING.md](docs/TESTING.md) maps them to the
+behaviour they pin down.
 
 ---
 
@@ -37,8 +65,9 @@ A control plane that takes a software requirement through a governed, ten-stage 
   plane: REST API, operator console, JPA persistence, LLM adapters and the scenario catalog.
 - **Agents propose, the engine decides.** Agents receive an immutable context and return a typed result; only the
   engine changes run state, evaluates gates, schedules successors and records decisions.
-- **One repository on purpose:** the control plane indexes the `url-shortener` sources from disk (371 types,
-  26 endpoints and 2 migrations across the repository at startup), so brownfield impact analysis is real.
+- **One repository on purpose:** the control plane indexes the `url-shortener` sources from disk (445 types,
+  27 endpoints and 2 migrations across the repository when this was written), so brownfield impact analysis is
+  real, and LLM implementation and review stages see the current source of the files a change touches.
 
 Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
@@ -51,8 +80,9 @@ The lifecycle is a validated, versioned DAG of ten stages. `intake` forks into `
 and `release-readiness` are joins that start only when every predecessor has succeeded. Each stage declares its
 retry policy (3 attempts, 2 for `verify`, `security-scan` and `release-readiness`; backoff 2 s then 4 s), a
 timeout (3 min, 5 min for `implement`, 10 min for `verify`) and a deterministic fallback. Non-linear execution is
-part of the model: a failed verification feeds back to `implement` (at most 2 loops), a rejected approval reworks
-the stage, and a re-plan invalidates downstream work and revokes approvals that no longer apply.
+part of the model: a failed verification feeds back to `implement` (at most 3 loops; only blocking findings fail
+a verification, advisory ones are reported without a loop), a rejected approval reworks the stage, and a re-plan
+invalidates downstream work and revokes approvals that no longer apply.
 
 <p align="center"><img src="docs/images/governance-loop.svg" width="100%" alt="Controlled autonomy loop: requirement, policy screen at run start, stage agent bounded by retries and budgets, artifact validation, exit gate, optional human approval, acceptance into context with hash and provenance; denials and exhausted failures lead to rollback and safe-stop."></p>
 
@@ -69,7 +99,7 @@ would not roll back, or write outside their per-run sandbox; a sandbox build run
 metacharacters and without credential-like environment variables. The release gate cannot be configured away: it
 is required by the `ALWAYS` exit gate, by rule CHG-002 and, in `FULL_AUTO`, by GOV-003.
 
-**Budgets bound autonomy:** 40 agent calls, 600 000 LLM tokens, 2 h of active time, 2 feedback loops and
+**Budgets bound autonomy:** 40 agent calls, 600 000 LLM tokens, 2 h of active time, 3 feedback loops and
 3 re-plans per run by default. A breach safe-stops the run; only an explicit human resume grants one more default
 allowance, and the audit log records it.
 
@@ -81,14 +111,14 @@ metrics definitions, each with the class and the test that proves it).
 ## Quick start
 
 **Prerequisites:** JDK 25 (for example Eclipse Temurin 25) on the `PATH` or in `JAVA_HOME`. Maven is not needed:
-the wrapper downloads Maven 3.9.16. Optional: Docker (PostgreSQL profile, container images), an
-`ANTHROPIC_API_KEY`, a local [Ollama](https://ollama.com) with `qwen2.5-coder:7b`, and `curl` plus Python 3 for
-`scripts/demo.sh`.
+the wrapper downloads Maven 3.10.0. Optional: Docker (PostgreSQL profile, container images, the Redis integration
+tests), an `ANTHROPIC_API_KEY`, a local [Ollama](https://ollama.com) with `qwen2.5-coder:7b`, and `curl` plus
+Python 3 for `scripts/demo.sh`.
 
 ```bash
 git clone https://github.com/gaddagada/agentic-sdlc-url-shortener.git
 cd agentic-sdlc-url-shortener
-./mvnw -B verify          # builds all three modules and runs all 768 tests (Windows: mvnw.cmd -B verify)
+./mvnw -B verify          # builds all three modules and runs all 960 tests (Windows: mvnw.cmd -B verify)
 ```
 
 Start both applications from the repository root, in two terminals. The orchestrator finds the `url-shortener`
@@ -123,6 +153,11 @@ builds the jars without running the tests.
 4. The run completes. Inspect the **Audit** tab (89 events in the run recorded for the docs), the **Lineage** tab (which artifact
    version was derived from which) and the **Metrics** tab.
 
+<p align="center"><img src="docs/images/console-walkthrough.gif" width="100%" alt="Animated console walkthrough of a deterministic greenfield run: scenario selection and Run, intake, decompose and impact in parallel, design waiting for approval with the GOV-001 reason on the pending action card, the design artifact, approval, implement and test-design in parallel, verify, document and security-scan, the CHG-002 release gate, approval, the completed run with 10 of 10 stages, the lineage and the metrics tabs."></p>
+<p align="center"><sub>Recorded from a live deterministic greenfield run (25 s, 960x720). The stage timings visible in
+the recording are inflated: the run was slowed down with a debugger breakpoint so that the intermediate states stay
+on screen. Without it the deterministic stages take well under a second of active time.</sub></p>
+
 <p align="center"><img src="docs/images/screenshots/console-overview.png" width="100%" alt="Operator console showing a completed brownfield run: status banner with timing and budget usage, run controls, the pipeline graph with all ten stages succeeded, and the rendered requirement specification."></p>
 
 | Clarification before planning (ambiguous scenario) | Policy denial before any agent runs |
@@ -150,12 +185,12 @@ Deterministic runs finish in a few seconds plus the time humans take to approve.
 
 ## Scenarios
 
-<p align="center"><img src="docs/images/scenarios.svg" width="100%" alt="The three required scenarios: greenfield (build the shortener, no workspace), brownfield (bulk link creation over the indexed source tree) and ambiguous (clarification before planning), each with its decomposition, orchestration and validation."></p>
+<p align="center"><img src="docs/images/scenarios.svg" width="100%" alt="The three core scenarios: greenfield (build the shortener, no workspace), brownfield (bulk link creation over the indexed source tree) and ambiguous (clarification before planning), each with its decomposition, orchestration and validation."></p>
 
 | Key | What it demonstrates | Observed in live runs (deterministic agents, 2026-10-30) |
 |---|---|---|
 | `greenfield` | Build the shortener from scratch in `GUIDED` autonomy, no workspace | pauses at `design` (GOV-001, risk HIGH) and `release-readiness` (CHG-002); 10 agent calls, 89 audit events, decision `GO_WITH_CONDITIONS` |
-| `brownfield` | Bulk link creation in the existing service; impact analysis over the indexed `url-shortener` source | `LinkController` and `LinkService` identified as the components to extend; their neighbours flagged as regression risks; same two approvals |
+| `brownfield` | Bulk link creation in the existing service; impact analysis over the indexed `url-shortener` source | `LinkController` and `LinkService` identified as the components to extend; their neighbours flagged as regression risks; same two approvals (recorded before the shortener had its own bulk endpoint, see [SCENARIOS.md](docs/SCENARIOS.md#2-brownfield-bulk-link-creation)) |
 | `ambiguous` | "Make the shortener faster and more reliable." | ambiguity score 0.90: pauses at intake with 4 questions (with suggested answers); after the answers it is classified `BROWNFIELD` with ambiguity 0.00 |
 | `policy-denial` | A requirement to remove URL validation and store full client IPs | created `SAFE_STOPPED` / `POLICY_DENIED` (SEC-001, CMP-002) before any agent runs; `resume` returns 409; a compliant re-plan proceeds on plan v2 |
 | `fault-retry` | Injected transient fault on `implement` (`FULL_AUTO`) | two failures, retries after 2 s and 4 s, third attempt succeeds; `retries = 2`, MTTR about 6 s |
@@ -176,11 +211,14 @@ excerpts, audit sequences and a Claude-backed run: [docs/SCENARIOS.md](docs/SCEN
 - **Artifact validation.** Every payload record validates its own invariants (ids, references, DAG shape of the
   task plan, consistency of `passed` flags with the checks). Wrong kind, unparsable or invalid output is
   `INVALID_OUTPUT`: retried with the error in the next prompt, then the deterministic fallback.
-- **Verification and security review as stages.** Seven structural checks (allowed paths, no secrets, tests per
-  production file, migration for schema changes, designed endpoints implemented, content present, traceability of
-  every functional requirement) plus an optional sandbox build; a STRIDE threat model with checks for input
-  validation, SSRF, personal data, rate limiting and secrets. A failed review turns the release into `NO_GO`, which
-  can only be approved with a written waiver.
+- **Verification and security review as stages.** Eight structural checks, nine when a codebase index is present
+  (allowed paths, no secrets, no `CREATE` over an existing file, tests per production file, tests that assert,
+  migration for schema changes, designed endpoints implemented, content present, traceability of every functional
+  requirement) plus an optional sandbox build; a STRIDE threat model with checks for input validation, SSRF,
+  personal data, rate limiting and secrets. A check is blocking or advisory: only a failed blocking check or an
+  uncovered requirement fails verification and feeds back to `implement`, while advisory findings (style, test
+  placement, optional improvements) are listed in the report without a loop. Every deterministic check is blocking.
+  A failed review turns the release into `NO_GO`, which can only be approved with a written waiver.
 - **Policy rules.** Eleven deterministic rules, evaluated at run start and at every entry and exit gate; a rule that
   throws fails closed.
 
@@ -222,7 +260,7 @@ same roles, produce the same typed artifacts and pass the same validation and ga
 | Provider | Model | Needs | How it is called |
 |---|---|---|---|
 | `deterministic` (default) | rule-based | nothing | in-process, pure functions of the stage context |
-| `anthropic` | `claude-opus-5-5` | `ANTHROPIC_API_KEY` in the orchestrator's environment | Anthropic Java SDK 3.3.0, Messages API with JSON structured outputs (the payload's JSON schema, enums included); streamed responses of up to 32 000 output tokens, 300 s request timeout, stage timeouts multiplied by 3 for LLM attempts; SDK retries off, the engine owns retries |
+| `anthropic` | `claude-opus-5-5` | `ANTHROPIC_API_KEY` in the orchestrator's environment | Anthropic Java SDK 3.3.0, Messages API with JSON structured outputs (the payload's JSON schema, enums included); streamed responses of up to 64 000 output tokens, 900 s request timeout, stage timeouts multiplied by 3 for LLM attempts; SDK retries off, the engine owns retries |
 | `ollama` | `qwen2.5-coder:7b` | Ollama at `http://localhost:11434` (`ollama pull qwen2.5-coder:7b`) | `POST /api/chat` with the JSON schema as `format`, temperature 0, 16 384-token context, 240 s timeout |
 
 - **Selecting a provider:** the **Provider** field of the console, `"provider"` in `POST /api/v1/runs`,
@@ -232,13 +270,30 @@ same roles, produce the same typed artifacts and pass the same validation and ga
 - **Fallback:** a provider error is classified (rate limits, 5xx and timeouts retryable; refusals and other 4xx
   not), retried with backoff, and after the stage's attempts the deterministic agent takes over that stage only.
   Provenance then shows `fallback:deterministic`; usage, model and prompt hash are recorded for every LLM attempt.
+- **Circuit breaker per provider:** 3 consecutive TRANSIENT, TIMEOUT or INVALID_OUTPUT failures of real provider
+  calls, counted across stages and runs, open the provider's circuit. For the next 10 minutes new attempts go
+  straight to the deterministic agent (`FALLBACK_ENGAGED`, reason `circuit open`) instead of paying their own
+  retries and timeouts; then one half-open trial closes or re-opens it. The state is in memory per engine.
+- **Source-aware stages:** in `REPO` runs the implementation, verification and security-review prompts carry the
+  current source of the impacted files under "Source of impacted files (authoritative; write diffs against exactly
+  this text)": change-set `MODIFY` targets and files named in feedback first, then `EXTEND` components, then
+  regression risks while the budget has room; at most 20 000 characters per file and 120 000 in total, cut files
+  end in `[truncated]`, and paths outside the repository, symlink escapes, secret files and binaries are refused. With
+  the sandbox enabled, `DIFF` changes are applied for real (exact, whitespace-insensitive, within 50 lines, then a
+  unique match anywhere); one hunk that does not match rejects the whole change set as `INVALID_OUTPUT`, and the
+  retry prompt names the hunk, the path and the nearest mismatch.
+- **Prompt layout:** system prompt, a run-stable context (requirement, clarification answers, accepted requirement
+  specification, codebase index) and the stage-specific part, so that a provider can cache the prefix; the prompt
+  hash covers all three. Both clients currently send the stable context and the stage part as one user message.
 - **Observed:** three live Claude-backed brownfield runs. Every analysis and design stage (requirements, task plan,
   code-grounded impact analysis, design with evaluated alternatives, test plan) succeeded on the first attempt in
   20 to 54 s each. The first run hit the then-default 200 000-token budget; the next two produced complete change
   sets (up to 51 000 streamed output tokens), had them rejected by the Claude verifier (the diffs were written
-  without the source of the modified files in view), and safe-stopped after the bounded two feedback loops for a
-  human decision instead of releasing unverified code. Ollama on a CPU took about 100 s for one intake call. See
-  [docs/SCENARIOS.md](docs/SCENARIOS.md#the-same-scenario-with-an-llm-provider).
+  without the source of the modified files in view), and safe-stopped after the then-default two feedback loops
+  for a human decision instead of releasing unverified code. That root cause is what the source-aware stages,
+  real diff application and advisory checks above address; the status of the re-run is in
+  [docs/SCENARIOS.md](docs/SCENARIOS.md#the-same-scenario-with-an-llm-provider). Ollama on a CPU took about 100 s
+  for one intake call.
 
 ---
 
@@ -248,12 +303,27 @@ same roles, produce the same typed artifacts and pass the same validation and ga
   (`[A-Za-z0-9_-]{4,32}`, reserved words rejected), optional `ttlSeconds` or `expiresAt` (at most 365 days).
 - `302 Found` with `Cache-Control: no-store`, so expiry, deactivation and analytics stay effective; `410 Gone` for
   expired or disabled links.
-- SSRF guard without DNS: http/https only, no userinfo, at most 2048 characters; rejects `localhost`, `.local`,
-  `.internal`, and IP literals in loopback, private, link-local (including `169.254.169.254`), CGNAT, multicast,
-  unspecified and reserved ranges, IPv6 unique-local, IPv4-mapped and NAT64 forms.
-- `Idempotency-Key` with replay (`Idempotent-Replayed: true`); per-client token bucket on every `POST` under
-  `/api/v1/links`, matched on the normalized path so encoded or `;`-parameter spellings cannot bypass it (20 per
-  minute; `429` with `Retry-After`, `X-RateLimit-*` headers).
+- SSRF guard: http/https only, no userinfo, at most 2048 characters; rejects `localhost`, `.local`, `.internal`,
+  and IP literals in loopback, private, link-local (including `169.254.169.254`), CGNAT, multicast, unspecified and
+  reserved ranges, IPv6 unique-local, IPv4-mapped and NAT64 forms. Optional resolve-time check
+  (`shortener.resolve-targets=true`, off by default): host names are resolved on a bounded pool (8 threads, 64 queued
+  lookups, `resolve-timeout` 2 s) and the URL is rejected with `422` when any address is non-public or the name does
+  not resolve in time; verdicts are cached for 60 s. It cannot prevent DNS rebinding (see the `UrlValidator` Javadoc).
+- Bulk creation (`POST /api/v1/links/bulk`): 1 to 100 items, each created independently like a single request;
+  per-item `CREATED` or `FAILED` results carry the single endpoint's RFC 9457 problem type and status; a later item
+  repeating an earlier item's alias fails with `alias-conflict` without being attempted.
+- `Idempotency-Key` with replay (`Idempotent-Replayed: true`) on single and bulk creation; per-client token bucket
+  (20 tokens, 20 per minute; `429` with `Retry-After`, `X-RateLimit-*` headers). The filter charges one token for
+  every `POST` under `/api/v1/links` except the exact bulk path, matched on the normalized path so encoded or
+  `;`-parameter spellings cannot bypass it; a bulk request is charged one token per item, all or nothing, after
+  validation. With the default capacity a bulk request can therefore carry at most 20 items (more get
+  `422 batch-too-large`). Buckets live in memory per node (default) or in Redis (`shortener.rate-limit.backend=redis`,
+  an atomic Lua script with the same integer arithmetic); an unreachable Redis fails open and counts
+  `shortener.rate-limit.backend.errors`.
+- Optional API key: with `shortener.security.api-key` (environment `SHORTENER_SECURITY_APIKEY`) set, every request
+  under `/api/v1/links` (decoded, normalized path) needs `X-Api-Key`, compared as SHA-256 digests in constant time
+  and checked before rate limiting; otherwise `401` with `WWW-Authenticate`. Redirects, Actuator and Swagger stay
+  public; without a key the API is open and a warning is logged at startup.
 - Click recording off the redirect path on a bounded executor (8 threads, 10 000 queued; a saturated recorder drops
   and counts the click instead of slowing redirects); visitors stored only as a daily HMAC-SHA256 of the IP keyed by
   a secret (the placeholder key is refused at startup under the `postgres` and `prod` profiles); referrer host and
@@ -264,10 +334,13 @@ same roles, produce the same typed artifacts and pass the same validation and ga
 | Method | Path | Purpose | Success | Errors |
 |---|---|---|---|---|
 | POST | `/api/v1/links` | create a short link | 201 + `Location` | 400, 409 alias taken, 422 URL rejected, 429 |
+| POST | `/api/v1/links/bulk` | create 1 to 100 links with per-item results (partial failure) | 200 | 400, 409 key in flight, 422 batch larger than the bucket or key reused, 429 |
 | GET | `/api/v1/links/{code}` | link metadata | 200 | 404 |
 | DELETE | `/api/v1/links/{code}` | deactivate (soft delete) | 204 | 404 |
 | GET | `/api/v1/links/{code}/analytics?days=7` | clicks, unique visitors, per day, top referrers, user agents (`days` 1 to 90) | 200 | 400, 404 |
 | GET | `/{code}` | redirect | 302 | 404, 410 |
+
+With an API key configured, every `/api/v1/links` route also answers `401` without a valid `X-Api-Key`.
 
 ```bash
 # create (responses abridged from a live run)
@@ -308,11 +381,13 @@ With an API key set, the console reads it from the browser's local storage
 
 ```
 agentic-sdlc-url-shortener/
-├── url-shortener/           workload service: api, service, domain, repository, config; Flyway V1__init.sql
+├── url-shortener/           workload service: api, service, domain, repository, config; Flyway V1__init.sql;
+│                            rate limiter SPI with the Redis Lua script in src/main/resources/ratelimit
 ├── orchestrator-core/       engine library, no Spring
 │   └── ...orchestrator/core graph (DAG), engine (scheduler, gates, rollback, re-plan), agent (deterministic, llm),
 │                            artifact (typed payloads, provenance), policy (11 rules), model, audit, metrics,
-│                            workspace (codebase index, impact analysis, sandbox), json, port, util
+│                            workspace (codebase index, impact analysis, impacted sources, unified diffs,
+│                            sandbox), json, port, util
 ├── orchestrator-app/        control plane: api, config, llm (Anthropic, Ollama), persistence (JPA), scenario,
 │                            security, startup, metrics; static console in src/main/resources/static
 ├── docs/                    architecture, orchestration, scenarios, testing, risks, summary, ADRs, OpenAPI, images
@@ -328,12 +403,12 @@ agentic-sdlc-url-shortener/
 |---|---|
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | components, control flow of a run, data model, threads, persistence, providers, deployment, key decisions |
 | [ORCHESTRATION.md](docs/ORCHESTRATION.md) | DAG, state machines, gates, policy, failure handling, re-planning, lineage, budgets, metrics |
-| [SCENARIOS.md](docs/SCENARIOS.md) | the seven scenarios with live artifact excerpts, audit sequences and a Claude-backed run |
+| [SCENARIOS.md](docs/SCENARIOS.md) | the seven scenarios with live artifact excerpts, audit sequences and the Claude-backed runs |
 | [TESTING.md](docs/TESTING.md) | test strategy per module, what each suite proves, how to run, CI and coverage |
 | [RISKS_AND_TRADEOFFS.md](docs/RISKS_AND_TRADEOFFS.md) | risk register, failure scenarios, trade-offs, guardrails, known limitations |
-| [ENGINEERING_SUMMARY.md](docs/ENGINEERING_SUMMARY.md) | plan and rationale, deliverables map, decisions, assumptions, limitations, next steps |
+| [ENGINEERING_SUMMARY.md](docs/ENGINEERING_SUMMARY.md) | design goals, plan and rationale, capability map, decisions, assumptions, limitations, next steps |
 | [Engineering specification](docs/design/engineering-spec.md) | the pre-implementation contract (the code is the source of truth) |
-| [ADRs 0001 to 0010](docs/adr/) | architecture decision records |
+| [ADRs 0001 to 0012](docs/adr/) | architecture decision records |
 | [orchestrator.openapi.yaml](docs/api/orchestrator.openapi.yaml), [url-shortener.openapi.yaml](docs/api/url-shortener.openapi.yaml) | committed API contracts, checked against the controllers by tests |
 | [AI_ASSISTANCE.md](docs/AI_ASSISTANCE.md) | how AI assistance was used and what the engineer owned |
 
@@ -341,12 +416,15 @@ agentic-sdlc-url-shortener/
 
 | Module | Tests | Highlights |
 |---|---|---|
-| `url-shortener` | 278 | parameterized SSRF validator cases, MockMvc and JPA slices, end-to-end integration (create, redirect, click, analytics, 410, idempotency, 429), rate-limit bypass attempts over a real servlet container, OpenAPI contract, ArchUnit layering |
-| `orchestrator-core` | 336 | engine behaviour with fake agents: latch-proven parallel branches, retries, fallback, rollback with compensations, re-plan, budgets, restart recovery, store failures; every policy rule; risk floor; deterministic agents; snapshot round trip |
+| `url-shortener` | 441 (+15 with Docker) | parameterized SSRF validator cases, including the resolve-time check against a fake resolver; MockMvc and JPA slices; end-to-end integration (create, bulk, redirect, click, analytics, 410, idempotency, 429); one rate-limiter contract run against the in-memory limiter, a Java simulator of the Redis Lua script and, with Docker, a real `redis:7-alpine` (Testcontainers, Failsafe); rate-limit and API-key bypass attempts over a real servlet container; OpenAPI contract; ArchUnit layering |
+| `orchestrator-core` | 365 | engine behaviour with fake agents: latch-proven parallel branches, retries, fallback, rollback with compensations, re-plan, budgets, restart recovery, store failures; the provider circuit breaker; advisory versus blocking checks; unified-diff application with hunk diagnostics; bounded impacted-source reading; every policy rule; risk floor; deterministic agents; snapshot round trip |
 | `orchestrator-app` | 154 | REST slices, scenarios end to end through MockMvc, approval binding after a re-plan, API-key bypass attempts over a real servlet container, atomic commit rollback, JPA store round trip and corrupt-row tolerance, Anthropic and Ollama clients against stubs; 2 skipped by default: the live Anthropic test (needs `ANTHROPIC_API_KEY`) and the opt-in OpenAPI regeneration |
 
-`./mvnw -B verify` runs everything and writes JaCoCo reports to `<module>/target/site/jacoco/index.html`. CI runs
-the same build on Java 25 and builds both container images. Details: [docs/TESTING.md](docs/TESTING.md).
+`./mvnw -B verify` runs everything and writes JaCoCo reports to `<module>/target/site/jacoco/index.html`. The 15
+Redis integration tests run only where Docker is available and are reported as skipped otherwise. Line coverage of
+the last full local build: 95.2 % (`url-shortener`), 93.2 % (`orchestrator-core`), 92.9 % (`orchestrator-app`),
+93.4 % overall. CI runs the same build on Java 25 and builds both container images. Details and how to regenerate
+the numbers: [docs/TESTING.md](docs/TESTING.md).
 
 ## Known limitations and production path
 
@@ -354,9 +432,10 @@ the same build on Java 25 and builds both container images. Details: [docs/TESTI
 |---|---|
 | Single-node engine: per-run locks and the retry scheduler are in memory | distributed lock or work queue; snapshot and audit in one PostgreSQL transaction |
 | Deterministic agents produce skeleton code (`TODO` markers), so releases end `GO_WITH_CONDITIONS`; LLM output is not guaranteed to compile | enable the sandbox build (`sdlc.engine.sandbox-enabled`, `verify-build-enabled`, off by default) inside an isolated, credential-free container |
-| Operator identity is a header (`X-Operator-Id`); the API key filter is optional; the shortener API has no authentication | OIDC identity, role-based approvals, four-eyes rule; gateway authentication for the shortener |
+| Operator identity is a header (`X-Operator-Id`); the API key filter is optional; the shortener's management API key is optional and a single shared secret | OIDC identity, role-based approvals, four-eyes rule; gateway or OIDC authentication for the shortener |
 | Policy rules and ambiguity scoring are keyword heuristics | dedicated classifiers and scanners next to the deterministic rules |
-| No DNS-time SSRF check; in-memory per-node rate limiter | egress policy or resolve-time check; shared limiter |
+| The resolve-time SSRF check is opt-in and cannot stop DNS rebinding; the shared Redis limiter fails open when Redis is down | egress policy for anything that fetches targets; alerting on `shortener.rate-limit.backend.errors` |
+| Provider circuit breakers live in memory per engine node; three consecutive provider failures (for example three invalid change sets) switch every run on that provider to the deterministic agents for 10 minutes | shared circuit state; per-run or per-role thresholds |
 | A failed `RunStore.commit` leaves the in-memory run ahead of the store | transactional outbox or single unit of work |
 | Console polls; Ollama on a CPU is slow and may hit stage timeouts (then falls back) | server-sent events; GPU-backed or hosted model |
 
