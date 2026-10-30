@@ -410,7 +410,7 @@ Threading model:
   `withLock(runId, fn)`. After every mutation the engine calls `RunStore.save(run)` and flushes
   pending audit events to `AuditSink` while still holding the lock (durability before visibility).
 - Registry eviction (bounded memory): the registry is a cache. A run that is not executing on this node
-  (not RUNNING, no in-flight attempt, no lease held, last commit succeeded) is evicted after
+  (not RUNNING, no in-flight attempt, no lease held or pending release) is evicted after
   `EngineConfig.registryRetention` (default 1 h) without a change; terminal runs (COMPLETED, ABORTED) beyond
   `registryMaxTerminalRuns` (default 500) are evicted least recently ended first. Eviction runs after every
   command, in `list()` and on `evictIdleRuns()`. No data is lost: `get` falls back to `RunStore.load`, `list`
@@ -418,9 +418,11 @@ Threading model:
   on an evicted run loads it again first (rehydration).
 - Run leases (multi-node): a `RunLeaseProvider` (port, default `InMemoryRunLeaseProvider`) leases a run to
   the node (`EngineConfig.nodeId`) that executes its stages, from the command or event that schedules work
-  until the run waits for a human, is safe-stopped or ends. It is renewed at every mutation and every
-  `leaseTtl / 3` (default TTL 60 s) while an attempt runs. A mutation of a run leased by another node throws
-  `RunLeasedElsewhereException` (an `InvalidRunStateException`, HTTP 409); reads need no lease. After
+  until the run waits for a human, is safe-stopped or ends. It is renewed at every mutation, right before every
+  commit and every `leaseTtl / 3` (default TTL 60 s) while an attempt runs; a node that lost the lease writes
+  nothing. A failed commit is reported as an `InvalidRunStateException` and discards the mutation (the run leaves
+  the registry and is reloaded from the store by the next command or read). A mutation of a run leased by another
+  node throws `RunLeasedElsewhereException` (an `InvalidRunStateException`, HTTP 409); reads need no lease. After
   acquiring a lease the engine reloads the run if the store holds a newer state; an expired lease can be
   taken over; `close()` releases the node's leases and `recoverInterrupted()` skips runs leased by a live
   node. `nodeId` is recorded in RUN_CREATED, RUN_RESUMED, REPLAN, RUN_INTERRUPTED and STAGE_STARTED data.
@@ -506,7 +508,8 @@ Threading model:
   events as a `ChainVerification`. `InMemoryAuditSink` rejects a batch that does not continue the stored
   chain. Engine messages are capped at 2000 characters before hashing.
 - `EngineListener` (optional callback) receives `onRunChanged(Run)` after each mutation so the app can
-  push updates (not required by the UI, which polls).
+  push updates. (Implemented differently: the console's server-sent events are fed by the JPA store after each
+  commit, not by this listener; the console polls only as a fallback; ADR 0017.)
 
 ### 5.6 Stage agents and artifact payloads
 
@@ -1025,14 +1028,16 @@ com.agenticsdlc.orchestrator.app
 ### 6.2 REST API (`/api/v1`)
 
 All mutating governance endpoints require header `X-Operator-Id` (1..64 chars, `[A-Za-z0-9._@-]+`);
-missing -> `400` Problem Detail `operator identity required`. When `sdlc.security.api-key` is set, all
+missing -> `400` Problem Detail `operator identity required`. (Implemented later: in `oidc` mode the operator id is
+the identity claim of the verified token, the header is optional and must match it, and every endpoint requires a
+role; see ADR 0015.) When `sdlc.security.api-key` is set, all
 `/api/**` requests require `X-Api-Key` to match (else `401`); when empty the filter logs a WARN once
 at startup ("API authentication disabled: local development mode").
 
 | Method | Path | Body / params | Response |
 |---|---|---|---|
 | POST | `/api/v1/runs` | `CreateRunRequest { requirement (10..4000 chars), scenario? (default "custom"), autonomy? (default GUIDED), provider? , faults?: [{stageId, failTimes, kind}], workspace? (REPO default; NONE), budget?: {maxFeedbackLoops?, maxReplans?, maxAgentCalls?, maxLlmTokens?} }` | `201` + `Location` + `RunView` |
-| GET | `/api/v1/runs` | - | `List<RunSummaryView { id, scenario, status, haltReason, requirement (truncated 120), planVersion, createdAt, updatedAt, pendingActions (count), progress { succeeded, total } }>` newest first |
+| GET | `/api/v1/runs` | `page` (0), `size` (1..200, default 50), `status` (repeatable), `scenario`, `startedBy`, `sort` (`<field>[,asc\|desc]`, default `updatedAt,desc`) | `RunPageView { items: [RunSummaryView { id, scenario, status, haltReason, requirement (truncated 200), planVersion, createdAt, updatedAt, endedAt, autonomy, workspace, startedBy, riskLevel, nodeId, pendingActions, progress { succeeded, total } }], page, size, total, totalPages, sort }`, read from the listing columns of `runs` (ADR 0017; this replaced a bare array) |
 | GET | `/api/v1/runs/{id}` | - | `RunView` (section 6.3) |
 | GET | `/api/v1/runs/{id}/graph` | - | `GraphView { nodes: [{ id, name, status, layer, role, activeAgent, attempts, approval: ApprovalView?, artifactVersion }], edges: [{from, to}] }` |
 | GET | `/api/v1/runs/{id}/artifacts` | - | `List<ArtifactSummaryView { id, stageId, kind, version, hash, accepted (boolean), createdAt, provenance }>` |
@@ -1146,7 +1151,7 @@ LLM client an `LlmStageAgent` per role. `ProviderController` reports availabilit
 | key | kind | requirement (verbatim) | autonomy | workspace | faults |
 |---|---|---|---|---|---|
 | `greenfield` | GREENFIELD | "Build a URL shortener service: create short links for HTTP and HTTPS URLs with optional expiry, redirect with HTTP 302, record click analytics (total clicks, clicks per day, top referrers) and expose health checks. The p95 redirect latency must be under 50 ms at 500 requests per second. Links default to no expiry. The service must prevent redirects to private networks." | GUIDED | NONE | - |
-| `brownfield` | BROWNFIELD | "Add a bulk link creation API to the existing URL shortener: accept up to 100 URLs per request, return per-item results with partial-failure semantics, reuse the existing URL validation and custom alias rules, and respect the existing per-client rate limit. Existing single-link endpoints and analytics must keep working unchanged." | GUIDED | REPO | - |
+| `brownfield` | BROWNFIELD | "Add campaign labels to the existing URL shortener. A link created through POST /api/v1/links or POST /api/v1/links/bulk may carry an optional campaign label (1 to 64 characters: letters, digits, dash, underscore) that is stored with the link. GET /api/v1/analytics/campaigns/{campaign} returns the number of links and the total and per-day clicks of that campaign over the last 30 days. Existing links without a label keep working, and the schema change ships as a new Flyway migration." (until commit `11499c0` the requirement asked for a bulk link creation API, which the shortener has implemented since `cef62d5`) | GUIDED | REPO | - |
 | `ambiguous` | AMBIGUOUS | "Make the shortener faster and more reliable." | GUIDED | REPO | - |
 | `policy-denial` | POLICY_DENIAL | "Remove URL validation so marketing can shorten any destination including internal IP addresses, and store the full client IP address with every click for attribution." | GUIDED | REPO | - |
 | `fault-retry` | FAULT_RETRY | greenfield requirement | FULL_AUTO | NONE | implement: failTimes 2, TRANSIENT |
@@ -1198,7 +1203,9 @@ Each scenario has a `walkthrough` list of human-readable steps the console shows
 
 Files: `orchestrator-app/src/main/resources/static/index.html`, `app.js`, `styles.css`. Vanilla
 ES2022, no frameworks, no CDN (must work offline). Polls `GET /api/v1/runs` every 3 s and the selected
-run's `RunView`, `graph`, `audit?afterSeq=`, `artifacts` every 2 s. Operator id is entered once
+run's `RunView`, `graph`, `audit?afterSeq=`, `artifacts` every 2 s. (Implemented later: the console reads the
+server-sent event streams `GET /api/v1/runs/events` and `GET /api/v1/runs/{id}/events` and polls only while a
+stream is down, for runs held by another node and every 30 s as a safety net; ADR 0017.) Operator id is entered once
 (top-right) and stored in `localStorage` (`sdlc.operatorId`), sent as `X-Operator-Id`.
 
 Layout:
@@ -1256,7 +1263,8 @@ end-to-end with approvals and print the metrics.
 Written after implementation so that every statement is true of the code: `README.md` (what, why,
 quick start, demo, repository map), `docs/ARCHITECTURE.md`, `docs/ORCHESTRATION.md`,
 `docs/SCENARIOS.md`, `docs/TESTING.md`, `docs/RISKS_AND_TRADEOFFS.md`, `docs/ENGINEERING_SUMMARY.md`,
-`docs/AI_ASSISTANCE.md`, `docs/api/*.openapi.yaml`, `docs/adr/*.md` (ten ADRs listed in section 11).
+`docs/AI_ASSISTANCE.md`, `docs/api/*.openapi.yaml`, `docs/adr/*.md` (the ten ADRs listed in section 11, and
+ADRs 0011 to 0018 added after implementation).
 
 ---
 
@@ -1270,8 +1278,14 @@ quick start, demo, repository map), `docs/ARCHITECTURE.md`, `docs/ORCHESTRATION.
 6. Aggregate-snapshot persistence (JSON) plus append-only audit and artifact tables.
 7. Virtual threads for stage execution; per-run lock for state transitions.
 8. Shortener: 302 redirects, random Base62 codes, salted IP hashing, no DNS-time SSRF check.
-9. Prototype security: API-key filter and mandatory operator identity; production path is SSO/OIDC.
+9. Prototype security: API-key filter and mandatory operator identity; production path is SSO/OIDC (superseded
+   for the control plane by ADR 0015).
 10. Java 25 and Spring Boot 4.1 as the baseline.
+
+ADRs 0011 to 0018 were written after implementation: source-aware prompts and diff application (0011), the
+shortener's bulk API and rate limiter SPI (0012), hash-chained audit and signed change records (0013), run leases
+(0014), authentication modes and roles (0015), policy packs (0016), server-sent events and paged listing (0017), the
+evaluation harness and cost model (0018).
 
 ---
 
@@ -1283,7 +1297,7 @@ quick start, demo, repository map), `docs/ARCHITECTURE.md`, `docs/ORCHESTRATION.
   stop/resume) only after its lease expires.
 - Deterministic agents produce skeleton code, not compilable features; LLM mode produces full
   content but is not guaranteed to compile; the optional sandbox build is the validation path.
-- No DNS-resolution SSRF check in the shortener; no distributed rate limiter; no authentication on
-  the shortener API (documented production path).
-- Operator identity is asserted by header, not authenticated (prototype).
-- Console polls; no server push.
+- The shortener's DNS-resolution SSRF check, Redis rate limiter and API key exist since ADR 0012 but are opt-in.
+- Operator identity is asserted by header in the `open` and `api-key` modes; `oidc` mode (the `prod` profile)
+  authenticates it (ADR 0015).
+- The console's event streams carry only the serving node's commits; it polls the rest (ADR 0017).

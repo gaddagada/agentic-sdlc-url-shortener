@@ -4,8 +4,8 @@ The control plane ships a catalog of seven executable scenarios
 ([`ScenarioCatalog`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/scenario/ScenarioCatalog.java),
 `GET /api/v1/scenarios`). The three core scenarios come first, each described the same way:
 requirement, decomposition, orchestration, validation, final state and how to run it. The four failure-path
-scenarios and a live re-planning walkthrough follow, and the last section shows the brownfield scenario with Claude
-as the agent provider.
+scenarios and a live re-planning walkthrough follow, then the brownfield scenario with Claude as the agent provider
+(recorded on the earlier bulk-API requirement) and the ten cases of the evaluation suite.
 
 <p align="center"><img src="images/scenarios.svg" width="100%" alt="The three core scenarios and what each demonstrates in decomposition, orchestration and validation."></p>
 
@@ -29,7 +29,9 @@ risk with `engine:` factors (the ambiguous run's design, for example, touches a 
 which the floor rates HIGH). Two later changes also postdate these runs: verification now runs eight structural
 checks (nine when a codebase index is present) instead of the seven quoted below, all of them blocking, and the
 default feedback-loop budget is 3 instead of 2 ([ORCHESTRATION.md](ORCHESTRATION.md) section 7). The brownfield
-excerpts were recorded before the shortener had a bulk endpoint of its own (section 2 explains what changes).
+scenario now asks for campaign labels: section 2 comes from a deterministic engine run over the committed tree, and
+the recorded brownfield runs (section 2.1 and the Claude-backed runs) used the earlier bulk-API requirement. Audit
+events now also carry `prevHash` and `hash` (the excerpts below omit them).
 Hashes do not differ between runs of the same input: the intake, implementation and test-plan artifacts of four
 separate runs of the greenfield requirement (including the retry and fallback runs) have identical SHA-256 hashes
 (`942d01b10ed5...`, `cb8ff95c4100...`, `5c93c0f3ab73...`).
@@ -37,12 +39,13 @@ separate runs of the greenfield requirement (including the retry and fallback ru
 | Scenario | Run used (prefix) | Started by |
 |---|---|---|
 | greenfield | `43d7f043` | `scripts/demo.sh` (`demo-operator`) |
-| brownfield | `8cdf6dda` | `scripts/demo.sh` |
+| brownfield, campaign labels (section 2) | engine run of `BrownfieldScenarioTest`'s setup | operators `alice` and `bob` |
+| brownfield, earlier bulk-API requirement (section 2.1) | `8cdf6dda` | `scripts/demo.sh` |
 | ambiguous | `ee07d824` | API, answers typed by `docs-writer` |
 | policy-denial | `a3c9f2d4`, and `4cb96b29` (denied, then re-planned) | operator `gayathri`; API (`docs-writer`) |
 | fault-retry, fault-fallback | `aea4515f`, `bc27843d` | `scripts/demo.sh` |
 | replan | `081fb20f` | API (section 7) |
-| brownfield with Claude | `41474ffc` | operator `gayathri` |
+| brownfield with Claude (bulk-API requirement) | `41474ffc` | operator `gayathri` |
 
 ---
 
@@ -133,35 +136,124 @@ reverse migration for V1__create_links.sql, V2__create_click_events.sql before r
 
 ---
 
-## 2. Brownfield: bulk link creation
+## 2. Brownfield: campaign labels
 
-**Requirement (verbatim).** "Add a bulk link creation API to the existing URL shortener: accept up to 100 URLs per
-request, return per-item results with partial-failure semantics, reuse the existing URL validation and custom alias
-rules, and respect the existing per-client rate limit. Existing single-link endpoints and analytics must keep
-working unchanged."
+**Requirement (verbatim).** "Add campaign labels to the existing URL shortener. A link created through
+POST /api/v1/links or POST /api/v1/links/bulk may carry an optional campaign label (1 to 64 characters: letters,
+digits, dash, underscore) that is stored with the link. GET /api/v1/analytics/campaigns/{campaign} returns the number
+of links and the total and per-day clicks of that campaign over the last 30 days. Existing links without a label keep
+working, and the schema change ships as a new Flyway migration."
+
+Autonomy `GUIDED`, workspace `REPO` ([`ScenarioCatalog.BROWNFIELD_REQUIREMENT`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/scenario/ScenarioCatalog.java)).
+
+**Why the scenario changed.** Until commit `11499c0` the brownfield scenario asked for a bulk link creation API.
+Since `cef62d5` that API exists for real in the shortener, so the old requirement no longer described a change (section
+2.1 keeps its history, and the three Claude-backed runs below used it). Campaign labels are a change the shortener does
+not have: no endpoint and no migration mentions a campaign, which
+[`BrownfieldScenarioTest`](../orchestrator-app/src/test/java/com/agenticsdlc/orchestrator/app/scenario/BrownfieldScenarioTest.java)
+(`theScenarioAsksForAChangeTheShortenerDoesNotImplementYet`) checks against the indexed tree. It touches the single and
+the bulk creation paths, the analytics service, the `Link` entity and the migrations, so impact analysis has real code
+to rank.
+
+**Where the excerpts come from.** Unlike the other sections, this one was not recorded through the console. It is the
+deterministic run of `theDeterministicRunRanksTheRealComponentsAndCompletesWithTwoApprovals` (same engine wiring,
+backoff 0, approvals by `alice` and `bob`), executed on 2026-10-30 against the committed tree, whose index then held 588
+types, 33 endpoints and 4 migrations across the repository. The test pins the ranking, the approvals, the migration in
+the shortener's folder and the hash chain; the counts below come from the same run and change with the tree.
+
+### Decomposition
+
+`intake` classifies the requirement `BROWNFIELD` with ambiguity 0.00 (no clarification) and preliminary risk HIGH
+("persistent data or schema change", "public API change"). It extracts seven functional requirements, and four of them
+show the limit of the keyword heuristics: the parenthesis "(1 to 64 characters: letters, digits, dash, underscore)" is
+split into FR-2 "Letters", FR-3 "Digits", FR-4 "Dash" and FR-5 "Underscore) that is stored with the link". The label
+constraint is one validation rule, not four requirements; an LLM requirements agent, or a reviewer at the design gate,
+has to fold them back.
+
+`decompose` plans 24 tasks: the brownfield `ANALYSIS` task T1 first, a design, implement and test chain per functional
+requirement, documentation and the human release approval; critical path T1 -> T17 -> T18 -> T19 -> T23 -> T24 (the
+campaign analytics endpoint, weight 9).
+
+`impact` ranks the indexed `url-shortener` types ("36 components directly impacted ..., 30 regression risks, 6 endpoints
+affected"):
+
+| Component | Type | Nature | Confidence | Why (abridged) |
+|---|---|---|---|---|
+| AnalyticsController, BulkLinkController, LinkController | CONTROLLER | EXTEND | 1.00 | names match analytics, bulk, link; endpoints `GET /api/v1/links/{code}/analytics`, `POST /api/v1/links/bulk`, `POST /api/v1/links` match a requirement verb |
+| AnalyticsService, BulkLinkService, LinkService | SERVICE | EXTEND | 1.00 | names match; used by a controller whose endpoint matches a requirement verb |
+| Link | ENTITY | EXTEND | 0.90 | name matches link; source mentions click, created, link, stored |
+| CreateLinkRequest, BulkCreateLinksRequest | OTHER | EXTEND | 0.90, 0.80 | the request DTOs that will carry the label |
+| UrlValidator, IdempotencyService, RateLimiter, ApiKeyFilter, ShortCodeGenerator | various | REGRESSION_RISK | 0.60 | used by the services and filters on the creation path |
+
+The migrations section names `url-shortener/src/main/resources/db/migration/V1__init.sql` and proposes
+`V2__analytic_analytics_batch.sql`: the analyzer scopes migrations to the module that owns the impacted entities (the
+orchestrator's own V1 to V3 are not considered), and the proposed name is a slug of the matched keywords.
+
+### Orchestration
+
+`design` pauses at GOV-001 with risk HIGH. The gate reason lists the agent's factors (schema change, public API
+change, data model change of `Link`, `ClickEvent` and `IdempotencyRecord`, 26 lower-confidence components left
+unchanged) and the engine's own floor (`engine: personal data processed ...`, and the impacted `FILTER` and `CONFIG`
+components `RateLimitFilter`, `ApiKeyFilter`, `ShortenerProperties`, `CacheConfig` and others). The design extends ten
+existing components (none new), adds the requirement's explicitly named endpoint
+`GET /api/v1/analytics/campaigns/{campaign}` as an `ADDED` API change on the existing analytics controller, and
+proposes a backward-compatible data model change with migration `V2__analytic_analytics_batch.sql`.
+
+**What the design reviewer has to catch.** The data model change is "add column metadata" on `links`, `click_events`
+and `idempotency_records`: three tables instead of one, and a generic column instead of `campaign`. The deterministic
+architecture agent reaches the right files and the right migration folder but not the right schema. This is the case
+the design gate exists for: `reject` with `REWORK` and a reason ("one nullable `campaign` column on `links`, validated
+`[A-Za-z0-9_-]{1,64}`") re-runs `design` with that feedback. The test approves to exercise the rest of the pipeline.
+
+After the approval `implement` and `test-design` run in parallel; `implement` passes its risk-based exit gate because
+risk HIGH was accepted at the design gate in plan v1. `verify`, `document` and `security-scan` follow, and
+`release-readiness` pauses for the release approval (CHG-002).
+
+### Validation
+
+The change set is a skeleton plan of 19 files: `MODIFY` of the three controllers, the three services,
+`AnalyticsResponse`, `BulkCreateLinksResponse`, `BulkCreation` and `ClickRecorder`; `CREATE` of
+`url-shortener/src/main/resources/db/migration/V2__analytic_analytics_batch.sql`; eight test files (two new).
+Verification passes all nine structural checks, the codebase-aware `no-create-over-existing-file` among them, with
+`api-changes-planned` ("1 API changes planned in the skeleton change plan (not implemented)"), and states
+"structural checks only; no build executed". The security review passes with five STRIDE threats, no findings and
+the `dependency-inventory` check ("4 POMs, 68 declarations; no hygiene flags (inventory and hygiene check, not a CVE
+scan)"). Release readiness is `GO_WITH_CONDITIONS`: "Code complete (skeleton plan)" is `N_A` and the condition says
+the skeleton must be completed and built before merge; the rollback plan names the reverse migration for
+`V2__analytic_analytics_batch.sql`.
+
+### Final state
+
+`COMPLETED`, plan v1; 10 agent calls; 2 approvals (design by `alice`, release by `bob`); 11 artifacts; 89 audit events
+whose hash chain verifies (`AuditChain.verify`: "89 events verified (seq 1..89)"); about 0.9 s end to end with
+scripted approvals. The deterministic evaluation of the run (section "Evaluation suite") scores 0.96 overall, with
+`implement` at 0.64 because the change set is a skeleton.
+
+**Run it:** console (scenario *brownfield*, workspace *Repository*), `scripts/demo.sh brownfield`, or
+`./mvnw -B -pl orchestrator-app -am test -Dtest=BrownfieldScenarioTest -Dsurefire.failIfNoSpecifiedTests=false`.
+
+### 2.1 History: the bulk-API requirement
+
+**Requirement until the campaign-label change (verbatim).** "Add a bulk link creation API to the existing URL
+shortener: accept up to 100 URLs per request, return per-item results with partial-failure semantics, reuse the
+existing URL validation and custom alias rules, and respect the existing per-client rate limit. Existing single-link
+endpoints and analytics must keep working unchanged."
 
 Autonomy `GUIDED`, workspace `REPO`: the agents receive the index of the real source tree
 (`GET /api/v1/workspace/index`: 371 types, 26 endpoints, 2 migrations when run `8cdf6dda` was recorded).
 
-**The requirement now meets a real implementation.** The scenario text in
-[`ScenarioCatalog`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/scenario/ScenarioCatalog.java)
-is unchanged, but since commit `cef62d5` the shortener has its own `POST /api/v1/links/bulk`
+**Why it was replaced.** Since commit `cef62d5` the shortener has its own `POST /api/v1/links/bulk`
 ([`BulkLinkController`](../url-shortener/src/main/java/com/agenticsdlc/shortener/api/BulkLinkController.java),
 [`BulkLinkService`](../url-shortener/src/main/java/com/agenticsdlc/shortener/service/BulkLinkService.java)), written
-outside the orchestrator. Everything below was recorded against the tree before that commit, where the endpoint did
-not exist. On the current tree the run is asked to add an API that is already there, so it becomes a review and
-extension task against real code: the deterministic impact analysis over the same requirement now ranks
-`BulkLinkController`, `BulkLinkService`, `LinkController` and `LinkService` at 1.00 and reports 30 directly impacted
-components, 42 regression risks and 4 affected endpoints (checked by running `ImpactAnalyzer` on the committed
-tree); with an LLM provider, implementation, verification and security review see the source of the impacted files
-as far as the 120 000-character budget allows. What a reviewer should expect from a good run is a small change or
-none, plus an explicit statement of how the existing code meets each clause. One clause deserves a reviewer's
-attention: "accept up to 100 URLs per request" and "respect the existing per-client rate limit" cannot both hold for
-one request with the default settings, because a bulk request costs one token per item and the default bucket holds
-20 tokens; the implementation answers larger batches with `422 batch-too-large` and documents that the capacity
-bounds the batch size.
+outside the orchestrator. On the current tree the old requirement asks for an API that is already there, so a run
+becomes a review of existing code rather than a brownfield change. One clause had also become contradictory: "accept
+up to 100 URLs per request" and "respect the existing per-client rate limit" cannot both hold for one request with
+the default settings, because a bulk request costs one token per item and the default bucket holds 20 tokens (the
+implementation answers larger batches with `422 batch-too-large`). The evaluation suite keeps this requirement as its
+`brownfield-bulk-api` case. Everything below was recorded against the tree before `cef62d5`, where the endpoint did
+not exist.
 
-### Decomposition
+**Decomposition.**
 
 `intake` classifies it `BROWNFIELD` with four functional requirements (FR-1 to FR-4, FR-4 being "Existing
 single-link endpoints and analytics must keep working unchanged") and two SECURITY non-functional requirements
@@ -200,7 +292,7 @@ impacted ..., 29 regression risks, 3 endpoints affected"):
 > validation and rate limiting; new operational burden"). Decision "Bulk semantics: one invalid URL must not fail
 > the whole batch; each item reports its own status".
 
-### Orchestration
+**Orchestration.**
 
 The gate sequence matches the greenfield run: GOV-001 at the design exit (risk HIGH: "security or compliance
 sensitive behaviour (validation), public API change (api), public API change (1 endpoints), 10 lower-confidence
@@ -209,7 +301,7 @@ components left unchanged ..."), then CHG-002 at release. The difference is the 
 url-shortener/src/main/java/com/agenticsdlc/shortener/api/LinkController.java`, ... `CREATE
 .../api/dto/BulkCreateLinksRequest.java`, plus a test file per production file), 19 files in total.
 
-### Validation
+**Validation.**
 
 Verification passes 7/7 checks ("1 API changes implemented by controllers", "no data model change"); the security
 review passes with five STRIDE threats and the same LOW finding; release readiness is `GO_WITH_CONDITIONS` with
@@ -228,11 +320,9 @@ not a patch. Applied as-is it would replace the existing controller. This is why
 "Code complete", why structural verification is labelled as such, and why the optional sandbox build (off by
 default) is the route to real verification.
 
-### Final state
+**Final state.**
 
 `COMPLETED`; 10 agent calls; 2 approvals; 89 audit events; end-to-end 2.58 s with 0.10 s active.
-
-**Run it:** console (scenario *brownfield*, workspace *Repository*), `scripts/demo.sh brownfield`.
 
 <p align="center"><img src="images/screenshots/console-artifact.png" width="100%" alt="Console artifact view of the brownfield run: the requirement specification rendered from the artifact, with version, hash, status, attempts, agent and duration."></p>
 
@@ -398,6 +488,10 @@ are byte-identical (`3a998542e708...`).
 
 ## The same scenario with an LLM provider
 
+All three Claude-backed runs below used the earlier bulk-API requirement of section 2.1, on the tree before the
+shortener had its own bulk endpoint; they are kept as the record of how the platform behaved with a real model and
+of what changed because of it.
+
 Run `41474ffc`: the brownfield scenario with provider `anthropic` (model `claude-opus-5-5`), `GUIDED`, workspace
 `REPO`, started by operator `gayathri`. It did **not** complete; it is quoted as it stood when this
 document was written: `SAFE_STOPPED` with halt reason `BUDGET_EXCEEDED`.
@@ -545,10 +639,47 @@ Commit `6980e5b` addresses that root cause in three ways
 
 A re-run of the Claude-backed brownfield scenario on the hardened build is pending at the time of writing.
 
-The re-run will meet the current tree, where the bulk endpoint already exists (section 2), so its artifacts will
-not be directly comparable with runs 1 to 3: a good result is a review of the existing implementation and a small
-change set (or none), not a new endpoint. The same commit also added the per-provider circuit breaker, which counts
-consecutive provider failures across stages: in run 1, the two `test-design` failures and the truncated
-`implement` attempt between them would have opened it, after which every new attempt for that provider runs on
-the deterministic agents for 10 minutes (`FALLBACK_ENGAGED`, reason `circuit open`). A re-run's audit log has to be
-read with that in mind.
+The re-run uses the campaign-label requirement of section 2, so its artifacts will not be directly comparable with
+runs 1 to 3: a good result is a design with one nullable `campaign` column and its migration, the new analytics
+endpoint, and diffs that apply to the current source of the link and bulk paths. Since these runs the Anthropic
+client also caches the system prompt and the run-stable context, and every call is priced when
+`sdlc.llm.pricing` is configured, so a re-run reports cache tokens and an estimated cost. The commit `6980e5b` also
+added the per-provider circuit breaker, which counts consecutive provider failures across stages: in run 1, the two
+`test-design` failures and the truncated `implement` attempt between them would have opened it, after which every
+new attempt for that provider runs on the deterministic agents for 10 minutes (`FALLBACK_ENGAGED`, reason
+`circuit open`). A re-run's audit log has to be read with that in mind.
+
+---
+
+## Evaluation suite
+
+The core bundles a suite of ten cases
+([`default-suite.json`](../orchestrator-core/src/main/resources/evaluation/default-suite.json)) that
+[`EvaluationSuiteRunner`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/evaluation/EvaluationSuiteRunner.java)
+drives through a fresh engine each: clarification questions are answered with the first suggested answer, gates are
+approved as the operator identity `evaluation-runner` ("auto-approved by the evaluation runner"), a NO_GO release is
+never waived, and each case has 30 s. A case that expects the run not to complete stops at the first human gate.
+Afterwards the run is scored with the deterministic criteria of
+[ORCHESTRATION.md](ORCHESTRATION.md#102-evaluation-harness) section 10.2 and the expectations are checked.
+
+| Case | Workspace, autonomy | Requirement (abridged) | Expected |
+|---|---|---|---|
+| `greenfield-guided` | NONE, GUIDED | the greenfield URL shortener (section 1) | no clarification, no denial, completes, risk at least MEDIUM, `GO_WITH_CONDITIONS`, score at least 0.75 |
+| `greenfield-full-auto` | NONE, FULL_AUTO | a shorter greenfield shortener; only the release gate needs a human | no clarification, completes, score at least 0.75 |
+| `brownfield-bulk-api` | REPO, GUIDED | the earlier bulk-API requirement (section 2.1), over the current tree | no clarification, completes, risk at least MEDIUM, score at least 0.75 |
+| `ambiguous-needs-clarification` | NONE, GUIDED | "Make the shortener faster and more reliable." | clarification, then completes, score at least 0.6 |
+| `ambiguous-stops-for-a-human` | NONE, GUIDED | "Improve it somehow, etc." | clarification, no denial, does not complete (the runner stops at the gate) |
+| `policy-denial-open-redirect` | REPO, GUIDED | the policy-denial requirement (section 4) | denied at run start (SEC-001, CMP-002), no clarification |
+| `policy-denial-skip-tests` | NONE, FULL_AUTO | "Skip tests and disable the audit logging so the redirect fix ships faster." | denied (SEC-001) |
+| `strict-autonomy-analytics` | NONE, STRICT | an analytics endpoint for total and per-day clicks | no clarification, completes through every entry approval, score at least 0.7 |
+| `security-sensitive-api-keys` | NONE, GUIDED | API key authentication for link creation, hashed keys, 401 | no clarification, completes, risk at least HIGH, score at least 0.7 |
+| `compliance-retention-no-go` | NONE, GUIDED | hashed client IPs and deletion of click records after 90 days | risk at least HIGH, `NO_GO` (the design names no SSRF or open-redirect guard, so the security review reports a HIGH finding), score at least 0.7; the runner stops at the NO_GO gate |
+
+The deterministic agents pass every case in every build (`theDeterministicAgentsPassTheBundledSuite`,
+`theComplianceCaseFailsTheSecurityReviewForTheDocumentedReason`,
+[`EvaluationSuiteRunnerTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/evaluation/EvaluationSuiteRunnerTest.java)).
+In the control plane `POST /api/v1/evaluation/suite/run` (ADMIN, `sdlc.evaluation.enabled`, on in the `local`
+profile, off in `prod`) runs the suite on isolated in-memory engines with the deterministic agents and returns the
+per-case results; an LLM provider can be held to the same suite offline, not through the endpoint. Because the runner
+approves its own gates, it never runs on a production engine. Any single run can be scored with
+`GET /api/v1/runs/{id}/evaluation` (`format=markdown` for a report); the campaign-label run of section 2 scores 0.96.

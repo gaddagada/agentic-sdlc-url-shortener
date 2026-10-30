@@ -1,7 +1,9 @@
 # ADR 0009: Prototype security model: API-key filter and mandatory operator identity; SSO is the production path
 
-Status: Accepted (2026-10-29). The shortener part is amended by
-[ADR 0012](0012-shortener-bulk-api-and-rate-limiter-spi.md), which adds an optional shared `X-Api-Key`.
+Status: Superseded by [ADR 0015](0015-authentication-modes-roles-and-production-posture.md) (2026-10-30) for the
+control plane: `X-Operator-Id` remains the identity in the `open` and `api-key` modes only. Originally accepted
+2026-10-29. The shortener part is amended by [ADR 0012](0012-shortener-bulk-api-and-rate-limiter-spi.md), which
+adds an optional shared `X-Api-Key`.
 
 ## Context
 

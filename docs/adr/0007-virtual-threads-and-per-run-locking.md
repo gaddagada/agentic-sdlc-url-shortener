@@ -1,6 +1,7 @@
 # ADR 0007: Virtual threads for stage execution and a per-run lock for state transitions
 
-Status: Accepted (2026-10-29)
+Status: Accepted (2026-10-29). Amended by [ADR 0014](0014-run-leases-and-bounded-registry-for-multi-node.md):
+run leases coordinate several nodes; the per-run lock remains the mechanism within one node.
 
 ## Context
 

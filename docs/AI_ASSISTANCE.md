@@ -37,6 +37,22 @@ guardrails applied: nothing was accepted before `./mvnw verify` passed for all t
 15 Redis integration tests skipped where Docker was not available), and the documentation was revised against the
 code afterwards.
 
+## The third pass
+
+The production-posture work recorded in ADRs [0013](adr/0013-hash-chained-audit-and-signed-change-records.md) to
+[0018](adr/0018-evaluation-harness-and-llm-cost-model.md) (hash-chained audit and signed change records, run leases,
+authentication modes and roles, policy packs, server-sent events and paged listing, the evaluation harness and the
+cost model) followed the same model with one addition. A design authored with Claude Fable again fixed the contracts
+first; Claude Opus 5.5 agents implemented the core, the control plane and the shortener changes, each module with
+its own tests; then separate Opus 5.5 agents reviewed the result adversarially. The first review of the core and the
+shortener led to 23 fixes (`a33cc0b`) and a follow-up review to 9 more (`3bb73db`), among them a regex guard for
+policy packs, redaction of failure texts and impacted sources, idempotency takeover protection and IPv6 rate-limit
+keys; the control plane's review findings were fixed in `6f1effa`, and a lease defect that CI found (two nodes
+writing one run after a lease expiry) in `1a60f43`.
+The fix commits add regression tests (across them the core grew from 502 to 555 tests, the shortener from 441 to 493
+and the control plane from 319 to 341), CI ran the Docker-only integration tests that local machines skipped, and
+the documentation was revised against the committed code by a separate agent.
+
 ## What this means for a reader
 
 Every design decision in this repository has a human owner and a written rationale (see `docs/adr`).

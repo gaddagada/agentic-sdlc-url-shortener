@@ -14,7 +14,9 @@ info:
       `POST /api/v1/links/bulk` costs one token per item, charged only once the request as a whole is valid (see the
       operation). Buckets live in memory per node by default, or in Redis shared by all nodes
       (`shortener.rate-limit.backend=redis`). Behind a trusted proxy (`shortener.trust-forwarded-headers=true`) the
-      client IP is the right-most `X-Forwarded-For` entry, without a port the proxy may have appended.
+      client IP is the right-most `X-Forwarded-For` entry, without a port the proxy may have appended. An IPv4
+      client is its address; an IPv6 client is its network prefix (`shortener.rate-limit.ipv6-prefix-length`,
+      default 64, 32..128), so all addresses of one /64 share one bucket.
     * Authentication is optional. When `shortener.security.api-key` is set, every request under `/api/v1/links`
       (create, bulk, metadata, analytics, deactivate) must send it in the `X-Api-Key` header, otherwise it gets
       `401` (`unauthorized`). Redirects (`GET /{code}`), actuator and the API docs stay public. Without a key the API
@@ -49,8 +51,10 @@ paths:
 
         With an `Idempotency-Key`, a retried request with the same payload within 24 hours returns the original
         response with `Idempotent-Replayed: true`. The same key with a different payload is rejected (422); a
-        retry while the first request is still running gets 409 with `Retry-After`. Only successful responses are
-        stored, so a failed request can be retried with the same key.
+        retry while the first request is still running gets 409 with `Retry-After`: the seconds until the first
+        request's reservation may be taken over (`shortener.idempotency.pending-takeover-after` after it started,
+        default 60 s; the first request is then presumed crashed). Only successful responses are stored, so a
+        failed request can be retried with the same key.
       parameters:
         - name: Idempotency-Key
           in: header
@@ -196,7 +200,10 @@ paths:
         **Idempotency:** with an `Idempotency-Key`, a retry with the same items within 24 hours replays the whole
         stored response (including failed items) with `Idempotent-Replayed: true`; the same key with other items is
         rejected (422). A request rejected as a whole (e.g. `429`) stores nothing and can be retried with the same
-        key. Keys are shared with `POST /api/v1/links`, whose payloads never match a bulk request.
+        key. Keys are shared with `POST /api/v1/links`, whose payloads never match a bulk request. While the first
+        request runs, a retry gets `409` with `Retry-After`; a bulk request is protected longer than a single one
+        before a retry may take it over: `shortener.idempotency.pending-takeover-after` (default 60 s) plus
+        `shortener.idempotency.pending-takeover-per-item` (default 1 s) per item, at most 10 minutes.
       security:
         - ApiKey: []
       parameters:
@@ -291,7 +298,9 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
         '409':
-          description: A request with the same Idempotency-Key is still in progress (`idempotency-request-in-progress`).
+          description: |
+            A request with the same Idempotency-Key is still in progress (`idempotency-request-in-progress`);
+            `Retry-After` gives the seconds until its reservation may be taken over.
           headers:
             Retry-After:
               $ref: '#/components/headers/Retry-After'

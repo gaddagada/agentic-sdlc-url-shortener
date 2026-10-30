@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1200" height="390" viewBox="0 0 1200 390" font-family="Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" fill="#1f2328" role="img" aria-labelledby="title desc">
   <title id="title">Core scenarios: greenfield, brownfield, ambiguous</title>
-  <desc id="desc">Three core scenarios with their decomposition, orchestration and validation. Greenfield builds a new URL shortener service; brownfield adds a bulk link creation API to the existing shortener using impact analysis over the real source tree; ambiguous ("Make the shortener faster and more reliable.") scores at least 0.5 for ambiguity, pauses at the clarification gate, and continues on the brownfield path. Four more executable scenarios: policy-denial, fault-retry, fault-fallback and replan.</desc>
+  <desc id="desc">Three core scenarios with their decomposition, orchestration and validation. Greenfield builds a new URL shortener service; brownfield adds campaign labels and campaign click analytics to the existing shortener using impact analysis over the real source tree; ambiguous ("Make the shortener faster and more reliable.") scores at least 0.5 for ambiguity, pauses at the clarification gate, and continues on the brownfield path. Four more executable scenarios: policy-denial, fault-retry, fault-fallback and replan.</desc>
   <defs>
     <style type="text/css"><![CDATA[
       text { font-family: Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
@@ -62,18 +62,18 @@
   <rect x="438" y="94" width="108" height="22" rx="11" fill="#0969da"/>
   <text class="pill" x="492" y="109" text-anchor="middle">BROWNFIELD</text>
   <text class="meta" x="762" y="109" text-anchor="end">GUIDED · workspace REPO</text>
-  <text class="quote" x="438" y="142">“Add a bulk link creation API to the existing …”</text>
-  <text class="detail" x="438" y="160">≤ 100 URLs · per-item results · reuse validation</text>
+  <text class="quote" x="438" y="142">“Add campaign labels to the existing URL …”</text>
+  <text class="detail" x="438" y="160">optional label · campaign clicks · new migration</text>
   <line x1="438" y1="172" x2="762" y2="172" stroke="#eaeef2"/>
   <text class="row" x="438" y="192" fill="#0969da">DECOMPOSITION</text>
   <text class="body" x="438" y="208">Classified BROWNFIELD; an impact-review</text>
   <text class="body" x="438" y="223">ANALYSIS task is planned before design</text>
   <text class="row" x="438" y="245" fill="#0969da">ORCHESTRATION</text>
   <text class="body" x="438" y="261">Impact reads the indexed url-shortener source;</text>
-  <text class="body" x="438" y="276">design approval for <tspan class="mono">POST /api/v1/links/bulk</tspan></text>
+  <text class="body" x="438" y="276">design approval for the schema and API change</text>
   <text class="row" x="438" y="298" fill="#0969da">VALIDATION</text>
-  <text class="body" x="438" y="314">LinkController / LinkService tests flagged as</text>
-  <text class="body" x="438" y="329">regression risks; release approval completes</text>
+  <text class="body" x="438" y="314">Skeleton plan with a new Flyway migration;</text>
+  <text class="body" x="438" y="329">9/9 checks pass; release approval completes</text>
 
   <!-- ===== ambiguous ===== -->
   <rect x="826" y="94" width="104" height="22" rx="11" fill="#9a6700"/>

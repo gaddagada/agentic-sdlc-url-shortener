@@ -1,7 +1,9 @@
 # Orchestration
 
 How `orchestrator-core` drives a change from requirement to release: the workflow graph, state machines,
-gates, failure handling, non-linear execution, lineage, budgets and metrics. Every statement describes the code
+gates, failure handling, non-linear execution, lineage, budgets and metrics, plus multi-node leases, change events,
+policy packs, the audit hash chain, signed change records, the LLM cost model, the evaluation harness and the
+dependency inventory. Every statement describes the code
 as it is and names the class that implements it and the test that proves it. Design intent lives in the
 [engineering specification](design/engineering-spec.md) and the [ADRs](adr/); section 13 lists where the code refines the spec.
 
@@ -25,6 +27,9 @@ which inputs, and whether a human must decide first. Agents never change run sta
 | Plan version | Starts at 1, incremented by each re-plan; stamped on artifacts, approvals, checkpoints, policy findings | [`ReplanService`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/ReplanService.java) |
 | Autonomy level | `FULL_AUTO`, `GUIDED` (default) or `STRICT`; bounds how often humans are consulted | [`AutonomyLevel`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/model/AutonomyLevel.java) |
 | Safe-stop | Status `SAFE_STOPPED` with a `HaltReason`; consistent, and moves again only on a human command | [`RunControl`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/RunControl.java) |
+| Lease | Time-bounded claim of one node on a run it is executing; other nodes' commands on the run are refused until it is released or expires (section 3.4) | [`RunLeaseProvider`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/port/RunLeaseProvider.java) |
+| Policy pack | Named, versioned set of declarative rules evaluated after the built-in rules (section 5.1) | [`PolicyPack`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/policy/pack/PolicyPack.java) |
+| Chain head | Hash of a run's last audit event; every event links to the previous one (section 8.1) | [`AuditChain`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/audit/AuditChain.java) |
 
 ## 2. The dependency graph
 
@@ -171,14 +176,21 @@ stateDiagram-v2
   (`stopCancelsInFlightWorkAndResumeContinues`, `stopDuringAScheduledRetryKeepsItAndResumeRearmsIt`).
 - **Durability before visibility.** Under the lock `RunStore.commit(run, events, auditSink)` persists the
   aggregate and the command's audit events; only then is a copy returned and passed to the optional
-  `EngineListener`. The default `commit` saves the snapshot and then appends the events (not atomic); a
-  transactional adapter can override it to write both in one transaction. A failed commit reaches the caller;
-  the in-memory run keeps the mutation and the next successful commit persists the complete state again
-  (`aCommitFailureOnALaterCommandReachesTheCallerAndTheStoreCatchesUpLater`), and a start whose first commit fails
-  leaves no run behind (`aStartWhoseFirstCommitFailsLeavesNoGhostRun`): the run is marked discarded before it is
-  unregistered, so an attempt of that run that finishes in the meantime cannot commit it either
-  (`anAttemptThatFinishesWhileTheFirstCommitFailsNeverPersistsTheDiscardedRun`). Audit sequence numbers are per run and
-  gap-free (the GUIDED test asserts 1..n).
+  `EngineListener`. The default `commit` saves the snapshot and then appends the events (not atomic);
+  [`InMemoryRunStore`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/port/InMemoryRunStore.java) and the control plane's `JpaRunStore` override it
+  to persist both atomically, and a failed commit of the in-memory store leaves neither the run change nor its
+  events (`aFailedCommitOfTheAtomicInMemoryStoreLeavesNeitherTheRunChangeNorItsEventsAndRestoresTheChainHead`,
+  [`OrchestrationEngineAuditChainTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/OrchestrationEngineAuditChainTest.java)). The run's lease is renewed right
+  before every commit, so a node that lost the lease never commits (section 3.4). A failed commit is a conflict: the
+  caller gets an `InvalidRunStateException` (409 in the control plane) with the store's exception as its cause, and the
+  mutation is discarded: the run leaves the in-memory registry, its in-flight attempts are abandoned and its lease is
+  released, so the next command or read loads the stored state, and recovery on any node can take the run over;
+  scheduled retries survive (`aCommitFailureIsAConflictThatDiscardsTheMutationAndTheNextCommandReloadsTheStoredRun`).
+  A start whose first commit fails leaves no run behind (`aStartWhoseFirstCommitFailsLeavesNoGhostRun`): the run is
+  marked discarded before it is unregistered, so an attempt of that run that finishes in the meantime cannot commit
+  it either (`anAttemptThatFinishesWhileTheFirstCommitFailsNeverPersistsTheDiscardedRun`). Audit sequence numbers are
+  per run and gap-free (the GUIDED test asserts 1..n); a run reloaded after a failed commit continues the hash chain
+  from the head the audit log holds (section 8.1).
 
 ```mermaid
 sequenceDiagram
@@ -198,6 +210,108 @@ sequenceDiagram
     E->>E: apply only if token N is still current
     E->>S: commit snapshot and audit batch
 ```
+
+### 3.4 Run leases and multi-node operation
+
+Several engines, one per control-plane node, can share one `RunStore`. A run is leased
+([`RunLeaseProvider`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/port/RunLeaseProvider.java), [`RunLease`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/port/RunLease.java)) by the
+node that executes its stages: the engine acquires the lease when a command or an internal event schedules work on
+the run, renews it at every mutation, right before every commit and every `leaseTtl / 3` while an attempt runs, and
+releases it when the run waits for a human, is `SAFE_STOPPED`, `COMPLETED` or `ABORTED`. While another node holds a valid lease, every command
+throws [`RunLeasedElsewhereException`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/RunLeasedElsewhereException.java) (an
+`InvalidRunStateException`; the control plane answers `409 run-leased-elsewhere` with `holder` and `runId`). Reads
+never need a lease. When this node acquires a lease, and when it reads a run it is not executing, it first reloads
+the run if the store holds a newer state written by another node. A node that finds it lost a lease it was using
+(a renewal that fails from an attempt's heartbeat, at the start of a mutation or right before a commit) writes
+nothing, drops the lease, abandons the run's in-flight attempts (outcome `LEASE_LOST`: nothing is applied or retried
+on this node), evicts the run from memory and logs a WARN. Within one node the per-run lock of section 3.3 stays the
+mechanism.
+
+| [`EngineConfig`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/EngineConfig.java) | Default | Notes |
+|---|---|---|
+| `nodeId` | host name, process id and a random suffix, computed once per JVM (at most 128 characters) | lease owner; recorded in `RUN_CREATED`, `RUN_RESUMED`, `REPLAN`, `RUN_INTERRUPTED` and `STAGE_STARTED` data; must be unique per running process |
+| `leaseProvider` | a new [`InMemoryRunLeaseProvider`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/port/InMemoryRunLeaseProvider.java) on the engine clock (coordinates this engine only) | the control plane uses [`JdbcRunLeaseProvider`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/persistence/JdbcRunLeaseProvider.java) on the `run_leases` table by default |
+| `leaseTtl` | 60 s | should exceed the longest retry backoff (`maxBackoff * backoffScale`), during which nothing renews the lease; the control plane refuses a shorter TTL at startup |
+
+The SPI contract: `tryAcquire` grants a new token only when the run has no valid lease (not re-entrant, also for the
+same owner); `renew` extends a lease by its token, also after expiry as long as nobody took the run over; `release`
+removes it only while the token still holds the run; `holderOf` names the owner of a valid lease; `reclaim` grants a
+new token to an owner that holds the run's valid lease under a token it no longer knows (a node restarted with a
+fixed node id). An expired lease can be taken over by any node; expiry is judged with the provider's clock, so clock
+skew between nodes must stay well below the TTL. `JdbcRunLeaseProvider` implements each call with one portable
+conditional statement in its own transaction, so a lease change is visible to other nodes at once and a failed run
+commit cannot roll it back.
+
+Recovery and shutdown: `recoverInterrupted()` (and `recoverInterruptedCount()`, which returns the number) safe-stops
+only RUNNING runs that no node holds a valid lease on (section 6); a run whose valid lease names this node while the
+engine holds none locally is reclaimed and recovered at once. `close()` cancels in-flight attempts and releases this
+node's leases (one retry when a release fails), so another node can recover its runs without waiting for expiry. A
+release that fails is kept as release-pending: the node's own commands keep using the lease, the run is not evicted,
+and `releasePendingLeases()` (called by every recovery pass) and `close()` retry it. The control plane's
+[`EngineMaintenance`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/startup/EngineMaintenance.java) repeats recovery and eviction every
+`sdlc.engine.maintenance-interval` (30 s), so the runs of a crashed node are safe-stopped once their lease has
+expired and can be resumed on any node.
+
+Proven by [`OrchestrationEngineLeaseTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/OrchestrationEngineLeaseTest.java)
+(`commandsOfAnotherNodeAreRefusedWhileTheRunExecutesAndAllowedOnceTheLeaseExpired`,
+`aRunWaitingForAHumanCanBeContinuedByAnyNode`, `aLongAttemptKeepsItsLeaseThroughHeartbeats`,
+`aLeaseTakenOverBetweenTheMutationAndItsCommitWritesNothing`,
+`anAttemptWhoseHeartbeatFindsTheLeaseLostIsInterruptedAndNothingIsWritten`,
+`closingANodeReleasesItsLeasesSoAnotherNodeCanRecoverItsRuns`,
+`aFailedReleaseKeepsTheLeasePendingSoTheNodeIsNotLockedOutAndTheRunIsNotEvicted`,
+`aNodeRestartedWithItsNodeIdReclaimsItsOwnLeaseAndIsNeverRefusedWithItsOwnId`),
+`InMemoryRunLeaseProviderTest` (`concurrentAcquisitionsGrantExactlyOneLease`) and, in the control plane,
+`JdbcRunLeaseProviderTest` and [`JdbcLeaseMultiNodeTest`](../orchestrator-app/src/test/java/com/agenticsdlc/orchestrator/app/persistence/JdbcLeaseMultiNodeTest.java) (two
+engines on one database: `aRunOfACrashedNodeIsRecoveredOnlyOnceItsLeaseExpired`,
+`aNodeRestartedWithItsFixedNodeIdTakesItsRunBackWithoutWaitingForTheOldLeaseToExpire`). What leases do not provide:
+work distribution (a run executes where its work was scheduled), shared retry timers or shared provider circuits
+([ADR 0014](adr/0014-run-leases-and-bounded-registry-for-multi-node.md)).
+
+### 3.5 Bounded run registry
+
+[`RunRegistry`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/RunRegistry.java) no longer keeps every run it has seen.
+`OrchestrationEngine.evictIdleRuns()` drops runs that are not executing on this node (`WAITING_HUMAN`,
+`SAFE_STOPPED`, `COMPLETED`, `ABORTED`) after `registryRetention` (default 1 h) without a change, then the least
+recently ended terminal runs beyond `registryMaxTerminalRuns` (default 500). A run is never evicted while it is
+RUNNING, has an attempt in flight or is leased by this node (also release-pending); a run whose commit failed has
+already left the registry (section 3.3). The engine evicts after every command and in `list()`; the control plane
+also does it in every maintenance pass. `get` and `list` read evicted runs from the store, and the next command
+loads the run again (`aRunWaitingLongerThanTheRetentionIsEvictedAndItsApprovalContinuesCorrectly`,
+`terminalRunsBeyondTheMaximumAreEvictedLeastRecentlyEndedFirst`, `runsExecutingOnThisNodeAreNeverEvicted`,
+[`RunRegistryEvictionTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/RunRegistryEvictionTest.java)). `list()` is authoritative but reads every
+run of the store; `listCached()` returns only the registry, cheaply and possibly incomplete
+(`listCachedReturnsOnlyTheRegistryWhileListAlsoReadsTheStore`).
+
+### 3.6 Change events (server-sent events)
+
+The engine offers an optional `EngineListener` that receives a copy of the run after every mutation. The control
+plane does not use it for the console: an event must only describe state that is durable, so
+[`JpaRunStore`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/persistence/JpaRunStore.java) hands each committed change (the run's list row, the committed
+snapshot and the audit events of the commit) to the in-process
+[`RunEventBus`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/events/RunEventBus.java) after the transaction commits (never after a rollback). The bus
+delivers on one dispatcher thread in commit order through a bounded queue of 1 000 changes; a change that does not
+fit is dropped and counted, and the streams recover by reading the store. Subscribers are the event streams
+([`RunStreamHub`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/api/RunStreamHub.java)) and the run and stage observations of section 10.
+
+| Stream | Events (SSE `event:` name, data) | Resumption and end |
+|---|---|---|
+| `GET /api/v1/runs/{id}/events` | on connect the audit events after `Last-Event-ID` (all without it) as `audit` (SSE id = audit `seq`, data `AuditEventView`), then the current `run` (`RunView`); afterwards, per commit, its new `audit` events, then the new `run`; `heartbeat` (`{"time": ...}`) every 15 s | reconnect with `Last-Event-ID` to receive exactly the missed events; the stream ends after the final `run` event of a `COMPLETED` or `ABORTED` run |
+| `GET /api/v1/runs/events` | a `heartbeat` first and every 15 s; a `run-summary` (the item shape of `GET /api/v1/runs`) per commit | no replay: load the list with `GET /api/v1/runs`, then apply the summaries |
+
+Limits (`sdlc.console.*`): at most `max-sse-connections` (200) streams per node, beyond that `503
+stream-limit-reached` with `Retry-After`; a stream lives `sse-timeout` (30 min) and the client reconnects; the
+initial backlog is at most 20 000 audit events, and a stream that falls more than 1 000 live events behind is
+closed (the client reconnects with `Last-Event-ID`); writes run on a bounded executor, one write at a time per
+stream, so a slow client never blocks the publisher. Every stream response carries `X-Sdlc-Node-Id`: a stream only
+carries the commits of its node, so in a multi-node deployment the console polls a run whose `nodeId` names another
+node and keeps a 30 s safety poll for every open stream. Proven by
+[`RunStreamControllerTest`](../orchestrator-app/src/test/java/com/agenticsdlc/orchestrator/app/api/RunStreamControllerTest.java)
+(`aRunStreamStartsWithTheAuditBacklogWithSequenceIdsThenTheRunView`, `lastEventIdResumesAfterTheLastSeenSequence`,
+`committedChangesStreamTheirNewAuditEventsAndRunViewAndTheTerminalRunEndsTheStream`), `RunStreamHubTest`
+(`aStreamWhoseLiveEventsPileUpIsClosedAndFreesItsSlot`, `closingAStreamWhoseWriteIsBlockedNeverBlocksThePublisher`)
+and `JpaRunStoreCommitEventsTest` (`aFailedCommitPublishesNothing`,
+`theEngineFeedsTheBusInCommitOrderWithContiguousAuditSequences`); see also
+[ADR 0017](adr/0017-server-sent-events-and-paged-listing.md).
 
 ## 4. Gates and controlled autonomy
 
@@ -256,10 +370,12 @@ time, comment and, for exit gates, the hash of the artifact that was approved) a
 `replan`, `stop` and `resume` require an [`Actor`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/audit/Actor.java) of type `HUMAN`, else `InvalidCommandException`. The
 operator id goes into the approval (`decidedBy`), the audit actor and the change record. `start(..., Actor
 requestedBy)` attributes `RUN_CREATED` to the requester and records `requestedBy` in its data; the control plane
-passes the `X-Operator-Id` identity, so API-created runs are audited with a `HUMAN` actor (the overload without an
+passes the operator identity, so API-created runs are audited with a `HUMAN` actor (the overload without an
 actor, used by engine tests, records the system actor; `runCreationIsAttributedToTheRequestingOperator`,
-[`OrchestrationEngineHardeningTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/OrchestrationEngineHardeningTest.java)). The identity comes from the control plane (`X-Operator-Id`,
-[spec](design/engineering-spec.md) section 6.2, [ADR 0009](adr/0009-prototype-security-model.md)). Agents can never:
+[`OrchestrationEngineHardeningTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/OrchestrationEngineHardeningTest.java)). The identity comes from the control plane: the identity claim of a
+verified bearer token in `oidc` mode, the `X-Operator-Id` header in `open` and `api-key` mode, and the control plane
+also checks the caller's role and, when enabled, the four-eyes rule before a command reaches the engine
+([ADR 0015](adr/0015-authentication-modes-roles-and-production-posture.md)). Agents can never:
 
 - issue those commands: ArchUnit forbids agent, policy and workspace packages from depending on the engine;
 - mutate run state, skip a gate, choose successors or extend a budget: an agent receives an immutable
@@ -279,7 +395,8 @@ actor, used by engine tests, records the system actor; `runCreationIsAttributedT
 ## 5. Policy guardrails
 
 [`PolicyEngine`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/policy/PolicyEngine.java) evaluates every rule of [`DefaultPolicyRules`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/policy/rules/DefaultPolicyRules.java) at `RUN_START` (requirement
-of a start or re-plan), `ENTRY` and `EXIT` (candidate payload); each rule decides where it applies.
+of a start or re-plan), `ENTRY` and `EXIT` (candidate payload); each rule decides where it applies. With a policy
+pack (section 5.1) the pack's rules run after the built-in rules, and the built-in rules it disables are skipped.
 
 | Rule | Where | What it checks | Verdict, severity |
 |---|---|---|---|
@@ -316,6 +433,55 @@ of a start or re-plan), `ENTRY` and `EXIT` (candidate payload); each rule decide
   `aQuotedPasswordLiteralIsDeniedAtTheExitGateAndRemovedFromHistory`). The exit gate also runs for a failed
   verification report, so a report that leaks a secret is denied instead of feeding back
   (`aFailedVerificationReportThatLeaksASecretIsDeniedInsteadOfFeedingBack`).
+
+### 5.1 Policy packs (policy as code)
+
+A [`PolicyPack`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/policy/pack/PolicyPack.java) is a named, versioned JSON document (the control plane also
+reads YAML, see below) of declarative rules plus the ids of built-in rules it disables.
+`PolicyEngine.withDefaultRulesAnd(pack)` builds an engine with the built-in rules minus the disabled ones, followed by
+one [`DeclarativePolicyRule`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/policy/pack/DeclarativePolicyRule.java) per pack rule in pack order, combined
+exactly like the built-in rules (no short-circuit, maximum verdict, a throwing rule fails closed with a CRITICAL
+DENY).
+
+| Element | Values |
+|---|---|
+| Rule id | `[A-Z]{2,5}-\d{3}` (for example `ORG-001`), unique, never a built-in id |
+| Phase, stages | `RUN_START` (the requirement; no stages), `ENTRY` or `EXIT`, optionally limited to stage ids |
+| Effect, severity | `DENY` (default HIGH), `REQUIRE_APPROVAL` (default MEDIUM), `WARN` (a finding only, always LOW); the message is prefixed with the pack name and version |
+| `intentMatches` | a regex found, case-insensitively, in the requirement, the clarification answers or, at the intake exit, the normalized statement |
+| `pathMatches` | a glob (`**/`, `*`; case-insensitive) matching a path of the candidate change set or of the candidate impact analysis (not mere regression risks), else of the accepted ones |
+| `payloadMatches` | a regex found, case-sensitively, in the strict canonical JSON of the candidate payload (`EXIT` only) |
+| `riskAtLeast`, `changeSizeOver`, `releaseDecisionIs`, `autonomyIs` | the prospective run risk, the change set's files or lines, the release decision, the run's autonomy |
+| `allOf`, `anyOf`, `not` | combinators, at most 16 levels deep |
+
+[`PolicyPackLoader`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/policy/pack/PolicyPackLoader.java) is strict and reports every problem with its JSON path:
+malformed JSON, duplicate keys, unknown fields, missing or mistyped fields, unknown enum values or condition types,
+invalid regexes or globs, duplicate or built-in ids, rules that cannot apply as written (stages on `RUN_START`,
+`payloadMatches` outside `EXIT`, a `WARN` rule with a severity other than LOW) and attempts to disable CHG-002, GOV-003
+or SEC-002, which no pack and no code can disable (`PolicyPack.NON_DISABLEABLE_RULE_IDS`;
+`rejectsDisablingTheReleaseGateAndTheSecretLeakGuard`, `protectedBuiltInsCannotBeDisabledEvenInCode`).
+
+**Regex guard.** Rules run while the engine holds the run's lock, against text that models produce. A regex longer
+than 1000 characters, or with a repeated group that contains an unbounded quantifier (`(a+)+`, `(.*)*`), is refused at
+load time, and every search has a budget of one second
+([`RegexGuard`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/policy/pack/RegexGuard.java)); a search that exceeds it throws, and the policy engine records
+a fail-closed DENY for that rule instead of stalling the gate (`aCatastrophicRuleRegexFailsClosedInsteadOfStallingTheGate`,
+[`RegexGuardTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/policy/pack/RegexGuardTest.java)).
+
+**Audit and loading.** The engine records the pack's name, version and hash (SHA-256 over its strict canonical JSON,
+so key order and whitespace do not matter) as data `policyPack` of every `RUN_CREATED` and `POLICY_DENIED` event
+(`aDeclarativeDenyAtRunStartSafeStopsTheRunAndTheAuditRecordsThePack`,
+[`PolicyPackEngineTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/PolicyPackEngineTest.java)). The control plane loads `sdlc.policy.pack` (a file
+path or `classpath:` resource) at startup with
+[`PolicyPackFiles`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/config/PolicyPackFiles.java): YAML is parsed into a tree and passed on as JSON, YAML
+aliases and merge keys are rejected, and an invalid pack stops the start with every problem listed.
+`GET /api/v1/policy` lists the built-in rules (active or disabled, and whether a pack may disable them) and the
+pack. The core bundles `policy/sample-policy-pack.json`; the control plane bundles the same pack as
+`policy/example-policy-pack.yaml` (`theExampleYamlPackIsTheCoreSamplePack`): ORG-001 denies a change set that
+modifies or deletes the applied migration V1, ORG-002 asks for approval when security code changes, ORG-003 warns
+when a requirement mentions PII or SSNs, ORG-004 requires an approval at every exit for CRITICAL risk in `FULL_AUTO`.
+Packs are read at startup only, so changing the policy needs a restart
+([ADR 0016](adr/0016-declarative-policy-packs.md)).
 
 ## 6. Failure handling
 
@@ -355,7 +521,8 @@ switches to `fallback:deterministic` with a fresh attempt count, `counters.fallb
 half-open: one attempt at a time tries the provider again; a success closes the circuit, a counted failure re-opens
 it for another cooldown. The state lives in memory only (a restart closes every circuit);
 `OrchestrationEngine.providerCircuits()` returns a snapshot per provider (`CLOSED`, `OPEN` or `HALF_OPEN`, failure
-count, `openedAt`, `retryAt`). Because the count spans stages and runs, a provider that returns three invalid
+count, `openedAt`, `retryAt`, last failure), which `GET /api/v1/providers` reports per provider and the console shows
+as a chip while a circuit is open. Because the count spans stages and runs, a provider that returns three invalid
 outputs in a row (for example, with the sandbox enabled, change sets whose diffs do not apply) is bypassed by
 every run for the cooldown.
 Proven by [`ProviderCircuitBreakerTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/ProviderCircuitBreakerTest.java)
@@ -402,10 +569,25 @@ Accepted artifacts, approvals, counters and budget usage are not reset. Resuming
 the budget by one default allowance of every limit (`RunBudget.extended()`): the explicit human resume is the
 authorization to spend more, and `RUN_RESUMED` records `budgetExtended: true` with the new budget.
 
-**Interrupted-run recovery.** `close()` cancels in-flight attempts without touching stored state. At the next
-start `recoverInterrupted` registers every stored run; each `RUNNING` run gets its `RUNNING` stages reset,
-`RUN_INTERRUPTED` and `SAFE_STOP` audited, and halt reason `INTERRUPTED_BY_RESTART`. Other runs continue as
-before; unregistered runs load lazily on first access (`recoverInterruptedSafeStopsRunsThatWereInProgressAndResumeContinues`).
+**Interrupted-run recovery.** `close()` cancels in-flight attempts and releases this node's leases without
+touching the stored run state. `recoverInterrupted` (at startup, and in the control plane every maintenance
+interval) loads every stored `RUNNING` run that no node holds a valid lease on: its `RUNNING` stages are reset,
+`RUN_INTERRUPTED` (with the recovering node id) and `SAFE_STOP` are audited, and the halt reason is
+`INTERRUPTED_BY_RESTART`. Runs leased by a live node are skipped; runs waiting for a human, stopped or terminal stay
+in the store and load lazily on first access (`recoverInterruptedSafeStopsRunsThatWereInProgressAndResumeContinues`,
+section 3.4).
+
+### 6.1 Redaction of failure texts
+
+Agent and provider error messages can echo a request or response body, and with it a credential. The engine therefore
+records failure texts (a stage's `lastError`, the messages of `RETRY_SCHEDULED`, `FALLBACK_ENGAGED` and `STAGE_FAILED`,
+log lines and the circuit's last failure) only after replacing credential-like tokens with `[redacted]`
+(`SecretPatterns.redact`) and cutting them to 1000 characters (300 for a circuit's last failure)
+(`failureTextsAreRedactedAndBoundedBeforeTheyReachTheRunTheAuditTrailAndTheCircuit`,
+[`ProviderCircuitBreakerTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/ProviderCircuitBreakerTest.java)). The same redaction is applied to
+impacted sources before they enter a prompt (section 8) and to the build output a sandbox build captures
+(`credentialLikeTokensInTheBuildOutputAreRedactedBeforeTheyAreCaptured`). An agent's rationale that contains a
+credential is replaced as a whole (section 4.4).
 
 ## 7. Non-linear execution
 
@@ -470,9 +652,11 @@ reads them from the workspace root (not from a sandbox) within two limits from
 above the per-file limit, a full per-file slice); a fragment under 400 characters is omitted rather than cut.
 Absolute paths, `..` segments, paths that resolve outside the root (also through symbolic links), secret-bearing
 files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.jks`) and files under the directories a sandbox copy skips
-(`WorkspaceSandbox.SKIPPED_DIRECTORIES`, for example `.git`, `target`, `data`) are refused; binary files (a NUL
-byte, or not valid UTF-8) are skipped. Every file not shown in full gets a note ("truncated", "not found",
-"refused", "skipped", "omitted"), which the prompt lists under "Not shown in full"
+(`WorkspaceSandbox.SKIPPED_DIRECTORIES`, for example `.git`, `target`, `data`) are refused, and so are path segments
+ending in a dot or a space, which Windows drops silently; binary files (a NUL byte, or not valid UTF-8) are skipped;
+credential-like tokens are replaced with `[redacted]` before the source leaves the workspace
+(`credentialLikeTokensNeverLeaveTheWorkspaceInSourceContext`). Every file not shown in full or verbatim gets a note
+("truncated", "not found", "refused", "skipped", "omitted", "redacted"), which the prompt lists under "Not shown in full"
 ([`ImpactedSourcesTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/workspace/ImpactedSourcesTest.java),
 `implementationVerificationAndSecurityReviewSeeBoundedImpactedSources`,
 `runsWithoutTheRepositoryWorkspaceOrWithoutAWorkspaceRootGetNoSources`). Because the previous error is one of the
@@ -494,7 +678,7 @@ artifact, so a run's lineage graph is the union of these edges over its artifact
 exposes it as nodes and edges ([spec](design/engineering-spec.md) section 6.2). `STAGE_STARTED` audits the same map before the agent runs.
 
 **Audit log.** Every state transition and governance action emits one `AuditEvent` (`seq`, timestamp, run,
-stage, type, actor, message, structured data). The 31 [`AuditEventType`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/audit/AuditEventType.java) values by concern:
+stage, type, actor, message, structured data, `prevHash`, `hash`; section 8.1). The 31 [`AuditEventType`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/audit/AuditEventType.java) values by concern:
 
 | Concern | Event types |
 |---|---|
@@ -511,6 +695,58 @@ whose message is the agent's rationale (at most 500 characters, replaced by `[ra
 credential-like token]` when it matches a secret pattern); `HUMAN` (operator id) for run creation through
 the control plane, decisions, clarifications, re-plans, stops and resumes, and for the revocations and
 invalidations a re-plan causes.
+
+### 8.1 Audit hash chain
+
+Every audit event is linked to the run's previous event when the engine creates it
+([`AuditChain`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/audit/AuditChain.java)): `prevHash` is the previous event's `hash`, or `GENESIS` (64 zeros)
+for the first event, and `hash` is the lowercase hex SHA-256 of the event's strict canonical JSON form with exactly
+the members `seq`, `timestamp` (ISO-8601 UTC), `runId`, `stageId` (empty for run-level events), `type`, `actorType`,
+`actorId`, `message`, `data` (keys sorted at every level, numbers normalized) and `prevHash`
+([`JsonCodec.strictCanonicalJson`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/json/JsonCodec.java); strings are hashed as written, without Unicode
+normalization). Messages are capped at 2000 characters before hashing. The chain head is part of the run snapshot
+and is resynchronized from the audit sink when a run is loaded or a commit fails, so the chain continues across
+restarts, nodes and failed commits without a gap (`aRunReloadedByAnotherEngineContinuesTheChain`,
+`aFailedCommitDoesNotLeaveAGapOrABrokenLink`, `aSnapshotThatIsAheadOfTheAuditLogIsResynchronizedOnLoad`,
+[`OrchestrationEngineAuditChainTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/OrchestrationEngineAuditChainTest.java)).
+
+The stores enforce continuity at their boundary: `InMemoryAuditSink`, and `JpaAuditSink` inside the commit
+transaction, reject a batch whose first `prevHash` is not the stored head or that is not itself an intact chain, and
+nothing of that commit is persisted (`aBatchThatDoesNotContinueTheStoredChainIsRejectedAndNothingIsStored`). Events
+written before the chain existed have no hashes; they remain accepted while a run's log is unsigned, and a signed
+event after them starts a new chain at `GENESIS`.
+
+`AuditChain.verify` walks a run's events in sequence order and reports the first problem: an unsigned event (at the
+start: the chain is unsigned; after signed events: a break, because stripping the chain fields is how an edit would
+hide), an event of another run, a sequence gap or reordering, a broken link (an event removed, inserted or replaced)
+or modified content, with the expected and the actual hash ([`AuditChainTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/audit/AuditChainTest.java)).
+`GET /api/v1/runs/{id}/audit/integrity` returns the result for the stored trail (`valid`, `length`, `brokenAtSeq`,
+`expectedHash`, `actualHash`, `summary`), and the console's Audit tab shows it. The chain is not keyed: it proves
+that the stored trail was not edited, reordered or cut in the middle, relative to a trusted head hash; a writer with
+database access can recompute every hash, and removing events from the end is only detectable against a head hash
+kept elsewhere ([ADR 0013](adr/0013-hash-chained-audit-and-signed-change-records.md)).
+
+### 8.2 Signed change records
+
+When a run completes, the engine finalizes the release change record with the approvals and signs it with
+`EngineConfig.changeRecordSigner()` ([`ChangeRecordSigner`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/audit/ChangeRecordSigner.java)); the
+`ARTIFACT_ACCEPTED` event of the finalized record names the algorithm and the key id. The signed payload is the strict
+canonical JSON of the record without its signature; the signature records algorithm, key id, value (hex) and
+`signedAt` (informational, not signed).
+
+| Signer | Behaviour |
+|---|---|
+| `UnsignedChangeRecordSigner` (default) | attaches no signature, and its `verify` never accepts anything, so an unsigned record can never pass as signed |
+| `HmacChangeRecordSigner` | HMAC-SHA256 with a key of at least 32 bytes, verified in constant time; the key is copied and never shown by `toString`; the control plane builds it from `sdlc.governance.signing-key` (`base64:<value>` or raw text) and `sdlc.governance.signing-key-id` |
+
+A signer that throws does not block completion: the run completes, the record stays unsigned and the error is
+audited (`aFailingSignerDoesNotBlockCompletionAndTheMissingSignatureIsAudited`). The control plane's artifact view of
+a release-readiness version carries `signature` and `signatureVerified` (verified against the configured signer), so
+a change record whose approvals were edited after signing reports `false`
+(`theCompletedReleaseIsSignedAndTamperedApprovalsNoLongerVerify`,
+[`SignedChangeRecordEndToEndTest`](../orchestrator-app/src/test/java/com/agenticsdlc/orchestrator/app/SignedChangeRecordEndToEndTest.java)). The `prod` profile refuses to start
+without a usable key. HMAC is symmetric (whoever can verify can sign), and the signature covers the change record,
+not the audit trail.
 
 ## 9. Budgets and safe-stop triggers
 
@@ -533,10 +769,15 @@ budget, so it re-stops at the next activation while the budget is still exhauste
 build disabled, sandbox root `./sandbox`, build timeout 10 min, build command `./mvnw -B -ntp -q verify` (the only
 command a sandbox build runs; agent-supplied commands are ignored), LLM timeout scale 3.0 (stage timeouts are
 multiplied by it whenever an LLM provider executes the attempt), impacted-source limits of 20 000 characters per
-file and 120 000 per stage context (section 8), and the provider circuit breaker (3 consecutive failures, 10 min
-cooldown; section 6). The control plane sets the ambiguity threshold, backoff scale, sandbox and sandbox-build
-switches, sandbox root, build command and LLM timeout scale from `sdlc.engine.*`; everything else runs with these
-defaults. The Anthropic adapter streams responses of up to 64 000 output tokens
+file and 120 000 per stage context (section 8), the provider circuit breaker (3 consecutive failures, 10 min
+cooldown; section 6), a node id per JVM, an in-memory lease provider with a 60 s TTL (section 3.4), registry
+retention 1 h and at most 500 cached terminal runs (section 3.5), unsigned change records (section 8.2), an empty
+price book (section 10.1) and no external dependency scan (timeout 5 min; section 11.1). The control plane sets the
+ambiguity threshold, backoff scale, sandbox and sandbox-build switches, sandbox root, build command, LLM timeout
+scale, node id, lease provider and TTL, registry retention and maximum, dependency scan command and timeout from
+`sdlc.engine.*`, the signer from `sdlc.governance.signing-key`, the price book from `sdlc.llm.pricing` and the
+policy pack from `sdlc.policy.pack`; the impacted-source limits and the circuit breaker run with the defaults
+([`EngineConfiguration`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/config/EngineConfiguration.java)). The Anthropic adapter streams responses of up to 64 000 output tokens
 (`sdlc.llm.anthropic.max-output-tokens`) with a 900 s request timeout. The safe-stop triggers are the six halt
 reasons of section 6.
 
@@ -555,16 +796,77 @@ reasons of section 6.
 | Active latency | end-to-end minus human wait per completed run; mean |
 | Agent-call latency | `provenance.latencyMs` of every agent-produced artifact (engine-authored versions excluded): mean, p95 |
 | Approval decision time | mean of `decidedAt - requestedAt` over approvals with a human decision |
-| LLM usage | attempts that reported LLM usage; input and output tokens |
+| LLM usage | attempts that reported LLM usage; input tokens (prompt-cache reads and writes included), output tokens, cache-read and cache-creation tokens; estimated cost and unpriced calls (section 10.1) |
 
 Percentiles use the nearest-rank method: the value at rank `ceil(p/100 * n)` of the sorted values, 0 when empty.
 Only failed agent attempts set `firstFailureAt`; policy denials do not. The engine also calls the
 `MetricsRecorder` SPI (failures isolated): `stageCompleted`, `retry`, `fallback`, `rollback`, `runCompleted`,
-`agentCall`, `approvalDecision`. The control plane's Micrometer adapter is specified ([spec](design/engineering-spec.md) section 6.7)
+`agentCall` (with prompt-cache tokens), `llmCost`, `approvalDecision`. The control plane's Micrometer adapter is specified ([spec](design/engineering-spec.md) section 6.7)
 to register `sdlc.stage.duration` (timer; stage, status), `sdlc.stage.retries`, `sdlc.stage.fallbacks`,
 `sdlc.run.rollbacks`, `sdlc.run.completed` (timer), `sdlc.agent.call` (timer; provider, role) and
 `sdlc.llm.tokens` (counter; provider, direction); [`MicrometerMetricsRecorder`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/metrics/MicrometerMetricsRecorder.java) implements these and
-adds `sdlc.run.active` (timer of the active time of completed runs).
+adds `sdlc.run.active` (timer of the active time of completed runs), `sdlc.approval.decision` (timer; outcome),
+`sdlc.llm.cache.read.tokens` and `sdlc.llm.cache.creation.tokens` (counters; provider, role), `sdlc.llm.cost.microusd`
+and `sdlc.llm.calls.unpriced` (counters; provider, role). [`RunObservations`](../orchestrator-app/src/main/java/com/agenticsdlc/orchestrator/app/metrics/RunObservations.java)
+wraps every run and every stage attempt this node commits in a Micrometer observation (`sdlc.run` with
+`scenario`, `autonomy` and `status`; `sdlc.stage`, a child of the run's observation, with `stage`, `provider`,
+`attempt` and `status`; run ids are high-cardinality values, never meter tags); with Spring Boot's handlers each
+observation is a timer and an OpenTelemetry span, exported over OTLP only when an endpoint is configured
+(`RunObservationsTest`, `TracingExportTest`). `GET /api/v1/metrics/reliability` computes over every run of the
+store and caches the result for `sdlc.metrics.cache-ttl` (5 s).
+
+### 10.1 LLM cost model
+
+Usage reported by a provider client ([`LlmUsage`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/llm/LlmUsage.java): input tokens including cache
+reads and writes, output tokens, cache-read tokens, cache-creation tokens) flows into the attempt's provenance, the
+`AGENT_DECISION` audit data, the run's [`RunCounters`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/model/RunCounters.java) and the `MetricsRecorder`.
+The engine prices each call with `EngineConfig.priceBook()`, an [`LlmPriceBook`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/metrics/LlmPriceBook.java)
+of [`LlmPrice`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/metrics/LlmPrice.java)s in US dollars per million tokens (input, output, cache read, cache
+write); the cost of `n` tokens in micro-dollars is exactly `n * pricePerMillion`, rounded half up per call. Lookup of
+`(provider, model)`, case-insensitive: an entry for exactly that model, else the entry with the longest model-name
+prefix that ends at a name boundary (`claude-opus-5` prices `claude-opus-5-5`, `gpt-4` does not price `gpt-4o`),
+else the provider default, else the call is unpriced
+(`looksUpExactModelThenLongestPrefixThenProviderDefault`, [`LlmPriceBookTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/metrics/LlmPriceBookTest.java)).
+
+`RunCounters.llmCostMicroUsd` is the run's estimated cost, or null once any call of the run was unpriced
+(`llmUnpricedCalls` counts them), so an unknown price never shows as a misleading zero
+(`oneUnpricedCallMakesTheRunCostUnknownForGood`). `ReliabilityMetrics.LlmStats` sums the costs of fully priced
+runs (a lower bound while unpriced calls exist) and reports the cache tokens and the unpriced calls. The core ships
+no prices (`LlmPriceBook.EMPTY` is the default) and neither does the control plane: prices come from
+`sdlc.llm.pricing.providers.<provider>.models.<model or prefix>` and `.default`
+(`noPricesShipByDefault`, `LlmPricingPropertiesTest`). The run view shows the cost in dollars, provenance shows each
+call's cost (`CostAndCacheViewsTest`), and the console shows a cost line in the run banner.
+
+### 10.2 Evaluation harness
+
+[`RunEvaluator`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/evaluation/RunEvaluator.java) scores a run without changing it: per stage the accepted
+artifact (or, at an exit gate awaiting approval, the latest artifact of the current plan, noted as under review) is
+scored by the [`ArtifactScorers`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/evaluation/ArtifactScorers.java) scorer of its kind; the overall score is the
+mean of the stage scores. Each score is a weighted mean of explicit criteria (weight 2 for what matters most for the
+artifact, 1 for regular criteria, 0.5 for hygiene, 0 for criteria that do not apply), each with a value and a
+rationale: for example acceptance criteria and measurable NFRs in a specification, coverage and analysis-first
+ordering in a brownfield plan, impact paths that exist in the codebase index, skeleton content penalised in a change
+set, negative cases in a test plan, passing blocking checks and traceability in a verification report, STRIDE coverage
+without unmitigated HIGH findings in a security review, and a release decision consistent with its inputs
+([`ArtifactScorersTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/evaluation/ArtifactScorersTest.java)). The same run always gives the same report.
+
+[`EvaluationSuiteRunner`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/evaluation/EvaluationSuiteRunner.java) executes an
+[`EvaluationSuite`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/evaluation/EvaluationSuite.java) (the core bundles `evaluation/default-suite.json`, ten
+cases described in [SCENARIOS.md](SCENARIOS.md#evaluation-suite)): one fresh engine per case, the run started as the
+runner's operator identity, clarifications answered with the first suggested answer, every pending gate approved as
+`evaluation-runner` with the comment "auto-approved by the evaluation runner", never a NO_GO waiver (the runner stops
+there), and a timeout per case (30 s by default). A case that expects the run not to complete stops at the first human
+gate. The expectations (clarification, policy denial, completion, minimum risk, release decision, minimum overall
+score) are then checked and failures carry reasons; the deterministic agents pass every case
+(`theDeterministicAgentsPassTheBundledSuite`, [`EvaluationSuiteRunnerTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/evaluation/EvaluationSuiteRunnerTest.java)).
+
+The control plane exposes `GET /api/v1/runs/{id}/evaluation` (any role; `format=markdown` for text) and
+`POST /api/v1/evaluation/suite/run` (ADMIN; only with `sdlc.evaluation.enabled`, set by the `local` profile and
+cleared by `prod`; only `provider=deterministic`; each case on an isolated in-memory engine with its own store,
+audit sink and leases, so the production store, audit trail and metrics are never touched; one suite run at a time,
+a second is `409`) ([`EvaluationEndpointsTest`](../orchestrator-app/src/test/java/com/agenticsdlc/orchestrator/app/EvaluationEndpointsTest.java)). Automatic approvals defeat
+the purpose of human gates, which is why the runner never drives a production engine
+([ADR 0018](adr/0018-evaluation-harness-and-llm-cost-model.md)).
 
 ## 11. Agents
 
@@ -587,10 +889,15 @@ The ten deterministic agents are the default provider and the fallback; they are
   limiting, security, QR, performance, reliability); "keep working" sentences yield regression keywords. A type
   scores +0.5 for a keyword in its name, +0.3 per keyword in its package path, +0.1 per discriminating literal
   keyword in its source (cap 0.4), +0.2 for a controller whose endpoint method matches a requirement verb; at
-  least 0.3 is a direct impact, one-hop neighbours are REGRESSION_RISK at 0.6 times the confidence.
+  least 0.3 is a direct impact, one-hop neighbours are REGRESSION_RISK at 0.6 times the confidence. When an entity is
+  directly impacted, the latest migration and the proposed next version come from the migrations of the modules
+  that own the impacted entities (`migrationsAreScopedToTheModuleOfTheImpactedEntities`).
 - **Architecture** ([`ArchitectureAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/deterministic/ArchitectureAgent.java)). Components (at most ten), API and data model changes, NFR
   strategies, data handling (90-day retention and salted hashing when personal data is detected), two or more
   alternatives with exactly one chosen, decisions; risk = max(preliminary, HIGH for breaking changes, MEDIUM for any API or data change).
+  An endpoint the requirement names as `METHOD /path` becomes an ADDED API change routed to the existing controller
+  of its resource, unless it already exists (`anExplicitlyNamedNewEndpointBecomesAnAddedApiChange`,
+  [`ArchitectureAgentTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/agent/deterministic/ArchitectureAgentTest.java)).
 - **Implementation** ([`ImplementationAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/deterministic/ImplementationAgent.java)). Skeletons with `// TODO implement` markers, Flyway DDL
   per data model change, a test skeleton per production file, build command `./mvnw -pl url-shortener verify`
   and a rollback plan; with sandboxes enabled for `REPO` runs it materializes the change set and returns a
@@ -606,7 +913,8 @@ The ten deterministic agents are the default provider and the fallback; they are
 - **Security review** ([`SecurityReviewAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/deterministic/SecurityReviewAgent.java)). STRIDE threats from the API changes and data handling;
   checks for input validation (HIGH), SSRF and open-redirect guard (HIGH), protected personal data (HIGH), rate
   limiting of public create endpoints (MEDIUM), secrets in the change set (CRITICAL), authentication note (LOW);
-  passes without HIGH or CRITICAL findings, and a failed review becomes NO_GO at release.
+  for `REPO` runs the dependency inventory of section 11.1; passes without HIGH or CRITICAL findings, and a failed
+  review becomes NO_GO at release.
 - **Release** ([`ReleaseAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/deterministic/ReleaseAgent.java)). Checklist: verification passed, security passed, documentation
   present, traceability complete, rollback plan present, design approval when required, code complete (WAIVED
   for skeletons). NO_GO when verification or security failed; GO_WITH_CONDITIONS for MEDIUM findings, waived or
@@ -625,9 +933,11 @@ one [`LlmRequest`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrat
 
 The split exists so that a provider can cache the prefix (system prompt plus stable context) across the attempts
 and stages of a run (`thePromptIsSplitIntoSystemRunStableContextAndStageSpecificUserContent`); `LlmStageAgent`
-computes the prompt hash over all three parts. Today both clients send
-`LlmRequest.userWithContext()`, the stable context followed by the stage part in one user message, so no cache
-breakpoint is set yet. The implementation guidance carries the diff rules (`--- a/<path>` and `+++ b/<path>`
+computes the prompt hash over all three parts. The Anthropic client sends the system prompt and the stable context
+as two text blocks with ephemeral cache breakpoints, followed by the stage part without one, and reports the cache
+reads and writes in `LlmUsage` (section 10.1); a prefix shorter than the model's minimum cacheable length is simply
+not cached. The Ollama client sends `LlmRequest.userWithContext()`, the stable context followed by the stage part in
+one user message. The implementation guidance carries the diff rules (`--- a/<path>` and `+++ b/<path>`
 headers, correct `@@ -a,b +c,d @@` numbers counted on the shown source, three verbatim context lines around every
 change, FULL content for new files); the verifier is told to compare every DIFF hunk with the shown source and to
 separate blocking from advisory findings
@@ -656,8 +966,11 @@ next to the file as `<file>.skeleton` for human completion, `DELETE` deletes, an
 leading space, trailing code fences). Each hunk is placed in order, never before the end of the previous one: an
 exact match at the declared position (shifted by the offset of earlier hunks), then a whitespace-insensitive match
 there, then the nearest exact and then whitespace-insensitive match within 50 lines, then a unique exact match
-anywhere after the previous hunk; context lines keep the file's own text, and the line separator (LF or CRLF) and
-the trailing newline are preserved. The whole change set is checked, and every diff applied in memory, before
+anywhere after the previous hunk; a hunk without line numbers must match exactly once, or it is rejected instead of
+patching the first place it fits. Context lines keep the file's own text, each original line keeps its own line
+ending (also in files that mix LF and CRLF), and the trailing newline is preserved. The sandbox also rejects two
+changes of one file under different spellings, directory targets, paths below a file, path segments ending in a dot
+or a space and non-normalized spellings, which Windows would otherwise rewrite past the protected-path rules. The whole change set is checked, and every diff applied in memory, before
 anything is written: one hunk that cannot be placed rejects the change set, `SandboxMaterializer` deletes the
 partly prepared sandbox and fails the attempt with INVALID_OUTPUT. The message names the hunk, the path, the first
 expected line that does not match and the nearest mismatch in the file (for example `hunk 2/2 of
@@ -675,6 +988,34 @@ sources, and only a sandbox build proves that they compile.
 INVALID_OUTPUT); unknown stages are rejected at start. Under the lock the engine wraps only the primary agent in
 [`FaultInjectingStageAgent`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/FaultInjectingStageAgent.java); the injection count is persisted with the run, so injection is deterministic and
 survives restarts; TIMEOUT is simulated immediately (`transientFaultIsRetriedTwiceThenSucceedsAndRecoveryIsMeasured`).
+
+### 11.1 Dependency inventory in the security review
+
+For `REPO` runs both security review agents (deterministic and LLM) get the dependency inventory from the engine,
+never from model output ([`DependencyReview`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/agent/DependencyReview.java)).
+[`DependencyInventory`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/workspace/DependencyInventory.java) reads every `pom.xml` of the run's sandbox when one
+exists (so the change is included), else of the workspace root, without following symbolic links or descending into
+`target`, `.git`, `node_modules`, `sandbox`, `.idea`, `.vscode`, `data`, `build` or `out` (at most 500 POMs of 2 MB
+each). POMs are parsed with DOCTYPE declarations rejected, so no entity is ever expanded; a POM that cannot be parsed
+that way is flagged. Properties resolve through the module and its parents in the workspace; a version that still
+holds an unresolved expression is recorded as `unknown`, not as the raw expression.
+
+| Flag | Severity |
+|---|---|
+| `system` scope; `LATEST` or `RELEASE` version | HIGH |
+| version range; SNAPSHOT of an artifact that is not a workspace module; POM that cannot be parsed securely | MEDIUM |
+| the same artifact declared twice in one section of a module; a plugin without a version that nothing in the workspace manages | LOW |
+
+The review adds the check `dependency-inventory` (passed when no flag is HIGH), one finding per kind of flag
+(prefixed `Dependency hygiene: `) and the records to `SecurityReview.dependencies`, which the control plane shows as a
+table with the flags of each declaration. On the committed tree the inventory reads 4 POMs with 68 declarations and
+no flags. This is an inventory and hygiene check, not a vulnerability scan: it never resolves artifacts and knows
+nothing about CVEs. An external scanner can be configured (`sdlc.engine.dependency-scan-command`, for example an
+OWASP dependency-check goal; it needs the sandbox): it runs in the run's sandbox through the same build runner and
+Maven-only allow-list as sandbox builds, only its exit status and the first 2000 characters of its redacted output
+are recorded (check `dependency-scan`), a non-zero exit is a HIGH finding, and a scan that could not run or timed out
+(default 5 min) is a MEDIUM finding ([`DependencyInventoryTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/workspace/DependencyInventoryTest.java),
+[`DependencyReviewTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/agent/DependencyReviewTest.java)).
 
 ## 12. Worked example: greenfield run in GUIDED autonomy
 

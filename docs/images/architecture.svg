@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1200" height="640" viewBox="0 0 1200 640" font-family="Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" fill="#1f2328" role="img" aria-labelledby="title desc">
   <title id="title">System architecture: control plane and workload</title>
-  <desc id="desc">The orchestrator-app control plane on port 8090 (REST API, operator console, orchestrator-core engine, stage agents, H2/JPA persistence) reads the source tree of the url-shortener workload on port 8080 for codebase reasoning. A human operator uses the console for approvals, clarifications, re-plans and stop/resume.</desc>
+  <desc id="desc">The orchestrator-app control plane on port 8090 (REST API, operator console, orchestrator-core engine, stage agents, JPA persistence on H2 or PostgreSQL) reads the source tree of the url-shortener workload on port 8080 for codebase reasoning. A human operator uses the console for approvals, clarifications, re-plans and stop/resume.</desc>
   <defs>
     <style type="text/css"><![CDATA[
       text { font-family: Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
@@ -59,7 +59,7 @@
   <rect x="228" y="107" width="120" height="22" rx="11" fill="#0969da"/>
   <text class="pill" x="288" y="122" text-anchor="middle">CONTROL PLANE</text>
   <text class="ptitle" x="362" y="124">orchestrator-app <tspan class="mono" font-size="14" fill="#57606a">:8090</tspan></text>
-  <text class="note" x="1156" y="123" text-anchor="end">Spring Boot · virtual threads · per-run lock</text>
+  <text class="note" x="1156" y="123" text-anchor="end">Spring Boot · virtual threads · per-run lock · run leases</text>
 
   <!-- column A: console + REST -->
   <rect class="card" x="232" y="144" width="200" height="118" rx="10" filter="url(#shadow)"/>
@@ -77,7 +77,7 @@
   <text class="cd" x="248" y="380">approve · clarify · re-plan</text>
 
   <line class="edge" x1="332" y1="263" x2="332" y2="288" marker-end="url(#arrow)"/>
-  <text class="note" x="340" y="280">polls</text>
+  <text class="note" x="340" y="280">SSE + polls</text>
 
   <!-- column B: engine -->
   <rect class="card" x="460" y="144" width="376" height="264" rx="10" stroke="#0969da" stroke-opacity="0.6" filter="url(#shadow)"/>
@@ -107,7 +107,7 @@
 
     <rect x="476" y="347" width="166" height="40" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
     <circle cx="492" cy="367" r="4" fill="#0969da"/>
-    <text class="chip" x="504" y="372">Audit log</text>
+    <text class="chip" x="504" y="372">Hash-chained audit</text>
     <rect x="654" y="347" width="166" height="40" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
     <circle cx="670" cy="367" r="4" fill="#0969da"/>
     <text class="chip" x="682" y="372">Reliability metrics</text>

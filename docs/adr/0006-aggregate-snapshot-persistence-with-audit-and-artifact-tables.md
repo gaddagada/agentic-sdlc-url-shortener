@@ -1,6 +1,8 @@
 # ADR 0006: Persist the run aggregate as a JSON snapshot plus append-only audit and artifact tables
 
-Status: Accepted (2026-10-29)
+Status: Accepted (2026-10-29). Amended by [ADR 0013](0013-hash-chained-audit-and-signed-change-records.md) (audit
+events are hash-chained per run) and [ADR 0017](0017-server-sent-events-and-paged-listing.md) (listing columns on
+`runs`).
 
 ## Context
 
