@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Operator console for the agentic SDLC orchestrator: runs, approvals, pipeline, artifacts, audit and reliability metrics.">
+  <title>SDLC Orchestrator &middot; Operator console</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%232563eb'/%3E%3Cpath d='M6 8h5M6 12h8M6 16h12' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to run details</a>
+
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 24 24" aria-hidden="true"><rect width="24" height="24" rx="6"/><path d="M6 8h5M6 12h8M6 16h12"/></svg>
+      <span class="brand-name">SDLC Orchestrator</span>
+      <span class="brand-tag">Operator console</span>
+    </div>
+    <div id="providers" class="providers" role="group" aria-label="Agent providers"></div>
+    <div class="topbar-tools">
+      <span id="conn" class="conn" hidden>Backend unreachable</span>
+      <label class="operator">
+        <span>Operator</span>
+        <input id="operator-id" type="text" maxlength="64" autocomplete="username" spellcheck="false" placeholder="your.name"
+               title="Sent as X-Operator-Id and recorded on every action">
+      </label>
+      <nav class="links" aria-label="Developer links">
+        <a href="/swagger-ui.html" target="_blank" rel="noopener">API docs</a>
+        <a href="/actuator/health" target="_blank" rel="noopener">Health</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar" aria-label="Runs">
+      <section class="card" aria-labelledby="new-run-title">
+        <h2 id="new-run-title">New run</h2>
+        <form id="new-run-form" class="form" novalidate>
+          <label class="field">
+            <span>Scenario</span>
+            <select id="nr-scenario"><option value="">Custom requirement</option></select>
+          </label>
+          <p id="nr-description" class="muted small" hidden></p>
+          <details id="nr-walkthrough-wrap" class="walkthrough" open hidden>
+            <summary>Walkthrough</summary>
+            <ol id="nr-walkthrough"></ol>
+          </details>
+          <label class="field">
+            <span>Requirement <span class="muted small">(<span id="nr-count">0</span>/4000)</span></span>
+            <textarea id="nr-requirement" rows="6" maxlength="4000" required
+                      placeholder="What should change, for whom, under which constraints and acceptance criteria?"></textarea>
+          </label>
+          <div class="field-row">
+            <label class="field">
+              <span>Autonomy</span>
+              <select id="nr-autonomy">
+                <option value="FULL_AUTO">Full auto</option>
+                <option value="GUIDED" selected>Guided</option>
+                <option value="STRICT">Strict</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>Workspace</span>
+              <select id="nr-workspace">
+                <option value="REPO" selected>Repository</option>
+                <option value="NONE">None</option>
+              </select>
+            </label>
+          </div>
+          <label class="field">
+            <span>Provider</span>
+            <select id="nr-provider"><option value="">default</option></select>
+          </label>
+          <fieldset class="fault">
+            <legend>Fault injection <span class="muted small">(optional)</span></legend>
+            <div class="field-row three">
+              <label class="field"><span>Stage</span><select id="nr-fault-stage"></select></label>
+              <label class="field"><span>Fail times</span><input id="nr-fault-times" type="number" min="1" max="99" value="1" inputmode="numeric"></label>
+              <label class="field">
+                <span>Kind</span>
+                <select id="nr-fault-kind">
+                  <option value="TRANSIENT">Transient</option>
+                  <option value="FATAL">Fatal</option>
+                  <option value="TIMEOUT">Timeout</option>
+                  <option value="INVALID_OUTPUT">Invalid output</option>
+                </select>
+              </label>
+            </div>
+          </fieldset>
+          <div class="form-actions">
+            <button type="submit" id="nr-start" class="btn primary">Start run</button>
+            <button type="button" id="nr-scenario-run" class="btn"
+                    title="Runs the catalog scenario exactly as defined (requirement, autonomy, workspace, faults)">Run scenario</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="card runs-card" aria-labelledby="runs-title">
+        <div class="card-head">
+          <h2 id="runs-title">Runs</h2>
+          <span id="runs-count" class="count"></span>
+        </div>
+        <ul id="runs-list" class="runs-list"></ul>
+      </section>
+    </aside>
+
+    <main id="main" class="main" tabindex="-1">
+      <section id="empty-state" class="card empty-state" aria-labelledby="empty-title">
+        <h2 id="empty-title">No run selected</h2>
+        <p>Start a run from the panel on the left, or pick an existing one, to watch the ten-stage SDLC pipeline execute,
+          decide approval gates, answer clarifications and inspect every artifact with its provenance.</p>
+        <ol class="muted">
+          <li>Enter your operator id (top right). It is recorded with every governance action.</li>
+          <li>Choose a scenario to prefill the form, then follow its walkthrough.</li>
+          <li>Click a stage in the pipeline graph to open the artifact it produced.</li>
+        </ol>
+      </section>
+
+      <div id="run-view" class="run-view" hidden>
+        <section id="status-banner" class="card banner" aria-label="Run status"></section>
+        <section id="actions-card" class="card actions-card" aria-label="Pending actions and run controls" hidden></section>
+        <section class="card" aria-labelledby="graph-title">
+          <div class="card-head">
+            <h2 id="graph-title">Pipeline</h2>
+            <div id="graph-legend" class="legend" aria-label="Status colours"></div>
+          </div>
+          <div id="graph" class="graph-wrap"></div>
+        </section>
+      </div>
+
+      <section id="details-card" class="card details-card" aria-label="Run details">
+        <div id="tablist" class="tablist" role="tablist" aria-label="Run details">
+          <button type="button" class="tab" role="tab" id="tab-artifacts" data-tab="artifacts" aria-controls="panel-artifacts">Artifacts</button>
+          <button type="button" class="tab" role="tab" id="tab-audit" data-tab="audit" aria-controls="panel-audit">Audit</button>
+          <button type="button" class="tab" role="tab" id="tab-lineage" data-tab="lineage" aria-controls="panel-lineage">Lineage</button>
+          <button type="button" class="tab" role="tab" id="tab-metrics" data-tab="metrics" aria-controls="panel-metrics">Metrics</button>
+          <button type="button" class="tab" role="tab" id="tab-policy" data-tab="policy" aria-controls="panel-policy">Policy</button>
+        </div>
+        <div id="panel-artifacts" class="panel" role="tabpanel" aria-labelledby="tab-artifacts" tabindex="0">
+          <div class="artifacts">
+            <nav id="art-list" class="art-list" aria-label="Artifacts by stage"></nav>
+            <div id="art-detail" class="art-detail"></div>
+          </div>
+        </div>
+        <div id="panel-audit" class="panel" role="tabpanel" aria-labelledby="tab-audit" tabindex="0" hidden></div>
+        <div id="panel-lineage" class="panel" role="tabpanel" aria-labelledby="tab-lineage" tabindex="0" hidden></div>
+        <div id="panel-metrics" class="panel" role="tabpanel" aria-labelledby="tab-metrics" tabindex="0" hidden></div>
+        <div id="panel-policy" class="panel" role="tabpanel" aria-labelledby="tab-policy" tabindex="0" hidden></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toasts" class="toasts"></div>
+  <div id="announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+  <noscript><p class="noscript">The operator console needs JavaScript enabled.</p></noscript>
+</body>
+</html>
