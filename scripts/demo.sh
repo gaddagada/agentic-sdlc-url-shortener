@@ -39,12 +39,17 @@ fi
 # tr strips the carriage returns a Windows Python writes to stdout, which would otherwise break URLs built from ids.
 json() { "$PY" -c "import sys, json; d = json.load(sys.stdin); $1" | tr -d '\r'; }
 
+# When the control plane runs with sdlc.security.api-key set, export SDLC_API_KEY to authenticate.
+API_KEY="${SDLC_API_KEY:-}"
+
 api() {
   local method="$1" path="$2" body="${3:-}"
+  local -a headers=(-H "X-Operator-Id: $OPERATOR")
+  [[ -n "$API_KEY" ]] && headers+=(-H "X-Api-Key: $API_KEY")
   if [[ -n "$body" ]]; then
-    curl -sS -X "$method" "$BASE$path" -H "Content-Type: application/json" -H "X-Operator-Id: $OPERATOR" -d "$body"
+    curl -sS -X "$method" "$BASE$path" -H "Content-Type: application/json" "${headers[@]}" -d "$body"
   else
-    curl -sS -X "$method" "$BASE$path" -H "X-Operator-Id: $OPERATOR"
+    curl -sS -X "$method" "$BASE$path" "${headers[@]}"
   fi
 }
 
@@ -101,8 +106,8 @@ while true; do
     # Approvals
     printf '%s' "$VIEW" | json 'print("\n".join(a["stageId"] for a in d.get("pendingActions", []) if a["type"] == "APPROVAL"))' | while read -r stage; do
       [[ -z "$stage" ]] && continue
-      echo "  -> approving gate at stage '$stage' as $OPERATOR"
-      api POST "/api/v1/runs/$RUN_ID/stages/$stage/approve" '{"comment":"Approved via demo script after reviewing the artifact"}' >/dev/null
+      echo "  -> approving gate at stage '$stage' as $OPERATOR (demo auto-approval; a real operator reviews the artifact first)"
+      api POST "/api/v1/runs/$RUN_ID/stages/$stage/approve" '{"comment":"Auto-approved by scripts/demo.sh for demonstration purposes; not a human review"}' >/dev/null
     done
     # Clarifications
     QUESTIONS=$(printf '%s' "$VIEW" | json 'qs=[q for a in d.get("pendingActions", []) if a["type"]=="CLARIFICATION" for q in a["questions"]]; print("\n".join(q["id"]+"|"+q["question"] for q in qs))')

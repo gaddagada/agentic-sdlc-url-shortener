@@ -14,8 +14,10 @@ privacy.
 - Short codes are random Base62 strings of configurable length (default 7, 3.5 trillion values)
   generated with `SecureRandom`; collisions are handled by retrying on the unique constraint.
   Sequential or hash-derived codes would make links enumerable.
-- Click analytics never store raw client IP addresses; a SHA-256 of the IP with a daily rotating salt
-  supports approximate unique-visitor counts while limiting re-identification.
+- Click analytics never store raw client IP addresses; an HMAC-SHA256 of the IP, keyed with a secret
+  salt and scoped to the UTC day, supports approximate unique-visitor counts while limiting
+  re-identification. The salt must be a secret in production (the placeholder is rejected under the
+  `postgres`/`prod` profiles); with a known salt the IPv4 space could be brute-forced per day.
 - URL validation blocks non-HTTP schemes, userinfo, local hostnames and private, loopback, link-local
   and cloud-metadata IP literals. DNS resolution is deliberately not performed at creation time: it is
   slow, racy (DNS rebinding) and would make the API depend on network conditions. This gap is documented

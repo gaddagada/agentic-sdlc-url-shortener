@@ -22,6 +22,10 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
 
+  # Both applications bind to the loopback interface only. Required environment:
+  #   SDLC_SECURITY_API_KEY   shared key clients must send as X-Api-Key to the control plane
+  #   SHORTENER_IP_SALT       secret salt for visitor pseudonymization
+  # Optional: ANTHROPIC_API_KEY for the Claude provider.
   url-shortener:
     profiles: ["apps"]
     build:
@@ -33,8 +37,9 @@ services:
       SHORTENER_DB_USER: shortener
       SHORTENER_DB_PASSWORD: shortener
       SHORTENER_BASE_URL: http://localhost:8080
+      SHORTENER_ANALYTICS_IP_SALT: ${SHORTENER_IP_SALT:?set SHORTENER_IP_SALT to a secret value}
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,10 +50,11 @@ services:
       context: .
       dockerfile: orchestrator-app/Dockerfile
     environment:
+      SDLC_SECURITY_API_KEY: ${SDLC_SECURITY_API_KEY:?set SDLC_SECURITY_API_KEY to protect the control plane API}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       SDLC_LLM_OLLAMA_BASE_URL: http://host.docker.internal:11434
     ports:
-      - "8090:8090"
+      - "127.0.0.1:8090:8090"
 
 volumes:
   pgdata: {}

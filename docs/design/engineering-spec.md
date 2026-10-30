@@ -1,8 +1,16 @@
 # Engineering Specification: Agentic SDLC Orchestrator and URL Shortener
 
-Status: APPROVED FOR IMPLEMENTATION
+Status: IMPLEMENTED (this is the pre-implementation contract; the code is the source of truth)
 Version: 1.0
 Audience: implementers of the three Maven modules, and reviewers who want the full design rationale.
+
+> Implementation note. The modules were built from this specification and then hardened after an
+> independent review. Where the implementation deliberately refines the text below (for example:
+> checkpoints are taken per stage activation, risk acceptance is carried within a plan version,
+> acceptance into context happens only after the exit gate and any approval, denied artifacts are
+> removed from history, a human resume extends an exhausted budget, `ResilientStageAgent` was not
+> needed because the engine owns retries), `docs/ORCHESTRATION.md` describes the behaviour as
+> implemented and lists the differences.
 
 This document is the single source of truth for what is built. It was produced in the
 requirements/architecture phase and is intentionally precise: package layout, state machines,

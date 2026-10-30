@@ -22,6 +22,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 $headers = @{ "X-Operator-Id" = $Operator }
+# When the control plane runs with sdlc.security.api-key set, define SDLC_API_KEY to authenticate.
+if ($env:SDLC_API_KEY) { $headers["X-Api-Key"] = $env:SDLC_API_KEY }
 
 function Invoke-Api {
   param([string]$Method, [string]$Path, $Body = $null)
@@ -78,8 +80,8 @@ while ($true) {
   if ($view.status -eq "WAITING_HUMAN") {
     foreach ($action in @($view.pendingActions)) {
       if ($action.type -eq "APPROVAL") {
-        Write-Host "  -> approving gate at stage '$($action.stageId)' as $Operator"
-        Invoke-Api POST "/api/v1/runs/$runId/stages/$($action.stageId)/approve" @{ comment = "Approved via demo script after reviewing the artifact" } | Out-Null
+        Write-Host "  -> approving gate at stage '$($action.stageId)' as $Operator (demo auto-approval; a real operator reviews the artifact first)"
+        Invoke-Api POST "/api/v1/runs/$runId/stages/$($action.stageId)/approve" @{ comment = "Auto-approved by scripts/demo.ps1 for demonstration purposes; not a human review" } | Out-Null
       }
       elseif ($action.type -eq "CLARIFICATION") {
         $answers = @{}

@@ -1,0 +1,15 @@
+# Keep the container build context small and free of local state and secrets
+.git
+.github
+**/target
+data
+sandbox
+docs
+*.md
+.env
+.env.*
+*.pem
+*.key
+.idea
+.vscode
+scripts

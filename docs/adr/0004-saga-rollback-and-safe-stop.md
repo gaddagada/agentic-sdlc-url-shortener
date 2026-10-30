@@ -14,10 +14,12 @@ Equally, an engine that rolls back and then silently continues hides incidents f
   engine records a `Checkpoint` (accepted artifact versions, plan version, compensation watermark).
   Retries of the same activation reuse that checkpoint.
 - Agents may register `Compensation`s with their result (for example `DELETE_SANDBOX <path>`).
-- On unrecoverable failure (`FAILED` after retries and fallback, or a policy DENY), `RollbackService`
-  executes compensations registered after the checkpoint in reverse order, restores the checkpoint,
-  records `ROLLBACK_COMPLETED` (or `COMPENSATION_FAILED` with `HaltReason.ROLLBACK_FAILED`), and puts
-  the run into `SAFE_STOPPED`.
+- On unrecoverable failure of a stage (`FAILED` after retries and fallback, or a policy DENY at a
+  stage gate), `RollbackService` executes compensations registered after the checkpoint in reverse
+  order, restores the checkpoint (only a checkpoint of the current plan version is used), records
+  `ROLLBACK_COMPLETED` (plus `COMPENSATION_FAILED` and `HaltReason.ROLLBACK_FAILED` when a
+  compensation fails), and puts the run into `SAFE_STOPPED`. A policy denial of the requirement
+  itself at run start happens before any stage runs, so it safe-stops without a rollback.
 - A safe-stopped run only moves again on an explicit human command (`resume` or `replan`); a policy
   denial cannot be resumed, only re-planned with a changed requirement.
 

@@ -10,10 +10,17 @@ governance story.
 
 ## Decision
 
-- Every governance endpoint (approve, reject, clarify, replan, stop, resume) requires an
-  `X-Operator-Id` header; the identity is written into approvals, the audit log and the change record.
-- An optional shared API key (`sdlc.security.api-key`) protects all `/api/**` routes when set; when
-  unset the application logs a prominent warning that authentication is disabled (local development).
+- Every mutating endpoint (run creation, approve, reject, clarify, replan, stop, resume, reindex)
+  requires an `X-Operator-Id` header; the identity is written into approvals, the audit log and the
+  change record. The identity is self-asserted in the prototype: it provides attribution, not
+  authentication. Reserved system identities (`engine`, `system`, `deterministic`, `fallback:*`)
+  are rejected.
+- An optional shared API key (`sdlc.security.api-key`) protects all `/api/**` routes when set
+  (matched on the decoded, normalized path, so encoded or `;`-suffixed paths cannot bypass it); when
+  unset the application logs a prominent warning that authentication is disabled. The default is
+  open for local evaluation; `docker-compose.yml` requires the key.
+- An optional four-eyes rule (`sdlc.governance.four-eyes`) requires the release approver to differ
+  from the run's requester and from the design approver.
 - The shortener's management API has no authentication in the prototype; the README states the
   production path (gateway authentication, per-client API keys for link creation).
 - Production path for both: Spring Security with OIDC/SSO, operator identity from the token, and
