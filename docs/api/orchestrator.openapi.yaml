@@ -1,0 +1,1496 @@
+openapi: 3.1.0
+info:
+  title: SDLC Orchestrator API
+  description: "Control plane of the agentic SDLC orchestrator: start runs, govern\
+    \ them (approve, reject, clarify, re-plan, stop, resume) and inspect artifacts,\
+    \ lineage, audit trail and reliability metrics. Every POST requires the X-Operator-Id\
+    \ header. Errors are RFC 9457 Problem Details."
+  license:
+    name: Apache-2.0
+  version: v1
+servers:
+- url: http://localhost:8090
+  description: Generated server url
+tags:
+- name: Scenarios
+  description: Executable demo scenarios
+- name: Metrics
+  description: Reliability metrics
+- name: Workflow
+  description: Workflow definition
+- name: Workspace
+  description: Codebase index of the repository workspace
+- name: Providers
+  description: Agent providers
+- name: Run evidence
+  description: "Artifacts, lineage and audit trail of a run"
+- name: Runs
+  description: Run lifecycle and governance commands
+paths:
+  /api/v1/workspace/reindex:
+    post:
+      tags:
+      - Workspace
+      summary: Rebuild the codebase index
+      operationId: reindexWorkspace
+      parameters:
+      - name: X-Operator-Id
+        in: header
+        description: Id of the human operator issuing the request (recorded in the
+          audit trail)
+        required: true
+        schema:
+          type: string
+          pattern: "[A-Za-z0-9._@-]{1,64}"
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/WorkspaceIndexView"
+  /api/v1/scenarios/{key}/run:
+    post:
+      tags:
+      - Scenarios
+      summary: Start a run of a scenario
+      operationId: runScenario
+      parameters:
+      - name: key
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: provider
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - "null"
+          maxLength: 32
+          minLength: 0
+      - name: X-Operator-Id
+        in: header
+        description: Id of the human operator issuing the request (recorded in the
+          audit trail)
+        required: true
+        schema:
+          type: string
+          pattern: "[A-Za-z0-9._@-]{1,64}"
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/RunView"
+  /api/v1/runs:
+    get:
+      tags:
+      - Runs
+      summary: "List runs, newest first"
+      operationId: listRuns
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RunSummaryView"
+    post:
+      tags:
+      - Runs
+      summary: Start a run
+      operationId: createRun
+      parameters:
+      - name: X-Operator-Id
+        in: header
+        description: Id of the human operator issuing the request (recorded in the
+          audit trail)
+        required: true
+        schema:
+          type: string
+          pattern: "[A-Za-z0-9._@-]{1,64}"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRunRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/RunView"
+  /api/v1/runs/{id}/stop:
+    post:
+      tags:
+      - Runs
+      summary: Stop a run (safe-stop)
+      operationId: stopRun
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-Operator-Id
+        in: header
+        description: Id of the human operator issuing the request (recorded in the
+          audit trail)
+        required: true
+        schema:
+          type: string
+          pattern: "[A-Za-z0-9._@-]{1,64}"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StopRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/RunView"
+  /api/v1/runs/{id}/stages/{stageId}/reject:
+    post:
+      tags:
+      - Runs
+      summary: Reject the pending gate of a stage (rework or abort)
+      operationId: rejectStage
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: stageId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-Operator-Id
+        in: header
+        description: Id of the human operator issuing the request (recorded in the
+          audit trail)
+        required: true
+        schema:
+          type: string
+          pattern: "[A-Za-z0-9._@-]{1,64}"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RejectRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/RunView"
+  /api/v1/runs/{id}/stages/{stageId}/approve:
+    post:
+      tags:
+      - Runs
+      summary: Approve the pending gate of a stage
+      operationId: approveStage
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: stageId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-Operator-Id
+        in: header
+        description: Id of the human operator issuing the request (recorded in the
+          audit trail)
+        required: true
+        schema:
+          type: string
+          pattern: "[A-Za-z0-9._@-]{1,64}"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApproveRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/RunView"
+  /api/v1/runs/{id}/resume:
+    post:
+      tags:
+      - Runs
+      summary: Resume a safe-stopped run
+      operationId: resumeRun
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-Operator-Id
+        in: header
+        description: Id of the human operator issuing the request (recorded in the
+          audit trail)
+        required: true
+        schema:
+          type: string
+          pattern: "[A-Za-z0-9._@-]{1,64}"
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/RunView"
+  /api/v1/runs/{id}/replan:
+    post:
+      tags:
+      - Runs
+      summary: Re-plan with a changed requirement
+      operationId: replanRun
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-Operator-Id
+        in: header
+        description: Id of the human operator issuing the request (recorded in the
+          audit trail)
+        required: true
+        schema:
+          type: string
+          pattern: "[A-Za-z0-9._@-]{1,64}"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReplanRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/RunView"
+  /api/v1/runs/{id}/clarify:
+    post:
+      tags:
+      - Runs
+      summary: Answer the open clarification questions
+      operationId: clarifyRun
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: X-Operator-Id
+        in: header
+        description: Id of the human operator issuing the request (recorded in the
+          audit trail)
+        required: true
+        schema:
+          type: string
+          pattern: "[A-Za-z0-9._@-]{1,64}"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ClarifyRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/RunView"
+  /api/v1/workspace/index:
+    get:
+      tags:
+      - Workspace
+      summary: Get the current codebase index
+      operationId: getWorkspaceIndex
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/WorkspaceIndexView"
+  /api/v1/workflows/default:
+    get:
+      tags:
+      - Workflow
+      summary: Get the default SDLC workflow
+      operationId: getDefaultWorkflow
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/WorkflowView"
+  /api/v1/scenarios:
+    get:
+      tags:
+      - Scenarios
+      summary: List the scenarios
+      operationId: listScenarios
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ScenarioView"
+  /api/v1/runs/{id}:
+    get:
+      tags:
+      - Runs
+      summary: Get a run
+      operationId: getRun
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/RunView"
+  /api/v1/runs/{id}/lineage:
+    get:
+      tags:
+      - Run evidence
+      summary: Get the artifact lineage of a run
+      operationId: getLineage
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/LineageView"
+  /api/v1/runs/{id}/graph:
+    get:
+      tags:
+      - Runs
+      summary: Get the pipeline graph of a run
+      operationId: getRunGraph
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/GraphView"
+  /api/v1/runs/{id}/audit:
+    get:
+      tags:
+      - Run evidence
+      summary: Get the audit trail of a run
+      operationId: getAudit
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: afterSeq
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int64
+          default: 0
+          minimum: 0
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 500
+          maximum: 5000
+          minimum: 1
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditEventView"
+  /api/v1/runs/{id}/artifacts:
+    get:
+      tags:
+      - Run evidence
+      summary: List the artifact versions of a run
+      operationId: listArtifacts
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ArtifactSummaryView"
+  /api/v1/runs/{id}/artifacts/{stageId}:
+    get:
+      tags:
+      - Run evidence
+      summary: Get an artifact of a stage (accepted version by default)
+      operationId: getArtifact
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: stageId
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: version
+        in: query
+        required: false
+        schema:
+          type:
+          - integer
+          - "null"
+          format: int32
+          minimum: 1
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ArtifactView"
+  /api/v1/providers:
+    get:
+      tags:
+      - Providers
+      summary: List agent providers and their availability
+      operationId: listProviders
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProviderView"
+  /api/v1/metrics/reliability:
+    get:
+      tags:
+      - Metrics
+      summary: Get reliability metrics over all runs
+      operationId: getReliabilityMetrics
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ReliabilityMetricsView"
+components:
+  schemas:
+    EndpointView:
+      type: object
+      properties:
+        method:
+          type: string
+        path:
+          type: string
+        controller:
+          type: string
+        handler:
+          type: string
+    TypeView:
+      type: object
+      properties:
+        fqcn:
+          type: string
+        kind:
+          type: string
+        path:
+          type: string
+        module:
+          type: string
+        table:
+          type: string
+        test:
+          type: boolean
+        endpoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/EndpointView"
+        references:
+          type: integer
+          format: int32
+    WorkspaceIndexView:
+      type: object
+      properties:
+        root:
+          type: string
+        enabled:
+          type: boolean
+        indexedAt:
+          type: string
+          format: date-time
+        indexedFiles:
+          type: integer
+          format: int32
+        error:
+          type: string
+        counts:
+          type: object
+          additionalProperties:
+            type: object
+            additionalProperties:
+              type: integer
+              format: int32
+        types:
+          type: array
+          items:
+            $ref: "#/components/schemas/TypeView"
+        endpoints:
+          type: array
+          items:
+            $ref: "#/components/schemas/EndpointView"
+        migrations:
+          type: array
+          items:
+            type: string
+    ApprovalView:
+      type: object
+      properties:
+        id:
+          type: string
+        kind:
+          type: string
+        status:
+          type: string
+        reason:
+          type: string
+        ruleIds:
+          type: array
+          items:
+            type: string
+        riskLevel:
+          type: string
+        planVersion:
+          type: integer
+          format: int32
+        artifactVersion:
+          type: integer
+          format: int32
+        requestedAt:
+          type: string
+          format: date-time
+        decidedAt:
+          type: string
+          format: date-time
+        decidedBy:
+          type: string
+        comment:
+          type: string
+        revokedAt:
+          type: string
+          format: date-time
+        revokedReason:
+          type: string
+    BudgetView:
+      type: object
+      properties:
+        maxFeedbackLoops:
+          type: integer
+          format: int32
+        maxReplans:
+          type: integer
+          format: int32
+        maxAgentCalls:
+          type: integer
+          format: int32
+        maxLlmTokens:
+          type: integer
+          format: int64
+        maxActiveSeconds:
+          type: integer
+          format: int64
+        agentCallsUsed:
+          type: integer
+          format: int32
+        llmTokensUsed:
+          type: integer
+          format: int64
+    ClarificationQuestionView:
+      type: object
+      properties:
+        id:
+          type: string
+        question:
+          type: string
+        why:
+          type: string
+        suggestedAnswers:
+          type: array
+          items:
+            type: string
+    ClarificationView:
+      type: object
+      properties:
+        stageId:
+          type: string
+        questions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClarificationQuestionView"
+        answers:
+          type: object
+          additionalProperties:
+            type: string
+        requestedAt:
+          type: string
+          format: date-time
+        answeredAt:
+          type: string
+          format: date-time
+        answeredBy:
+          type: string
+    CountersView:
+      type: object
+      properties:
+        retries:
+          type: integer
+          format: int32
+        fallbacks:
+          type: integer
+          format: int32
+        rollbacks:
+          type: integer
+          format: int32
+        replans:
+          type: integer
+          format: int32
+        feedbackLoops:
+          type: integer
+          format: int32
+        approvalsRequested:
+          type: integer
+          format: int32
+        approvalsGranted:
+          type: integer
+          format: int32
+        approvalsRejected:
+          type: integer
+          format: int32
+        approvalsRevoked:
+          type: integer
+          format: int32
+        agentCalls:
+          type: integer
+          format: int32
+        llmCalls:
+          type: integer
+          format: int32
+        llmInputTokens:
+          type: integer
+          format: int64
+        llmOutputTokens:
+          type: integer
+          format: int64
+    PendingActionView:
+      type: object
+      properties:
+        type:
+          type: string
+        stageId:
+          type: string
+        gateKind:
+          type: string
+        approvalId:
+          type: string
+        reason:
+          type: string
+        ruleIds:
+          type: array
+          items:
+            type: string
+        requestedAt:
+          type: string
+          format: date-time
+        questions:
+          type: array
+          items:
+            $ref: "#/components/schemas/ClarificationQuestionView"
+    PolicyFindingView:
+      type: object
+      properties:
+        ruleId:
+          type: string
+        severity:
+          type: string
+        verdict:
+          type: string
+        message:
+          type: string
+        stageId:
+          type: string
+        phase:
+          type: string
+        planVersion:
+          type: integer
+          format: int32
+        timestamp:
+          type: string
+          format: date-time
+    RiskView:
+      type: object
+      properties:
+        level:
+          type: string
+        factors:
+          type: array
+          items:
+            type: string
+    RunView:
+      type: object
+      properties:
+        id:
+          type: string
+        scenario:
+          type: string
+        status:
+          type: string
+        haltReason:
+          type: string
+        haltDetail:
+          type: string
+        requirement:
+          type: string
+        activeRequirement:
+          type: string
+        autonomy:
+          type: string
+        provider:
+          type: string
+        workspace:
+          type: string
+        createdBy:
+          type: string
+        planVersion:
+          type: integer
+          format: int32
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        endedAt:
+          type: string
+          format: date-time
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/StageView"
+        pendingActions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PendingActionView"
+        clarification:
+          $ref: "#/components/schemas/ClarificationView"
+        budget:
+          $ref: "#/components/schemas/BudgetView"
+        counters:
+          $ref: "#/components/schemas/CountersView"
+        timing:
+          $ref: "#/components/schemas/TimingView"
+        risk:
+          $ref: "#/components/schemas/RiskView"
+        policyFindings:
+          type: array
+          items:
+            $ref: "#/components/schemas/PolicyFindingView"
+    StageView:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+        dependsOn:
+          type: array
+          items:
+            type: string
+        status:
+          type: string
+        attempts:
+          type: integer
+          format: int32
+        activeAgent:
+          type: string
+        startedAt:
+          type: string
+          format: date-time
+        endedAt:
+          type: string
+          format: date-time
+        durationMs:
+          type: integer
+          format: int64
+        lastError:
+          type: string
+        artifactVersion:
+          type: integer
+          format: int32
+        artifactKind:
+          type: string
+        approval:
+          $ref: "#/components/schemas/ApprovalView"
+        feedback:
+          type: array
+          items:
+            type: string
+        nextAttemptAt:
+          type: string
+          format: date-time
+    TimingView:
+      type: object
+      properties:
+        endToEndMs:
+          type: integer
+          format: int64
+        activeMs:
+          type: integer
+          format: int64
+        humanWaitMs:
+          type: integer
+          format: int64
+        firstFailureAt:
+          type: string
+          format: date-time
+        recoveredAt:
+          type: string
+          format: date-time
+        mttrMs:
+          type: integer
+          format: int64
+    BudgetRequest:
+      type: object
+      properties:
+        maxFeedbackLoops:
+          type: integer
+          format: int32
+          maximum: 10
+          minimum: 0
+        maxReplans:
+          type: integer
+          format: int32
+          maximum: 10
+          minimum: 0
+        maxAgentCalls:
+          type: integer
+          format: int32
+          maximum: 500
+          minimum: 1
+        maxLlmTokens:
+          type: integer
+          format: int64
+          maximum: 10000000
+          minimum: 0
+    CreateRunRequest:
+      type: object
+      properties:
+        requirement:
+          type: string
+          maxLength: 4000
+          minLength: 10
+        scenario:
+          type: string
+          maxLength: 64
+          minLength: 0
+          pattern: "[A-Za-z0-9._-]*"
+        autonomy:
+          type: string
+          enum:
+          - FULL_AUTO
+          - GUIDED
+          - STRICT
+        provider:
+          type: string
+          maxLength: 32
+          minLength: 0
+        faults:
+          type: array
+          items:
+            $ref: "#/components/schemas/FaultRequest"
+          maxItems: 10
+          minItems: 0
+        workspace:
+          type: string
+          enum:
+          - NONE
+          - REPO
+        budget:
+          $ref: "#/components/schemas/BudgetRequest"
+      required:
+      - requirement
+    FaultRequest:
+      type: object
+      properties:
+        stageId:
+          type: string
+          maxLength: 64
+          minLength: 0
+        failTimes:
+          type: integer
+          format: int32
+          maximum: 99
+          minimum: 1
+        kind:
+          type: string
+          enum:
+          - TRANSIENT
+          - FATAL
+          - TIMEOUT
+          - INVALID_OUTPUT
+      required:
+      - kind
+      - stageId
+    StopRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          maxLength: 2000
+          minLength: 0
+    RejectRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          maxLength: 2000
+          minLength: 0
+        disposition:
+          type: string
+          enum:
+          - REWORK
+          - ABORT
+      required:
+      - disposition
+      - reason
+    ApproveRequest:
+      type: object
+      properties:
+        comment:
+          type: string
+          maxLength: 2000
+          minLength: 0
+    ReplanRequest:
+      type: object
+      properties:
+        requirement:
+          type: string
+          maxLength: 4000
+          minLength: 10
+      required:
+      - requirement
+    ClarifyRequest:
+      type: object
+      properties:
+        answers:
+          type: object
+          additionalProperties:
+            type: string
+          minProperties: 1
+      required:
+      - answers
+    StageDefinitionView:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        role:
+          type: string
+        dependsOn:
+          type: array
+          items:
+            type: string
+        entryApproval:
+          type: string
+        exitApproval:
+          type: string
+        maxAttempts:
+          type: integer
+          format: int32
+        timeoutSeconds:
+          type: integer
+          format: int64
+        fallbackToDeterministic:
+          type: boolean
+    WorkflowView:
+      type: object
+      properties:
+        id:
+          type: string
+        version:
+          type: integer
+          format: int32
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/StageDefinitionView"
+        layers:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
+    FaultView:
+      type: object
+      properties:
+        stageId:
+          type: string
+        failTimes:
+          type: integer
+          format: int32
+        kind:
+          type: string
+    ScenarioView:
+      type: object
+      properties:
+        key:
+          type: string
+        title:
+          type: string
+        kind:
+          type: string
+        description:
+          type: string
+        requirement:
+          type: string
+        autonomy:
+          type: string
+        workspace:
+          type: string
+        faults:
+          type: array
+          items:
+            $ref: "#/components/schemas/FaultView"
+        walkthrough:
+          type: array
+          items:
+            type: string
+    ProgressView:
+      type: object
+      properties:
+        succeeded:
+          type: integer
+          format: int32
+        total:
+          type: integer
+          format: int32
+    RunSummaryView:
+      type: object
+      properties:
+        id:
+          type: string
+        scenario:
+          type: string
+        status:
+          type: string
+        haltReason:
+          type: string
+        requirement:
+          type: string
+        planVersion:
+          type: integer
+          format: int32
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        pendingActions:
+          type: integer
+          format: int32
+        progress:
+          $ref: "#/components/schemas/ProgressView"
+    EdgeView:
+      type: object
+      properties:
+        from:
+          type: string
+        to:
+          type: string
+    LineageView:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeView"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeView"
+    NodeView:
+      type: object
+      properties:
+        artifactId:
+          type: string
+        stageId:
+          type: string
+        kind:
+          type: string
+        version:
+          type: integer
+          format: int32
+        hash:
+          type: string
+        accepted:
+          type: boolean
+    GraphView:
+      type: object
+      properties:
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeView"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/EdgeView"
+        layers:
+          type: array
+          items:
+            type: array
+            items:
+              type: string
+    ActorView:
+      type: object
+      properties:
+        type:
+          type: string
+        id:
+          type: string
+    AuditEventView:
+      type: object
+      properties:
+        seq:
+          type: integer
+          format: int64
+        timestamp:
+          type: string
+          format: date-time
+        stageId:
+          type: string
+        type:
+          type: string
+        actor:
+          $ref: "#/components/schemas/ActorView"
+        message:
+          type: string
+        data:
+          type: object
+          additionalProperties: {}
+    ArtifactSummaryView:
+      type: object
+      properties:
+        id:
+          type: string
+        stageId:
+          type: string
+        kind:
+          type: string
+        version:
+          type: integer
+          format: int32
+        planVersion:
+          type: integer
+          format: int32
+        hash:
+          type: string
+        accepted:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        provenance:
+          $ref: "#/components/schemas/ProvenanceView"
+    ProvenanceView:
+      type: object
+      properties:
+        derivedFrom:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int32
+        agentRole:
+          type: string
+        agentId:
+          type: string
+        providerId:
+          type: string
+        model:
+          type: string
+        promptHash:
+          type: string
+        inputTokens:
+          type: integer
+          format: int64
+        outputTokens:
+          type: integer
+          format: int64
+        latencyMs:
+          type: integer
+          format: int64
+        attempt:
+          type: integer
+          format: int32
+        planVersion:
+          type: integer
+          format: int32
+    ArtifactView:
+      type: object
+      properties:
+        id:
+          type: string
+        stageId:
+          type: string
+        kind:
+          type: string
+        version:
+          type: integer
+          format: int32
+        planVersion:
+          type: integer
+          format: int32
+        hash:
+          type: string
+        accepted:
+          type: boolean
+        createdAt:
+          type: string
+          format: date-time
+        provenance:
+          $ref: "#/components/schemas/ProvenanceView"
+        payload:
+          type: object
+          additionalProperties: {}
+        markdown:
+          type: string
+    ProviderView:
+      type: object
+      properties:
+        id:
+          type: string
+        available:
+          type: boolean
+        model:
+          type: string
+        detail:
+          type: string
+    Approvals:
+      type: object
+      properties:
+        requested:
+          type: integer
+          format: int64
+        approved:
+          type: integer
+          format: int64
+        rejected:
+          type: integer
+          format: int64
+        revoked:
+          type: integer
+          format: int64
+        meanDecisionMs:
+          type: number
+          format: double
+    Latency:
+      type: object
+      properties:
+        endToEndMsAvg:
+          type: number
+          format: double
+        endToEndMsP50:
+          type: integer
+          format: int64
+        endToEndMsP95:
+          type: integer
+          format: int64
+        activeMsAvg:
+          type: number
+          format: double
+        humanWaitMsAvg:
+          type: number
+          format: double
+        agentCallMsAvg:
+          type: number
+          format: double
+        agentCallMsP95:
+          type: integer
+          format: int64
+    Llm:
+      type: object
+      properties:
+        calls:
+          type: integer
+          format: int64
+        inputTokens:
+          type: integer
+          format: int64
+        outputTokens:
+          type: integer
+          format: int64
+    Recovery:
+      type: object
+      properties:
+        incidents:
+          type: integer
+          format: int32
+        recovered:
+          type: integer
+          format: int32
+        mttrMs:
+          type: number
+          format: double
+        unrecovered:
+          type: integer
+          format: int32
+    ReliabilityMetricsView:
+      type: object
+      properties:
+        runs:
+          $ref: "#/components/schemas/Runs"
+        stages:
+          $ref: "#/components/schemas/Stages"
+        latency:
+          $ref: "#/components/schemas/Latency"
+        recovery:
+          $ref: "#/components/schemas/Recovery"
+        approvals:
+          $ref: "#/components/schemas/Approvals"
+        llm:
+          $ref: "#/components/schemas/Llm"
+    Runs:
+      type: object
+      properties:
+        total:
+          type: integer
+          format: int32
+        completed:
+          type: integer
+          format: int32
+        aborted:
+          type: integer
+          format: int32
+        safeStopped:
+          type: integer
+          format: int32
+        inProgress:
+          type: integer
+          format: int32
+        waitingHuman:
+          type: integer
+          format: int32
+        successRate:
+          type: number
+          format: double
+    Stages:
+      type: object
+      properties:
+        executions:
+          type: integer
+          format: int64
+        retries:
+          type: integer
+          format: int64
+        retryRate:
+          type: number
+          format: double
+        fallbacks:
+          type: integer
+          format: int64
+        rollbacks:
+          type: integer
+          format: int64
+        rollbackFrequency:
+          type: number
+          format: double
+        feedbackLoops:
+          type: integer
+          format: int64
+        replans:
+          type: integer
+          format: int64
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      description: Required on /api/** only when sdlc.security.api-key is configured
+      name: X-Api-Key
+      in: header

@@ -1,0 +1,73 @@
+server:
+  port: 8090
+
+spring:
+  application:
+    name: sdlc-orchestrator
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:h2:file:./data/orchestrator;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      # Instants are stored in TIMESTAMP columns as UTC wall-clock time.
+      hibernate.type.preferred_instant_jdbc_type: TIMESTAMP
+      hibernate.jdbc.time_zone: UTC
+      hibernate.jdbc.batch_size: 50
+      hibernate.order_inserts: true
+  mvc:
+    problemdetails:
+      enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+  # Error responses are rendered by ApiExceptionHandler; do not attach its handlers to every operation.
+  override-with-generic-response: false
+  paths-to-match: /api/**
+
+sdlc:
+  workspace:
+    # root: detected by walking up from the working directory to the directory containing pom.xml and url-shortener
+    enabled: true
+  engine:
+    ambiguity-threshold: 0.5
+    sandbox-enabled: false
+    verify-build-enabled: false
+    backoff-scale: 1.0
+    sandbox-root: sandbox
+  security:
+    api-key: ""
+  console:
+    enabled: true
+  agents:
+    default-provider: deterministic         # deterministic | anthropic | ollama
+  llm:
+    anthropic:
+      enabled: true
+      model: claude-opus-5-5
+      api-key: ${ANTHROPIC_API_KEY:}
+      max-output-tokens: 16000
+      timeout: 180s
+    ollama:
+      enabled: true
+      base-url: http://localhost:11434
+      model: qwen2.5-coder:7b
+      timeout: 240s

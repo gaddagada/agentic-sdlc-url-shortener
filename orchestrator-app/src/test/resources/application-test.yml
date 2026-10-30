@@ -1,0 +1,13 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:orchestrator-test;DB_CLOSE_DELAY=-1
+
+sdlc:
+  engine:
+    backoff-scale: 0
+  llm:
+    anthropic:
+      # deterministic tests must not depend on a key in the environment
+      api-key: ""
+    ollama:
+      enabled: false

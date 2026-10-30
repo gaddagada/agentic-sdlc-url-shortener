@@ -1,0 +1,221 @@
+package com.agenticsdlc.orchestrator.app.llm;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+
+import com.agenticsdlc.orchestrator.core.agent.llm.LlmException;
+import com.agenticsdlc.orchestrator.core.agent.llm.LlmRequest;
+import com.agenticsdlc.orchestrator.core.agent.llm.LlmResponse;
+import com.agenticsdlc.orchestrator.core.artifact.TestPlan;
+import com.agenticsdlc.orchestrator.core.json.JsonCodec;
+import com.anthropic.core.JsonValue;
+import com.anthropic.core.ObjectMappers;
+import com.anthropic.core.http.Headers;
+import com.anthropic.errors.AnthropicException;
+import com.anthropic.errors.AnthropicInvalidDataException;
+import com.anthropic.errors.AnthropicIoException;
+import com.anthropic.errors.BadRequestException;
+import com.anthropic.errors.InternalServerException;
+import com.anthropic.errors.NotFoundException;
+import com.anthropic.errors.PermissionDeniedException;
+import com.anthropic.errors.RateLimitException;
+import com.anthropic.errors.UnauthorizedException;
+import com.anthropic.errors.UnexpectedStatusCodeException;
+import com.anthropic.errors.UnprocessableEntityException;
+import com.anthropic.models.messages.ContentBlock;
+import com.anthropic.models.messages.Message;
+import com.anthropic.models.messages.MessageCreateParams;
+import com.anthropic.models.messages.StopReason;
+import com.anthropic.models.messages.TextBlock;
+import com.anthropic.models.messages.Usage;
+
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+
+/**
+ * Unit tests of {@link AnthropicLlmClient} without network: availability, request construction, response parsing
+ * (including entry-array maps) and SDK error classification.
+ */
+class AnthropicLlmClientTest {
+
+    private static final JsonCodec CODEC = JsonCodec.standard();
+    private static final LlmRequest REQUEST = new LlmRequest("system prompt", "user prompt", 8000,
+            Duration.ofSeconds(60));
+    private static final String TEST_PLAN_JSON = """
+            {"strategy": "risk based", "levels": [{"level": "UNIT", "scope": "services", "tooling": "JUnit"}],
+             "cases": [{"id": "TC-1", "title": "creates a link", "level": "UNIT", "type": "POSITIVE",
+                        "preconditions": "none", "steps": ["post"], "expected": "201", "traces": ["FR-1"]}],
+             "coverageMatrix": [{"key": "FR-1", "value": "TC-1"}, {"key": "NFR-1", "value": "TC-1"}],
+             "risksNotCovered": []}
+            """;
+
+    @Test
+    void availabilityRequiresAnEnabledProviderWithAKey() {
+        AnthropicLlmClient withKey = client(settings(true, "sk-test"), params -> null);
+        AnthropicLlmClient withoutKey = client(settings(true, " "), params -> null);
+        AnthropicLlmClient disabled = client(settings(false, "sk-test"), params -> null);
+
+        assertThat(withKey.isAvailable()).isTrue();
+        assertThat(withKey.detail()).doesNotContain("sk-test");
+        assertThat(withoutKey.isAvailable()).isFalse();
+        assertThat(withoutKey.detail()).isEqualTo("ANTHROPIC_API_KEY not set");
+        assertThat(disabled.isAvailable()).isFalse();
+        assertThat(withKey.providerId()).isEqualTo("anthropic");
+        assertThat(withKey.model()).isEqualTo("claude-opus-5-5");
+        assertThat(settings(true, "sk-secret").toString()).doesNotContain("sk-secret");
+    }
+
+    @Test
+    void completeWithoutKeyFailsWithoutCallingTheApi() {
+        AtomicReference<MessageCreateParams> sent = new AtomicReference<>();
+        AnthropicLlmClient client = client(settings(true, ""), params -> {
+            sent.set(params);
+            return null;
+        });
+
+        assertThatThrownBy(() -> client.complete(REQUEST, TestPlan.class)).isInstanceOf(LlmException.class)
+                .satisfies(e -> assertThat(((LlmException) e).retryable()).isFalse());
+        assertThat(sent.get()).isNull();
+    }
+
+    @Test
+    void sendsAStructuredOutputRequestAndParsesTheTypedPayload() throws Exception {
+        AtomicReference<MessageCreateParams> sent = new AtomicReference<>();
+        AnthropicLlmClient client = client(settings(true, "sk-test"), params -> {
+            sent.set(params);
+            return message(TEST_PLAN_JSON, StopReason.END_TURN);
+        });
+
+        LlmResponse<TestPlan> response = client.complete(REQUEST, TestPlan.class);
+
+        TestPlan plan = response.output();
+        plan.validate();
+        assertThat(plan.coverageMatrix()).containsEntry("FR-1", "TC-1").containsEntry("NFR-1", "TC-1");
+        assertThat(response.usage().inputTokens()).isEqualTo(1200L);
+        assertThat(response.usage().outputTokens()).isEqualTo(340L);
+        assertThat(response.model()).isEqualTo("claude-opus-5-5");
+        assertThat(response.rawText()).isEqualTo(TEST_PLAN_JSON);
+
+        MessageCreateParams params = sent.get();
+        assertThat(params.model().asString()).isEqualTo("claude-opus-5-5");
+        assertThat(params.maxTokens()).isEqualTo(8000L);
+        JsonNode body = CODEC.readTree(ObjectMappers.jsonMapper().writeValueAsString(params._body()));
+        assertThat(body.path("system").asString()).isEqualTo("system prompt");
+        assertThat(body.path("messages").get(0).path("content").asString()).startsWith("user prompt")
+                .contains("arrays of {\"key\"");
+        assertThat(body.has("thinking")).isFalse();
+        assertThat(body.has("temperature")).isFalse();
+        JsonNode format = body.path("output_config").path("format");
+        assertThat(format.path("type").asString()).isEqualTo("json_schema");
+        JsonNode coverage = format.path("schema").path("properties").path("coverageMatrix");
+        assertThat(coverage.path("type").asString()).isEqualTo("array");
+        assertThat(coverage.path("items").path("additionalProperties").asBoolean(true)).isFalse();
+    }
+
+    @Test
+    void refusalIsNotRetryableAndTruncationIs() {
+        AnthropicLlmClient refusing = client(settings(true, "k"), params -> message("{}", StopReason.REFUSAL));
+        AnthropicLlmClient truncating = client(settings(true, "k"),
+                params -> message("{\"strategy\":", StopReason.MAX_TOKENS));
+
+        assertThatThrownBy(() -> refusing.complete(REQUEST, TestPlan.class))
+                .isInstanceOfSatisfying(LlmException.class, e -> {
+                    assertThat(e.retryable()).isFalse();
+                    assertThat(e.getMessage()).isEqualTo("provider refused");
+                });
+        assertThatThrownBy(() -> truncating.complete(REQUEST, TestPlan.class))
+                .isInstanceOfSatisfying(LlmException.class, e -> assertThat(e.retryable()).isTrue());
+    }
+
+    @Test
+    void unparseableOutputSurfacesAsAJacksonException() {
+        AnthropicLlmClient client = client(settings(true, "k"), params -> message("not json", StopReason.END_TURN));
+
+        assertThatThrownBy(() -> client.complete(REQUEST, TestPlan.class)).isInstanceOf(JacksonException.class);
+    }
+
+    @Test
+    void sdkErrorsAreMappedThroughComplete() {
+        AnthropicLlmClient client = client(settings(true, "k"), params -> {
+            throw RateLimitException.builder().headers(Headers.builder().build()).body(JsonValue.from(Map.of()))
+                    .build();
+        });
+
+        assertThatThrownBy(() -> client.complete(REQUEST, TestPlan.class))
+                .isInstanceOfSatisfying(LlmException.class, e -> {
+                    assertThat(e.retryable()).isTrue();
+                    assertThat(e.getMessage()).contains("429");
+                });
+    }
+
+    @ParameterizedTest(name = "{0} -> retryable={1}")
+    @MethodSource("sdkErrors")
+    void classifiesSdkErrors(AnthropicException error, boolean retryable) {
+        LlmException mapped = AnthropicLlmClient.classify(error);
+
+        assertThat(mapped.retryable()).isEqualTo(retryable);
+        assertThat(mapped.getCause()).isSameAs(error);
+    }
+
+    static Stream<Arguments> sdkErrors() {
+        Headers headers = Headers.builder().build();
+        JsonValue body = JsonValue.from(Map.of());
+        return Stream.of(
+                Arguments.of(RateLimitException.builder().headers(headers).body(body).build(), true),
+                Arguments.of(InternalServerException.builder().statusCode(500).headers(headers).body(body).build(),
+                        true),
+                Arguments.of(unexpected(529, headers, body), true),
+                Arguments.of(unexpected(408, headers, body), true),
+                Arguments.of(unexpected(409, headers, body), true),
+                Arguments.of(BadRequestException.builder().headers(headers).body(body).build(), false),
+                Arguments.of(UnauthorizedException.builder().headers(headers).body(body).build(), false),
+                Arguments.of(PermissionDeniedException.builder().headers(headers).body(body).build(), false),
+                Arguments.of(NotFoundException.builder().headers(headers).body(body).build(), false),
+                Arguments.of(UnprocessableEntityException.builder().headers(headers).body(body).build(), false),
+                Arguments.of(new AnthropicIoException("connection reset"), true),
+                Arguments.of(new AnthropicInvalidDataException("bad data"), true),
+                Arguments.of(new AnthropicException("unknown"), false));
+    }
+
+    private static UnexpectedStatusCodeException unexpected(int status, Headers headers, JsonValue body) {
+        return UnexpectedStatusCodeException.builder().statusCode(status).headers(headers).body(body).build();
+    }
+
+    private static AnthropicLlmClient client(LlmProperties.Anthropic settings,
+                                             AnthropicLlmClient.MessageSender sender) {
+        return new AnthropicLlmClient(settings, CODEC, sender);
+    }
+
+    private static LlmProperties.Anthropic settings(boolean enabled, String key) {
+        return new LlmProperties.Anthropic(enabled, "claude-opus-5-5", key, 16000, Duration.ofSeconds(180));
+    }
+
+    private static Message message(String text, StopReason stopReason) {
+        return Message.builder()
+                .id("msg_test")
+                .content(List.of(ContentBlock.ofText(TextBlock.builder().text(text).citations(List.of()).build())))
+                .model("claude-opus-5-5")
+                .stopReason(stopReason)
+                .stopSequence(Optional.empty())
+                .stopDetails(Optional.empty())
+                .container(Optional.empty())
+                .diagnostics(Optional.empty())
+                .usage(Usage.builder().inputTokens(1200L).outputTokens(340L).cacheCreationInputTokens(0L)
+                        .cacheReadInputTokens(0L).cacheCreation(Optional.empty()).inferenceGeo(Optional.empty())
+                        .serverToolUse(Optional.empty()).serviceTier(Optional.empty())
+                        .outputTokensDetails(Optional.empty()).speed(Optional.empty()).build())
+                .build();
+    }
+}
