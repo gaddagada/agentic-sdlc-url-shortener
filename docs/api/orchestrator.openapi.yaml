@@ -151,7 +151,8 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule or unavailable agent provider"
+            \ four-eyes rule, unavailable agent provider, or the run is executing\
+            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
           content:
             application/problem+json:
               schema:
@@ -251,7 +252,8 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule or unavailable agent provider"
+            \ four-eyes rule, unavailable agent provider, or the run is executing\
+            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
           content:
             application/problem+json:
               schema:
@@ -329,7 +331,8 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule or unavailable agent provider"
+            \ four-eyes rule, unavailable agent provider, or the run is executing\
+            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
           content:
             application/problem+json:
               schema:
@@ -415,7 +418,8 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule or unavailable agent provider"
+            \ four-eyes rule, unavailable agent provider, or the run is executing\
+            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
           content:
             application/problem+json:
               schema:
@@ -501,7 +505,8 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule or unavailable agent provider"
+            \ four-eyes rule, unavailable agent provider, or the run is executing\
+            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
           content:
             application/problem+json:
               schema:
@@ -574,7 +579,8 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule or unavailable agent provider"
+            \ four-eyes rule, unavailable agent provider, or the run is executing\
+            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
           content:
             application/problem+json:
               schema:
@@ -653,7 +659,8 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule or unavailable agent provider"
+            \ four-eyes rule, unavailable agent provider, or the run is executing\
+            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
           content:
             application/problem+json:
               schema:
@@ -732,7 +739,8 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule or unavailable agent provider"
+            \ four-eyes rule, unavailable agent provider, or the run is executing\
+            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
           content:
             application/problem+json:
               schema:
@@ -1017,6 +1025,53 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
+  /api/v1/runs/{id}/audit/integrity:
+    get:
+      tags:
+      - Run evidence
+      summary: Verify the hash chain of a run's audit trail
+      description: "Reads every stored audit event of the run and verifies the per-run\
+        \ SHA-256 hash chain: events signed, in sequence, linked to their predecessor\
+        \ and unmodified. A broken chain names the first problematic seq; events written\
+        \ before hash chaining existed report the chain as unsigned."
+      operationId: getAuditIntegrity
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/AuditIntegrityView"
         "401":
           description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
             \ bearer token missing, expired or invalid (oidc mode)"
@@ -1997,6 +2052,23 @@ components:
         data:
           type: object
           additionalProperties: {}
+    AuditIntegrityView:
+      type: object
+      properties:
+        valid:
+          type: boolean
+        length:
+          type: integer
+          format: int64
+        brokenAtSeq:
+          type: integer
+          format: int64
+        expectedHash:
+          type: string
+        actualHash:
+          type: string
+        summary:
+          type: string
     ArtifactSummaryView:
       type: object
       properties:
@@ -2082,6 +2154,21 @@ components:
           type: object
           additionalProperties: {}
         markdown:
+          type: string
+        signature:
+          $ref: "#/components/schemas/SignatureView"
+        signatureVerified:
+          type: boolean
+    SignatureView:
+      type: object
+      properties:
+        algorithm:
+          type: string
+        keyId:
+          type: string
+        value:
+          type: string
+        signedAt:
           type: string
     ProviderCircuitView:
       type: object

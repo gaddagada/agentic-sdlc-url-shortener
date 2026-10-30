@@ -20,13 +20,15 @@ import com.agenticsdlc.orchestrator.app.config.OrchestratorProperties.Security.M
  *       audience, an issuer URI or JWK set URI and a non-empty value for every role mapping).</li>
  *   <li>With the {@value #PROD_PROFILE} profile active, startup fails when (a) the mode is {@code open}, (b) the
  *       mode is {@code api-key} with a key shorter than {@value #MIN_PROD_API_KEY_LENGTH} characters, (c) the
- *       four-eyes rule is disabled, or (d) the operator console is enabled while the API is unauthenticated (anyone
- *       reaching the console could start, approve and stop runs). Every violation is listed in one message.</li>
+ *       four-eyes rule is disabled, (d) the operator console is enabled while the API is unauthenticated (anyone
+ *       reaching the console could start, approve and stop runs), or (e) no usable change record signing key is
+ *       configured ({@code sdlc.governance.signing-key}, at least 32 bytes). Every violation is listed in one
+ *       message.</li>
  *   <li>Outside {@value #PROD_PROFILE}, {@code open} mode logs a single WARN that the API is unauthenticated (local
  *       development mode).</li>
  * </ul>
  *
- * <p>The mode in force is logged once at startup; secrets (the API key) are never logged.</p>
+ * <p>The mode in force is logged once at startup; secrets (the API key, the signing key) are never logged.</p>
  */
 @Component
 public class SecurityPostureValidator implements InitializingBean {
@@ -147,6 +149,16 @@ public class SecurityPostureValidator implements InitializingBean {
         if (properties.console().enabled() && mode == Mode.OPEN) {
             violations.add("the operator console is enabled without authentication (anyone reaching it could "
                     + "start, approve and stop runs; enable api-key or oidc mode, or set sdlc.console.enabled=false)");
+        }
+        OrchestratorProperties.Governance governance = properties.governance();
+        if (!governance.hasSigningKey()) {
+            violations.add("sdlc.governance.signing-key is not set, so release change records are not signed (set a "
+                    + "key of at least 32 bytes, for example base64:<output of openssl rand -base64 32>)");
+        } else {
+            String problem = governance.signingKeyProblem();
+            if (problem != null) {
+                violations.add(problem);
+            }
         }
         return List.copyOf(violations);
     }

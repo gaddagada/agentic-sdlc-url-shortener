@@ -23,6 +23,8 @@ import com.agenticsdlc.orchestrator.app.config.OrchestratorProperties;
 class SecurityPostureValidatorTest {
 
     private static final String LONG_KEY = "k".repeat(SecurityPostureValidator.MIN_PROD_API_KEY_LENGTH);
+    private static final String SIGNING_KEY = "sdlc.governance.signing-key=base64:"
+            + "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
 
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withUserConfiguration(ValidatorConfig.class);
@@ -68,16 +70,37 @@ class SecurityPostureValidatorTest {
         prod.run(context -> assertThat(context).hasFailed().getFailure().rootCause()
                 .hasMessageContaining("sdlc.security.mode is open")
                 .hasMessageContaining("four-eyes")
-                .hasMessageContaining("console"));
+                .hasMessageContaining("console")
+                .hasMessageContaining("sdlc.governance.signing-key is not set"));
     }
 
     @Test
-    void prodStartsWithAnAuthenticatedApiAndFourEyes() {
+    void prodRequiresAUsableChangeRecordSigningKey() {
         prod.withPropertyValues("sdlc.security.api-key=" + LONG_KEY, "sdlc.governance.four-eyes=true")
+                .run(context -> assertThat(context).hasFailed().getFailure().rootCause()
+                        .hasMessageContaining("refusing to start with the 'prod' profile")
+                        .hasMessageContaining("sdlc.governance.signing-key is not set, so release change records "
+                                + "are not signed"));
+        prod.withPropertyValues("sdlc.security.api-key=" + LONG_KEY, "sdlc.governance.four-eyes=true",
+                        "sdlc.governance.signing-key=short-signing-secret")
+                .run(context -> assertThat(context).hasFailed().getFailure().rootCause()
+                        .hasMessageContaining("sdlc.governance.signing-key must decode to at least 32 bytes (got 20)")
+                        .hasMessageNotContaining("short-signing-secret"));
+    }
+
+    @Test
+    void prodStartsWithAnAuthenticatedApiFourEyesAndASigningKey() {
+        prod.withPropertyValues("sdlc.security.api-key=" + LONG_KEY, "sdlc.governance.four-eyes=true", SIGNING_KEY)
                 .run(context -> assertThat(context).hasNotFailed());
         prod.withPropertyValues("sdlc.security.mode=oidc", "sdlc.security.oidc.issuer-uri=https://idp.test",
-                        "sdlc.security.oidc.audience=sdlc", "sdlc.governance.four-eyes=true")
+                        "sdlc.security.oidc.audience=sdlc", "sdlc.governance.four-eyes=true", SIGNING_KEY)
                 .run(context -> assertThat(context).hasNotFailed());
+    }
+
+    @Test
+    void outsideProdNoSigningKeyIsRequired() {
+        runner.withPropertyValues("sdlc.security.api-key=" + LONG_KEY).run(context -> assertThat(context)
+                .hasNotFailed());
     }
 
     @Test

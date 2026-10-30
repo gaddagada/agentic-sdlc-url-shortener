@@ -1,6 +1,7 @@
 package com.agenticsdlc.orchestrator.app.persistence;
 
 import java.util.List;
+import java.util.Optional;
 
 import org.springframework.data.domain.Limit;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -29,4 +30,14 @@ public interface AuditEventRepository extends JpaRepository<AuditEventEntity, Lo
      * @return events
      */
     List<AuditEventEntity> findByRunIdAndSeqGreaterThanOrderBySeqAsc(String runId, long seq, Limit limit);
+
+    /**
+     * Returns the last event of a run (highest sequence number), the head of its hash chain, with a bounded query
+     * ({@code ORDER BY seq DESC} limited to one row).
+     *
+     * @param runId run id
+     * @return the last event, or empty when the run has no events
+     */
+    Optional<AuditEventEntity> findFirstByRunIdOrderBySeqDesc(String runId);
 }
+

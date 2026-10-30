@@ -34,6 +34,7 @@ import com.agenticsdlc.orchestrator.app.llm.ProviderUnavailableException;
 import com.agenticsdlc.orchestrator.app.scenario.ScenarioNotFoundException;
 import com.agenticsdlc.orchestrator.core.engine.InvalidCommandException;
 import com.agenticsdlc.orchestrator.core.engine.InvalidRunStateException;
+import com.agenticsdlc.orchestrator.core.engine.RunLeasedElsewhereException;
 import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
 
 /**
@@ -45,7 +46,9 @@ import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
  * detail (only {@link InvalidRequestException} messages, written by the control plane, are returned); unknown runs,
  * artifacts and scenarios are 404; commands the engine refuses ({@link InvalidRunStateException} for the wrong
  * state, {@link InvalidCommandException} for invalid commands), four-eyes violations and unavailable providers are
- * 409 with the engine's message; a plain {@link IllegalStateException} (engine closed or shutting down) is 503;
+ * 409 with the engine's message; a command on a run another engine node is executing
+ * ({@link RunLeasedElsewhereException}) is 409 of type {@code run-leased-elsewhere} with {@code holder} and
+ * {@code runId}; a plain {@link IllegalStateException} (engine closed or shutting down) is 503;
  * everything else is a 500 without internal details. Extends {@link ResponseEntityExceptionHandler} so Spring
  * MVC's own exceptions (405, 406, 415, missing parameters, ...) are rendered consistently.</p>
  */
@@ -83,7 +86,21 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
                 ex.getMessage()));
     }
 
+    /**
+     * Another node holds the run's lease: a conflict that resolves itself once that node lets the run wait for a
+     * human or finishes it, so the problem names the holder.
+     */
+    @ExceptionHandler(RunLeasedElsewhereException.class)
+    ResponseEntity<ProblemDetail> handleRunLeasedElsewhere(RunLeasedElsewhereException ex) {
+        ProblemDetail problem = problem(HttpStatus.CONFLICT, ProblemTypes.RUN_LEASED_ELSEWHERE,
+                "Run is executing on another node", ex.getMessage());
+        problem.setProperty("holder", ex.holder());
+        problem.setProperty("runId", ex.runId());
+        return respond(problem);
+    }
+
     @ExceptionHandler(InvalidRunStateException.class)
+
     ResponseEntity<ProblemDetail> handleInvalidRunState(InvalidRunStateException ex) {
         return respond(problem(HttpStatus.CONFLICT, ProblemTypes.INVALID_STATE, "Command not allowed in this state",
                 ex.getMessage()));

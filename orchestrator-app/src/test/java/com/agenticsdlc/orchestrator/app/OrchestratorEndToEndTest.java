@@ -84,6 +84,15 @@ class OrchestratorEndToEndTest {
         });
         long lastSeq = audit.get(audit.size() - 1).path("seq").asLong();
         assertThat(get("/api/v1/runs/" + id + "/audit?afterSeq=" + lastSeq)).isEmpty();
+        JsonNode integrity = get("/api/v1/runs/" + id + "/audit/integrity");
+        assertThat(integrity.path("valid").asBoolean()).as(integrity.path("summary").asString()).isTrue();
+        assertThat(integrity.path("length").asLong()).isEqualTo(audit.size()).isEqualTo(lastSeq);
+        assertThat(absent(integrity.path("brokenAtSeq"))).isTrue();
+        assertThat(mvc.get().uri("/api/v1/runs/no-such-run/audit/integrity").exchange())
+                .hasStatus(HttpStatus.NOT_FOUND);
+        JsonNode release = get("/api/v1/runs/" + id + "/artifacts/release-readiness");
+        assertThat(absent(release.path("signature"))).as("no signing key in the test profile").isTrue();
+        assertThat(absent(release.path("signatureVerified"))).isTrue();
 
         JsonNode artifacts = get("/api/v1/runs/" + id + "/artifacts");
         long accepted = 0;
@@ -411,7 +420,12 @@ class OrchestratorEndToEndTest {
         throw new AssertionError("no stage " + stageId);
     }
 
+    private static boolean absent(JsonNode node) {
+        return node.isNull() || node.isMissingNode();
+    }
+
     private static List<String> texts(JsonNode array, String field) {
+
         List<String> values = new ArrayList<>();
         array.forEach(node -> values.add(node.path(field).asString()));
         return values;

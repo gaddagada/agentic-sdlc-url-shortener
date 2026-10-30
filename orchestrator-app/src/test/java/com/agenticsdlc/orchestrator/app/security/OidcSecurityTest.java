@@ -63,7 +63,9 @@ import tools.jackson.databind.json.JsonMapper;
         "sdlc.security.oidc.audience=" + OidcSecurityTest.AUDIENCE,
         "sdlc.security.oidc.roles-claim=realm_access.roles",
         "sdlc.security.oidc.identity-claim=preferred_username",
-        "sdlc.security.oidc.role-mapping.approver=sdlc-approver,approver"})
+        "sdlc.security.oidc.role-mapping.approver=sdlc-approver,approver",
+        // the prod profile also requires a change record signing key (32 bytes, base64)
+        "sdlc.governance.signing-key=base64:b2lkYy1zZWN1cml0eS10ZXN0LXNpZ25pbmcta2V5LTMy"})
 @AutoConfigureMockMvc
 @ActiveProfiles({"test", "prod"})
 class OidcSecurityTest {

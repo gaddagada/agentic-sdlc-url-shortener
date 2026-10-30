@@ -120,6 +120,7 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .chip { background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); }
 .chip-ok { color: var(--c-ok); border-color: color-mix(in srgb, var(--c-ok) 40%, transparent); }
 .chip-muted { opacity: 0.75; }
+.chip-bad { color: var(--c-fail); border-color: color-mix(in srgb, var(--c-fail) 50%, transparent); }
 .badge { background: var(--c-await); color: #fff; font-weight: 600; }
 .risk-LOW { color: var(--c-ok); }
 .risk-MEDIUM, .sev-MEDIUM { color: var(--c-retry); border-color: color-mix(in srgb, var(--c-retry) 45%, transparent); }
@@ -388,6 +389,9 @@ pre.json, .md-code {
 /* ---------------------------------------------------------------- audit */
 
 .audit-toolbar { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.audit-integrity { margin: 0 0 10px; font-size: 13px; overflow-wrap: anywhere; }
+.audit-integrity.ok strong { color: var(--c-ok); }
+.audit-integrity.bad strong { color: var(--c-fail); }
 .filters { display: flex; flex-wrap: wrap; gap: 5px; flex: 1 1 400px; }
 .filter {
   --c: var(--c-pending); font: 12px var(--font); cursor: pointer; color: var(--muted);

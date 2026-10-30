@@ -1,8 +1,10 @@
 package com.agenticsdlc.orchestrator.app.persistence;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Component;
@@ -23,6 +25,13 @@ import tools.jackson.core.type.TypeReference;
  * a single batch while holding the run lock, from threads outside any Spring transaction, so transactions are
  * demarcated explicitly with a {@link TransactionTemplate} (propagation REQUIRED: when {@link JpaRunStore} commits a
  * mutation, the append joins the transaction that saves the run snapshot, so both are atomic).
+ *
+ * <p>The per-run hash chain ({@code prev_hash}, {@code hash}) is stored with every event, and every hashed field
+ * round-trips verbatim, so {@code AuditChain.verify(forRun(runId, 0))} succeeds for an untampered log. Inside the
+ * append transaction the sink enforces chain continuity like the core's {@code InMemoryAuditSink}: a batch whose
+ * first {@code prevHash} does not continue the stored head of the run, or that is not itself an intact chain, is
+ * rejected with an {@link IllegalStateException} and nothing of the commit is persisted (legacy unsigned batches
+ * remain accepted). The unique {@code (run_id, seq)} constraint still guards against concurrent writers.</p>
  */
 @Component
 public class JpaAuditSink implements AuditSink {
@@ -50,13 +59,28 @@ public class JpaAuditSink implements AuditSink {
         this.readTransactions.setReadOnly(true);
     }
 
+    /**
+     * Appends events after checking, per run and inside the transaction, that they continue the run's stored hash
+     * chain.
+     *
+     * @param batch events to append, in sequence order per run (an engine batch always belongs to one run)
+     * @throws IllegalStateException when a run's events do not continue its stored chain or are not an intact chain
+     */
     @Override
     public void append(List<AuditEvent> batch) {
         if (batch.isEmpty()) {
             return;
         }
+        Map<String, List<AuditEvent>> byRun = new LinkedHashMap<>();
+        for (AuditEvent event : batch) {
+            byRun.computeIfAbsent(event.runId(), k -> new ArrayList<>()).add(event);
+        }
         List<AuditEventEntity> rows = batch.stream().map(this::toEntity).toList();
-        transactions.executeWithoutResult(status -> events.saveAll(rows));
+        transactions.executeWithoutResult(status -> {
+            byRun.forEach((runId, runEvents) -> AuditChainContinuity.check(runId,
+                    events.findFirstByRunIdOrderBySeqDesc(runId).map(this::toEvent).orElse(null), runEvents));
+            events.saveAll(rows);
+        });
     }
 
     @Override
@@ -84,10 +108,24 @@ public class JpaAuditSink implements AuditSink {
         return rows == null ? List.of() : rows.stream().map(this::toEvent).toList();
     }
 
+    /**
+     * Returns the last stored event of a run with a bounded query ({@code ORDER BY seq DESC}, one row).
+     *
+     * @param runId run id
+     * @return the last event, or empty when the run has no events
+     */
+    @Override
+    public Optional<AuditEvent> lastEvent(String runId) {
+        Optional<AuditEventEntity> row = readTransactions.execute(
+                status -> events.findFirstByRunIdOrderBySeqDesc(runId));
+        return row == null ? Optional.empty() : row.map(this::toEvent);
+    }
+
     private AuditEventEntity toEntity(AuditEvent event) {
         String data = event.data().isEmpty() ? null : codec.toJson(event.data());
         return new AuditEventEntity(event.runId(), event.seq(), event.timestamp(), event.stageId(),
-                event.type().name(), event.actor().type().name(), event.actor().id(), event.message(), data);
+                event.type().name(), event.actor().type().name(), event.actor().id(), event.message(), data,
+                event.prevHash(), event.hash());
     }
 
     private AuditEvent toEvent(AuditEventEntity row) {
@@ -95,6 +133,7 @@ public class JpaAuditSink implements AuditSink {
                 : codec.mapper().readValue(row.getDataJson(), DATA_TYPE);
         return new AuditEvent(row.getSeq(), row.getTimestamp(), row.getRunId(), row.getStageId(),
                 AuditEventType.valueOf(row.getType()),
-                new Actor(ActorType.valueOf(row.getActorType()), row.getActorId()), row.getMessage(), data);
+                new Actor(ActorType.valueOf(row.getActorType()), row.getActorId()), row.getMessage(), data,
+                row.getPrevHash(), row.getHash());
     }
 }

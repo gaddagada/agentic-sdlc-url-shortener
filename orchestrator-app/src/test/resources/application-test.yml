@@ -5,6 +5,11 @@ spring:
 sdlc:
   engine:
     backoff-scale: 0
+    # Every cached test context is its own engine node on the shared in-memory database (distinct lease owners).
+    node-id: test-${random.uuid}
+    # Recovery and eviction are exercised by dedicated tests; keep the periodic pass out of the scenario tests.
+    maintenance-interval: 10m
+
   llm:
     anthropic:
       # deterministic tests must not depend on a key in the environment

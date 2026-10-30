@@ -57,8 +57,9 @@ class OpenApiContractTest {
     @Test
     void committedContractListsEveryOperationTheControllersExpose() throws IOException {
         SortedSet<String> exposed = exposedOperations();
-        assertThat(exposed).hasSize(21).contains("POST /api/v1/runs", "GET /api/v1/runs/{id}/lineage",
-                "POST /api/v1/runs/{id}/stages/{stageId}/approve", "GET /api/v1/providers");
+        assertThat(exposed).hasSize(22).contains("POST /api/v1/runs", "GET /api/v1/runs/{id}/lineage",
+                "POST /api/v1/runs/{id}/stages/{stageId}/approve", "GET /api/v1/providers",
+                "GET /api/v1/runs/{id}/audit/integrity");
 
         assertThat(operations(committed())).as("committed contract").isEqualTo(exposed);
         assertThat(operations(generated())).as("springdoc document").isEqualTo(exposed);
@@ -142,6 +143,23 @@ class OpenApiContractTest {
                     .containsExactly("ADMIN");
             assertThat(asList(operation(document, "/api/v1/runs", "get").get("x-required-roles")))
                     .containsExactly("OPERATOR", "APPROVER", "ADMIN");
+        }
+    }
+
+    @Test
+    void theAuditIntegrityAndChangeRecordSignatureAreDocumented() throws IOException {
+        for (Map<String, Object> document : List.of(committed(), generated())) {
+            Map<String, Object> integrity = operation(document, "/api/v1/runs/{id}/audit/integrity", "get");
+            assertThat(integrity).containsEntry("operationId", "getAuditIntegrity");
+            assertThat(asMap(integrity.get("responses"))).containsKeys("200", "404");
+            assertThat(asList(integrity.get("x-required-roles"))).containsExactly("OPERATOR", "APPROVER", "ADMIN");
+            Map<String, Object> schemas = asMap(asMap(document.get("components")).get("schemas"));
+            assertThat(asMap(asMap(schemas.get("AuditIntegrityView")).get("properties"))).containsKeys("valid",
+                    "length", "brokenAtSeq", "expectedHash", "actualHash", "summary");
+            assertThat(asMap(asMap(schemas.get("ArtifactView")).get("properties")))
+                    .containsKeys("signature", "signatureVerified");
+            assertThat(asMap(asMap(schemas.get("SignatureView")).get("properties")))
+                    .containsKeys("algorithm", "keyId", "value", "signedAt");
         }
     }
 

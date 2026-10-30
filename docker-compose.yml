@@ -25,7 +25,8 @@ services:
   # Both applications bind to the loopback interface only. Required environment:
   #   SDLC_SECURITY_API_KEY   shared key clients must send as X-Api-Key to the control plane
   #   SHORTENER_IP_SALT       secret salt for visitor pseudonymization
-  # Optional: ANTHROPIC_API_KEY for the Claude provider.
+  # Optional: ANTHROPIC_API_KEY for the Claude provider; SDLC_GOVERNANCE_SIGNING_KEY (base64:<value> of at least
+  # 32 random bytes, e.g. from `openssl rand -base64 32`) to sign release change records (unsigned when empty).
   url-shortener:
     profiles: ["apps"]
     build:
@@ -52,6 +53,8 @@ services:
     environment:
       SDLC_SECURITY_API_KEY: ${SDLC_SECURITY_API_KEY:?set SDLC_SECURITY_API_KEY to protect the control plane API}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Passed through unchanged; empty leaves release change records unsigned. Never logged by the control plane.
+      SDLC_GOVERNANCE_SIGNING_KEY: ${SDLC_GOVERNANCE_SIGNING_KEY:-}
       SDLC_LLM_OLLAMA_BASE_URL: http://host.docker.internal:11434
     ports:
       - "127.0.0.1:8090:8090"

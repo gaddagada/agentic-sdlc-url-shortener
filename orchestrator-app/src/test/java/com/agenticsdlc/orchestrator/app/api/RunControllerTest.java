@@ -36,6 +36,7 @@ import com.agenticsdlc.orchestrator.core.audit.Actor;
 import com.agenticsdlc.orchestrator.core.engine.InvalidCommandException;
 import com.agenticsdlc.orchestrator.core.engine.InvalidRunStateException;
 import com.agenticsdlc.orchestrator.core.engine.OrchestrationEngine;
+import com.agenticsdlc.orchestrator.core.engine.RunLeasedElsewhereException;
 import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowDefinitions;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowGraph;
@@ -314,7 +315,26 @@ class RunControllerTest {
     }
 
     @Test
+    void aCommandOnARunExecutingOnAnotherNodeIs409NamingTheHolder() {
+        when(engine.approve(eq("run-1"), eq("design"), any(), any(), any()))
+                .thenThrow(new RunLeasedElsewhereException("run-1", "node-b-4711-3fa2c9"));
+
+        MvcTestResult result = post("/api/v1/runs/run-1/stages/design/approve", "{}");
+
+        assertThat(result).hasStatus(HttpStatus.CONFLICT)
+                .hasContentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(result).bodyJson().extractingPath("$.type")
+                .isEqualTo(ProblemTypes.RUN_LEASED_ELSEWHERE.toString());
+        assertThat(result).bodyJson().extractingPath("$.title").isEqualTo("Run is executing on another node");
+        assertThat(result).bodyJson().extractingPath("$.holder").isEqualTo("node-b-4711-3fa2c9");
+        assertThat(result).bodyJson().extractingPath("$.runId").isEqualTo("run-1");
+        assertThat(result).bodyJson().extractingPath("$.detail").asString().contains("node-b-4711-3fa2c9")
+                .contains("retry");
+    }
+
+    @Test
     void invalidCommandIs409() {
+
         when(engine.replan(eq("run-1"), any(), anyString()))
                 .thenThrow(new InvalidCommandException("re-plan budget exhausted (3)"));
 

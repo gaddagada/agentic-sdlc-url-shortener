@@ -3,7 +3,7 @@
 // commands and the event wiring. Rendering is delegated to small pure functions in
 // js/views.js and js/graph.js. Every screen region re-renders only when its data
 // signature changes, so a poll never interrupts someone typing into a form.
-import { api, onReachability } from './js/api.js';
+import { api, onReachability, RUN_LEASED_ELSEWHERE } from './js/api.js';
 import { h, mount, store, shortId, humanize, isNum, asList, clip, fmtTime, fmtDateTime } from './js/util.js';
 import { renderPipeline, renderLineage, renderLegend } from './js/graph.js';
 import * as V from './js/views.js';
@@ -33,7 +33,7 @@ const App = {
   run: null, // RunView
   graph: null, // GraphView
   artifacts: [], // ArtifactSummaryView[]
-  audit: { events: [], lastSeq: 0, filter: new Set(), follow: true, open: new Set() },
+  audit: { events: [], lastSeq: 0, filter: new Set(), follow: true, open: new Set(), integrity: null }, // integrity: GET /audit/integrity
   lineage: null, // LineageView
   metrics: null, // ReliabilityMetricsView
   metricsAt: null,
@@ -125,6 +125,12 @@ function dismissToast(key) {
 
 function toastError(err) {
   if (err?.aborted) return;
+  if (err?.type === RUN_LEASED_ELSEWHERE) {
+    // Another engine node holds the run's lease: name it, the conflict resolves itself once the run waits or ends.
+    toast('error', `Run is executing on node ${err.holder ?? 'unknown'}`,
+      'Another control plane node is executing this run right now. Retry when it waits for a human or has finished.');
+    return;
+  }
   toast('error', err?.title ?? 'Request failed', [err?.detail, ...asList(err?.errors)].filter(Boolean).join(' \u00b7 '));
 }
 
@@ -229,12 +235,14 @@ async function refreshSelectedRun() {
   const ctl = App.runCtl;
   if (!App.selectedId || !ctl) return;
   const base = runPath();
-  const [run, graph, artifacts, audit, lineage] = await Promise.allSettled([
+  const [run, graph, artifacts, audit, lineage, integrity] = await Promise.allSettled([
     api(base, { signal: ctl.signal }),
     api(`${base}/graph`, { signal: ctl.signal }),
     api(`${base}/artifacts`, { signal: ctl.signal }),
     fetchAudit(ctl),
     App.tab === 'lineage' ? api(`${base}/lineage`, { signal: ctl.signal }) : Promise.resolve(App.lineage),
+    // The hash chain is re-verified with every audit poll while the Audit tab is open.
+    App.tab === 'audit' ? api(`${base}/audit/integrity`, { signal: ctl.signal }) : Promise.resolve(App.audit.integrity),
   ]);
   if (ctl !== App.runCtl) return; // the selection changed while these requests were in flight
   if (run.status === 'rejected' && run.reason?.status === 404) {
@@ -247,6 +255,7 @@ async function refreshSelectedRun() {
   settle(artifacts, (list) => { App.artifacts = asList(list).filter((a) => a?.stageId); });
   settle(audit, () => {});
   settle(lineage, (l) => { App.lineage = l; });
+  settle(integrity, (v) => { App.audit.integrity = v && typeof v === 'object' ? v : null; });
   invalidateViewsOnChange();
   renderRunView();
 }
@@ -325,7 +334,7 @@ function selectRun(id, { fromHash = false } = {}) {
     runCtl: next ? new AbortController() : null,
     run: null, graph: null, artifacts: [], lineage: null, drafts: {},
     artifactSel: { stageId: null, version: null }, artifactStateSig: null,
-    audit: { events: [], lastSeq: 0, filter: new Set(), follow: App.audit.follow, open: new Set() },
+    audit: { events: [], lastSeq: 0, filter: new Set(), follow: App.audit.follow, open: new Set(), integrity: null },
     sigs: { providers: App.sigs.providers },
   });
   if (!fromHash) history.replaceState(null, '', next ? `#run=${enc(next)}` : `${location.pathname}${location.search}`);
@@ -423,7 +432,8 @@ async function command(successMessage, path, body, clearKeys = []) {
     toast('success', successMessage);
   } catch (err) {
     toastError(err);
-    if (err?.status === 409) announce('The run changed before your command arrived; the latest state is shown.');
+    if (err?.type === RUN_LEASED_ELSEWHERE) announce(`Run is executing on node ${err.holder ?? 'unknown'}; retry when it waits for a human.`);
+    else if (err?.status === 409) announce('The run changed before your command arrived; the latest state is shown.');
   } finally {
     App.busy = false;
     renderRunView();
@@ -605,7 +615,7 @@ function renderArtifactsTab() {
     ?? stages.find((s) => s.id === App.artifactSel.stageId) ?? null;
   const state = summary ? App.artifactViews.get(viewKey(summary)) : null;
   const underReview = Boolean(summary && reviewing.get(summary.stageId) === summary.version);
-  renderIfChanged('tab:artifacts:detail', [stage, summary, state?.status, state?.view?.accepted, underReview], () => mount($('art-detail'), V.renderArtifactDetail({
+  renderIfChanged('tab:artifacts:detail', [stage, summary, state?.status, state?.view?.accepted, state?.view?.signatureVerified, underReview], () => mount($('art-detail'), V.renderArtifactDetail({
     stage, summary, state, underReview, open: App.detailsOpen,
     onToggle: (name, open) => { App.detailsOpen[name] = open; },
   })));
@@ -638,7 +648,7 @@ function renderAuditTab() {
     return;
   }
   const audit = App.audit;
-  renderIfChanged('tab:audit', [audit.lastSeq, audit.events.length, [...audit.filter], audit.follow], () => {
+  renderIfChanged('tab:audit', [audit.lastSeq, audit.events.length, [...audit.filter], audit.follow, audit.integrity], () => {
     const before = panel.querySelector('.timeline');
     const keep = before && !audit.follow ? { top: before.scrollTop, height: before.scrollHeight } : null;
     preservingFocus(panel, () => mount(panel, V.renderAudit(audit, auditHandlers)));
@@ -697,7 +707,7 @@ function setTab(tab, { focus = false } = {}) {
   }
   if (focus) $(`tab-${App.tab}`).focus();
   if (App.tab === 'metrics') loops.metrics?.kick();
-  if (App.tab === 'lineage') loops.run?.kick();
+  if (App.tab === 'lineage' || App.tab === 'audit') loops.run?.kick();
   renderActiveTab();
 }
 

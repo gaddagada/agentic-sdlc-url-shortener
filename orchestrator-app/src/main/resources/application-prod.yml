@@ -1,15 +1,20 @@
 # Production posture: run with --spring.profiles.active=prod (combine with "postgres" for PostgreSQL persistence).
 #
 # SecurityPostureValidator refuses to start this profile when the API is open, an API key is shorter than
-# 32 characters, the four-eyes rule is off, or the console is enabled without authentication.
+# 32 characters, the four-eyes rule is off, the console is enabled without authentication, or no change record
+# signing key of at least 32 bytes is configured.
 #
 # Required settings (environment variables shown):
 #   SDLC_SECURITY_OIDC_ISSUERURI     OIDC issuer, e.g. https://idp.example.com/realms/sdlc
 #                                    (or SDLC_SECURITY_OIDC_JWKSETURI for a JWK set URL)
 #   SDLC_SECURITY_OIDC_AUDIENCE      value the aud claim of access tokens must contain
+#   SDLC_GOVERNANCE_SIGNING_KEY      base64:<32+ random bytes> signing release change records (openssl rand -base64 32)
+#                                    with SDLC_GOVERNANCE_SIGNINGKEYID naming the key (default "local")
 # Usually also: SDLC_SECURITY_OIDC_ROLESCLAIM (e.g. realm_access.roles), SDLC_SECURITY_OIDC_IDENTITYCLAIM
 # (e.g. preferred_username) and SDLC_SECURITY_OIDC_ROLEMAPPING_{OPERATOR,APPROVER,ADMIN}.
 # A deployment without an identity provider may use SDLC_SECURITY_MODE=api-key with a key of at least 32 characters.
+# Several nodes on one database: keep sdlc.engine.lease-provider=jdbc (the default) and leave SDLC_ENGINE_NODEID
+# unset (the default id is unique per process) or set it uniquely per node.
 sdlc:
   security:
     mode: oidc

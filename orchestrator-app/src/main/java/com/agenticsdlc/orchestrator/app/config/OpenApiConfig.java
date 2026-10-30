@@ -92,7 +92,8 @@ public class OpenApiConfig {
             403, "Authenticated, but the caller does not hold a role in x-required-roles (oidc mode)",
             404, "Unknown run, scenario or artifact",
             409, "Refused in the current state: wrong run or stage state, stale approvalId, invalid command "
-                    + "(exhausted budget, missing waiver, ...), four-eyes rule or unavailable agent provider",
+                    + "(exhausted budget, missing waiver, ...), four-eyes rule, unavailable agent provider, or the run "
+                    + "is executing on another engine node (type run-leased-elsewhere, with holder and runId)",
             503, "The control plane is shutting down");
 
     /**

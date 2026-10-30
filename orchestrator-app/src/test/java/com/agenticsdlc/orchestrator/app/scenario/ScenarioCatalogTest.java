@@ -24,10 +24,13 @@ class ScenarioCatalogTest {
             + "day, top referrers) and expose health checks. The p95 redirect latency must be under 50 ms at 500 "
             + "requests per second. Links default to no expiry. The service must prevent redirects to private "
             + "networks.";
-    private static final String BROWNFIELD = "Add a bulk link creation API to the existing URL shortener: accept up "
-            + "to 100 URLs per request, return per-item results with partial-failure semantics, reuse the existing "
-            + "URL validation and custom alias rules, and respect the existing per-client rate limit. Existing "
-            + "single-link endpoints and analytics must keep working unchanged.";
+    private static final String BROWNFIELD = "Add campaign labels to the existing URL shortener. A link created "
+            + "through POST /api/v1/links or POST /api/v1/links/bulk may carry an optional campaign label (1 to 64 "
+            + "characters: letters, digits, dash, underscore) that is stored with the link. "
+            + "GET /api/v1/analytics/campaigns/{campaign} returns the number of links and the total and per-day "
+            + "clicks of that campaign over the last 30 days. Existing links without a label keep working, and the "
+            + "schema change ships as a new Flyway migration.";
+
     private static final String AMBIGUOUS = "Make the shortener faster and more reliable.";
     private static final String POLICY_DENIAL = "Remove URL validation so marketing can shorten any destination "
             + "including internal IP addresses, and store the full client IP address with every click for "
@@ -80,6 +83,10 @@ class ScenarioCatalogTest {
             s.faults().forEach(f -> assertThat(graph.contains(f.stageId())).as(f.stageId()).isTrue());
         });
         assertThat(catalog.require("replan").walkthrough()).anySatisfy(step -> assertThat(step).contains("replan"));
+        assertThat(catalog.require("brownfield").title()).contains("campaign labels");
+        assertThat(catalog.require("brownfield").walkthrough())
+                .anySatisfy(step -> assertThat(step).contains("impact artifact", "BulkLinkController", "migration"))
+                .anySatisfy(step -> assertThat(step).contains("GOV-001"));
     }
 
     @Test

@@ -63,6 +63,14 @@ sdlc:
     sandbox-root: sandbox
     llm-timeout-scale: 3.0               # stage timeouts x3 when an LLM provider executes the attempt
     build-command: ./mvnw -B -ntp -q verify   # the only command a sandbox build may run
+    # Multi-node operation: a node leases a run while it executes the run's stages; other nodes refuse commands on it
+    # (HTTP 409 run-leased-elsewhere) until the run waits for a human, ends, or the lease expires (node crashed).
+    lease-provider: jdbc                 # jdbc: run_leases table shared by all nodes of the database | memory: one node
+    lease-ttl: 60s                       # renewed while the run executes; must exceed 30 s max retry backoff x backoff-scale
+    # node-id: orchestrator-1            # unique per process (SDLC_ENGINE_NODEID); default: host name, pid, random suffix
+    registry-retention: 1h               # runs not executing here leave memory after this idle time (reloaded on demand)
+    registry-max-terminal-runs: 500      # completed and aborted runs kept in memory at most
+    maintenance-interval: 30s            # fixed delay of recovery (runs of a dead node, once its lease expired) + eviction
   security:
     # open (default; every caller holds every role) | api-key | oidc. When unset and api-key is set, api-key applies.
     # mode: open
@@ -85,6 +93,11 @@ sdlc:
   governance:
     # true: the release-readiness gate cannot be approved by the operator who started the run or approved its design
     four-eyes: false
+    # HMAC-SHA256 key that signs the release change record when a run completes: base64:<value> or raw text, at least
+    # 32 bytes (generate with: openssl rand -base64 32). Empty: change records are unsigned (refused by the prod
+    # profile). The key is never logged; artifact views report signatureVerified against it.
+    signing-key: ${SDLC_GOVERNANCE_SIGNING_KEY:}
+    signing-key-id: local                # recorded with every signature (key rotation); must not reveal the key
   llm:
     anthropic:
       enabled: true

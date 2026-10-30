@@ -15,8 +15,10 @@ import org.springframework.web.bind.annotation.RestController;
 import com.agenticsdlc.orchestrator.app.api.dto.ArtifactSummaryView;
 import com.agenticsdlc.orchestrator.app.api.dto.ArtifactView;
 import com.agenticsdlc.orchestrator.app.api.dto.AuditEventView;
+import com.agenticsdlc.orchestrator.app.api.dto.AuditIntegrityView;
 import com.agenticsdlc.orchestrator.app.api.dto.LineageView;
 import com.agenticsdlc.orchestrator.core.artifact.Artifact;
+import com.agenticsdlc.orchestrator.core.audit.AuditChain;
 import com.agenticsdlc.orchestrator.core.audit.AuditSink;
 import com.agenticsdlc.orchestrator.core.engine.OrchestrationEngine;
 import com.agenticsdlc.orchestrator.core.model.Run;
@@ -25,7 +27,8 @@ import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 
 /**
- * Read-only evidence of a run: artifacts (with payload and Markdown), artifact lineage and the audit trail.
+ * Read-only evidence of a run: artifacts (with payload, Markdown and, for release readiness, the change record
+ * signature), artifact lineage, the audit trail and the verification of its hash chain.
  */
 @RestController
 @RequestMapping("/api/v1/runs/{id}")
@@ -118,4 +121,23 @@ public class RunArtifactController {
         engine.get(id);
         return auditSink.forRun(id, afterSeq, limit).stream().map(AuditEventView::from).toList();
     }
+
+    /**
+     * Verifies the hash chain of a run's stored audit trail.
+     *
+     * @param id run id
+     * @return the verification result
+     */
+    @GetMapping("/audit/integrity")
+    @Operation(summary = "Verify the hash chain of a run's audit trail", operationId = "getAuditIntegrity",
+            description = "Reads every stored audit event of the run and verifies the per-run SHA-256 hash chain: "
+                    + "events signed, in sequence, linked to their predecessor and unmodified. A broken chain names "
+                    + "the first problematic seq; events written before hash chaining existed report the chain as "
+                    + "unsigned.")
+    @ProblemResponses(404)
+    public AuditIntegrityView auditIntegrity(@PathVariable String id) {
+        engine.get(id);
+        return AuditIntegrityView.from(AuditChain.verify(auditSink.forRun(id, 0)));
+    }
+
 }

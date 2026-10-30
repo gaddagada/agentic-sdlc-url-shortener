@@ -12,6 +12,7 @@ import com.agenticsdlc.orchestrator.core.engine.InvalidCommandException;
 import com.agenticsdlc.orchestrator.core.engine.InvalidRunStateException;
 import com.agenticsdlc.orchestrator.core.engine.OrchestrationEngine;
 import com.agenticsdlc.orchestrator.core.engine.ProviderCircuit;
+import com.agenticsdlc.orchestrator.core.engine.RunLeasedElsewhereException;
 import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
 import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.JavaClass;
@@ -55,14 +56,17 @@ class AppArchitectureTest {
 
     /**
      * The engine package is used only through its facade, its exceptions and the read models the facade returns
-     * ({@link ProviderCircuit} from {@code providerCircuits()}), outside the wiring.
+     * ({@link ProviderCircuit} from {@code providerCircuits()}), outside the wiring. {@link RunLeasedElsewhereException}
+     * is one of the facade's exceptions: the API maps it to a dedicated 409 that names the node holding the run.
      */
     @ArchTest
     static final ArchRule coreEngineIsUsedOnlyViaTheFacade = noClasses()
             .that().resideOutsideOfPackages(ROOT + ".config..")
             .should().dependOnClassesThat(are(resideInAPackage(CORE_ENGINE)).and(DescribedPredicate.not(
                     JavaClass.Predicates.belongToAnyOf(OrchestrationEngine.class, RunNotFoundException.class,
-                            InvalidCommandException.class, InvalidRunStateException.class, ProviderCircuit.class))))
+                            InvalidCommandException.class, InvalidRunStateException.class,
+                            RunLeasedElsewhereException.class, ProviderCircuit.class))))
+
             .as("core engine internals are only used via OrchestrationEngine");
 
     /**

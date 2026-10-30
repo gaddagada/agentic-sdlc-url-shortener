@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -12,6 +13,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
+import com.agenticsdlc.orchestrator.core.audit.AuditEventType;
 import com.agenticsdlc.orchestrator.core.audit.AuditSink;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowGraph;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
@@ -31,9 +33,24 @@ import com.agenticsdlc.orchestrator.core.port.RunStore;
  * <em>one</em> transaction (the JPA audit sink joins it), so a failing audit insert also rolls back the snapshot and
  * the run state and its audit trail can never diverge. The snapshot is serialized synchronously before the
  * transaction starts, so the live run is never read after the method returns.</p>
+ *
+ * <p>Next to the snapshot, every save fills the listing columns of the {@code runs} row: autonomy, workspace mode,
+ * the current risk level and the audit chain head from the run; {@code started_by} from the actor of the run's
+ * RUN_CREATED event (or the {@value #CREATED_BY_TAG} run tag); {@code node_id} from the {@code nodeId} of the last
+ * committed event that records one (RUN_CREATED, RUN_RESUMED, REPLAN, RUN_INTERRUPTED, STAGE_STARTED), that is the
+ * engine node that last started work on the run.</p>
  */
 @Component
 public class JpaRunStore implements RunStore {
+
+    /**
+     * Run tag naming the operator who started the run; the control plane's run launcher writes it (the persistence
+     * layer does not depend on the web layer, so the name is repeated here and pinned by a test).
+     */
+    static final String CREATED_BY_TAG = "createdBy";
+
+    /** Audit data key of the engine node id. */
+    static final String NODE_ID_KEY = "nodeId";
 
     private static final Logger LOG = LoggerFactory.getLogger(JpaRunStore.class);
 
@@ -68,7 +85,8 @@ public class JpaRunStore implements RunStore {
     public void save(Run run) {
         RunSnapshot snapshot = run.toSnapshot(codec);
         String json = codec.toJson(snapshot);
-        transactions.executeWithoutResult(status -> persist(snapshot, json));
+        Listing listing = listing(run, snapshot, List.of());
+        transactions.executeWithoutResult(status -> persist(snapshot, json, listing));
     }
 
     /**
@@ -84,20 +102,66 @@ public class JpaRunStore implements RunStore {
         RunSnapshot snapshot = run.toSnapshot(codec);
         String json = codec.toJson(snapshot);
         List<AuditEvent> batch = List.copyOf(events);
+        Listing listing = listing(run, snapshot, batch);
         transactions.executeWithoutResult(status -> {
-            persist(snapshot, json);
+            persist(snapshot, json, listing);
             auditSink.append(batch);
         });
     }
 
-    private void persist(RunSnapshot snapshot, String json) {
+    private void persist(RunSnapshot snapshot, String json, Listing listing) {
         RunEntity entity = runs.findById(snapshot.id())
                 .orElseGet(() -> new RunEntity(snapshot.id(), snapshot.scenarioKey(), snapshot.createdAt()));
         entity.update(snapshot.status().name(),
                 snapshot.haltReason() == null ? null : snapshot.haltReason().name(), snapshot.requirement(),
                 snapshot.planVersion(), snapshot.updatedAt(), snapshot.endedAt(), json);
+        entity.describe(listing.autonomy(), listing.workspaceMode(),
+                listing.startedBy() != null || entity.getStartedBy() != null ? listing.startedBy() : listing.tagStarter(),
+                listing.riskLevel(), listing.nodeId(), listing.auditHeadHash());
         runs.save(entity);
         insertNewArtifacts(snapshot);
+    }
+
+    /**
+     * Computes the listing columns of a run (under the engine's run lock, before the transaction starts).
+     */
+    private static Listing listing(Run run, RunSnapshot snapshot, List<AuditEvent> batch) {
+        String startedBy = null;
+        String nodeId = null;
+        for (AuditEvent event : batch) {
+            if (event.type() == AuditEventType.RUN_CREATED) {
+                startedBy = event.actor().id();
+            }
+            if (event.data().get(NODE_ID_KEY) instanceof String node && !node.isBlank()) {
+                nodeId = node;
+            }
+        }
+        String riskLevel;
+        try {
+            riskLevel = run.currentRisk().level().name();
+        } catch (RuntimeException e) {
+            LOG.warn("risk level of run could not be computed for its listing column runId={} error={}", run.id(),
+                    e.toString());
+            riskLevel = null;
+        }
+        return new Listing(snapshot.options().autonomy().name(), snapshot.options().workspace().name(), startedBy,
+                snapshot.options().tags().get(CREATED_BY_TAG), riskLevel, nodeId, snapshot.auditHeadHash());
+    }
+
+    /**
+     * The listing columns of one save.
+     *
+     * @param autonomy autonomy level name
+     * @param workspaceMode workspace mode name
+     * @param startedBy actor of the RUN_CREATED event of this commit, or null
+     * @param tagStarter the {@value #CREATED_BY_TAG} run tag, or null
+     * @param riskLevel current risk level name, or null
+     * @param nodeId node id of the last event of this commit that records one, or null
+     * @param auditHeadHash audit chain head of the snapshot, or null
+     */
+    private record Listing(String autonomy, String workspaceMode, @Nullable String startedBy,
+                           @Nullable String tagStarter, @Nullable String riskLevel, @Nullable String nodeId,
+                           @Nullable String auditHeadHash) {
     }
 
     private void insertNewArtifacts(RunSnapshot snapshot) {

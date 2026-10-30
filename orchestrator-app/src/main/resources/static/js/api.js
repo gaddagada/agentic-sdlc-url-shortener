@@ -12,11 +12,15 @@ function sessionValue(key) {
 }
 
 export class ApiError extends Error {
-  constructor({ status = 0, title = 'Request failed', detail = '', errors = [], network = false, aborted = false }) {
+  constructor({ status = 0, title = 'Request failed', detail = '', errors = [], network = false, aborted = false, type = '', holder = null }) {
     super(detail || title);
-    Object.assign(this, { status, title, detail, errors, network, aborted });
+    // type: the RFC 9457 problem type URI; holder: the engine node executing the run (409 run-leased-elsewhere)
+    Object.assign(this, { status, title, detail, errors, network, aborted, type, holder });
   }
 }
+
+/** Problem type of a command refused because another engine node is executing the run right now. */
+export const RUN_LEASED_ELSEWHERE = 'https://agenticsdlc.dev/problems/run-leased-elsewhere';
 
 let reachabilityListener = () => {};
 /** Registers a callback told whether the backend answered (true) or could not be reached (false). */
@@ -48,7 +52,14 @@ function toApiError(res, body) {
   const errors = problem && Array.isArray(body.errors)
     ? body.errors.map((e) => (typeof e === 'string' ? e : [e?.field, e?.message ?? e?.defaultMessage].filter(Boolean).join(': ')))
     : [];
-  return new ApiError({ status: res.status, title: problem && body.title ? `${body.title} (${res.status})` : statusLine, detail, errors });
+  return new ApiError({
+    status: res.status,
+    title: problem && body.title ? `${body.title} (${res.status})` : statusLine,
+    detail,
+    errors,
+    type: problem && typeof body.type === 'string' ? body.type : '',
+    holder: problem && typeof body.holder === 'string' ? body.holder : null,
+  });
 }
 
 /**

@@ -31,6 +31,12 @@ public final class ProblemTypes {
     public static final URI SCENARIO_NOT_FOUND = of("scenario-not-found");
     /** The command is not allowed in the current run or stage state. */
     public static final URI INVALID_STATE = of("invalid-state");
+    /**
+     * Another engine node is executing the run right now (it holds the run's lease); the problem carries
+     * {@code holder} (that node's id) and {@code runId}. Retry when the run waits for a human or has finished.
+     */
+    public static final URI RUN_LEASED_ELSEWHERE = of("run-leased-elsewhere");
+
     /** The command is invalid for the run (budget exhausted, unknown stage, missing answers, ...). */
     public static final URI INVALID_COMMAND = of("invalid-command");
     /** The requested agent provider cannot serve the run. */

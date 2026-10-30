@@ -281,7 +281,8 @@ export function renderArtifactDetail({ stage, summary, state, underReview = fals
       art?.kind ? chip(humanize(art.kind)) : null,
       typeof accepted === 'boolean' ? acceptance(accepted) : null,
       art?.hash ? h('span', { class: 'mono muted small', title: art.hash }, `#${String(art.hash).slice(0, 12)}`) : null,
-      art?.createdAt ? h('span', { class: 'muted small', title: fmtDateTime(art.createdAt) }, fmtWhen(art.createdAt)) : null),
+      art?.createdAt ? h('span', { class: 'muted small', title: fmtDateTime(art.createdAt) }, fmtWhen(art.createdAt)) : null,
+      signatureChip(state?.view)),
     stage ? facts([['Status', statusPill(s.status)], ['Attempts', fmtNum(s.attempts)], ['Agent', s.activeAgent || DASH], ['Duration', fmtMs(s.durationMs)]]) : null,
     s.lastError ? h('p', { class: 'error-box' }, h('strong', {}, 'Last error: '), s.lastError) : null,
     asList(s.feedback).length
@@ -289,6 +290,18 @@ export function renderArtifactDetail({ stage, summary, state, underReview = fals
       : null,
     artifactBody(summary, state, open, onToggle),
   ];
+}
+
+/** Signature state of a release change record: signed (keyId), signature invalid, or unsigned. */
+function signatureChip(view) {
+  if (!view || view.kind !== 'RELEASE_READINESS') return null;
+  const sig = view.signature;
+  if (!sig || typeof sig !== 'object') {
+    return chip('unsigned', 'chip-muted', 'The change record carries no signature: it is not finalized yet, or no signing key was configured when the run completed.');
+  }
+  const signed = `${sig.algorithm ?? 'signature'} by key ${sig.keyId ?? '?'}, signed ${fmtDateTime(sig.signedAt)}`;
+  if (view.signatureVerified === true) return chip(`signed (${sig.keyId ?? '?'})`, 'chip-ok', `${signed}; verified with the configured key.`);
+  return chip('signature invalid', 'chip-bad', `${signed}; it does not verify with the configured key: the record changed after signing, or the key differs.`);
 }
 
 // ---------------------------------------------------------------- audit
@@ -319,12 +332,27 @@ function auditEvent(event, openSet, onToggleData) {
       : null);
 }
 
-export function renderAudit({ events, filter, follow, open }, { onToggleType, onClearFilter, onFollow, onToggleData }) {
+/** One line on the verification of the run's audit hash chain (GET /audit/integrity). */
+function integrityLine(integrity) {
+  if (!integrity || typeof integrity !== 'object') return h('p', { class: 'audit-integrity muted' }, 'Audit chain: checking\u2026');
+  if (integrity.valid === true) {
+    const n = isNum(integrity.length) ? integrity.length : 0;
+    return h('p', { class: 'audit-integrity ok', title: integrity.summary ?? null },
+      h('strong', {}, 'Audit chain: verified'), `, ${fmtNum(n)} event${n === 1 ? '' : 's'}`);
+  }
+  const hashes = [integrity.expectedHash && `expected ${integrity.expectedHash}`, integrity.actualHash && `found ${integrity.actualHash}`].filter(Boolean).join('\n');
+  return h('p', { class: 'audit-integrity bad', title: hashes || null },
+    h('strong', {}, `Audit chain: BROKEN at seq ${integrity.brokenAtSeq ?? '?'}`),
+    integrity.summary ? h('span', { class: 'muted' }, ` \u2014 ${integrity.summary}`) : null);
+}
+
+export function renderAudit({ events, filter, follow, open, integrity }, { onToggleType, onClearFilter, onFollow, onToggleData }) {
   const counts = new Map();
   for (const e of events) counts.set(e.type, (counts.get(e.type) ?? 0) + 1);
   const shown = events.filter((e) => !filter.size || filter.has(e.type));
   const newestFirst = shown.slice(-AUDIT_RENDER_CAP).reverse();
   return [
+    integrityLine(integrity),
     h('div', { class: 'audit-toolbar' },
       h('div', { class: 'filters', role: 'group', 'aria-label': 'Filter events by type' },
         h('button', { type: 'button', class: `filter${filter.size ? '' : ' on'}`, 'aria-pressed': filter.size ? 'false' : 'true', 'data-fk': 'filter:*', onclick: onClearFilter }, `All (${events.length})`),

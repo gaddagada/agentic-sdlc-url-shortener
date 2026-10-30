@@ -13,6 +13,10 @@ import org.jspecify.annotations.Nullable;
 /**
  * A persisted run: the aggregate as one JSON snapshot plus a few queryable columns. {@link #version} is the JPA
  * optimistic-lock version, so two writers can never silently overwrite each other's snapshot.
+ *
+ * <p>The listing columns added by V2 ({@code autonomy}, {@code workspace_mode}, {@code started_by},
+ * {@code risk_level}, {@code node_id}, {@code audit_head_hash}) are copies of snapshot data for paged listings and
+ * filters; they are NULL for rows written before V2 until the run is saved again.</p>
  */
 @Entity
 @Table(name = "runs")
@@ -20,6 +24,9 @@ public class RunEntity {
 
     /** Maximum length of the {@code requirement} column. */
     static final int REQUIREMENT_MAX = 4000;
+
+    /** Maximum length of the {@code started_by} and {@code node_id} columns. */
+    static final int LONG_ID_MAX = 128;
 
     @Id
     @Column(name = "id", length = 64, nullable = false)
@@ -55,6 +62,24 @@ public class RunEntity {
     @Version
     @Column(name = "version", nullable = false)
     private @Nullable Long version;
+
+    @Column(name = "autonomy", length = 16)
+    private @Nullable String autonomy;
+
+    @Column(name = "workspace_mode", length = 16)
+    private @Nullable String workspaceMode;
+
+    @Column(name = "started_by", length = LONG_ID_MAX)
+    private @Nullable String startedBy;
+
+    @Column(name = "risk_level", length = 16)
+    private @Nullable String riskLevel;
+
+    @Column(name = "node_id", length = LONG_ID_MAX)
+    private @Nullable String nodeId;
+
+    @Column(name = "audit_head_hash", length = 64)
+    private @Nullable String auditHeadHash;
 
     /** For JPA. */
     protected RunEntity() {
@@ -102,6 +127,35 @@ public class RunEntity {
         this.updatedAt = newUpdatedAt;
         this.endedAt = newEndedAt;
         this.snapshotJson = newSnapshotJson;
+    }
+
+    /**
+     * Copies the listing columns of a run into this row. A null {@code newStartedBy} or {@code newNodeId} keeps the
+     * stored value (the starter is only known from the run's first commit, the node from commits that start work).
+     *
+     * @param newAutonomy autonomy level name
+     * @param newWorkspaceMode workspace mode name
+     * @param newStartedBy id of the operator who started the run, or null to keep the stored value
+     * @param newRiskLevel current risk level name, or null when it could not be computed
+     * @param newNodeId id of the engine node that last started work on the run, or null to keep the stored value
+     * @param newAuditHeadHash hash of the run's last audit event, or null when the run has no signed events
+     */
+    void describe(String newAutonomy, String newWorkspaceMode, @Nullable String newStartedBy,
+                  @Nullable String newRiskLevel, @Nullable String newNodeId, @Nullable String newAuditHeadHash) {
+        this.autonomy = newAutonomy;
+        this.workspaceMode = newWorkspaceMode;
+        if (newStartedBy != null) {
+            this.startedBy = clip(newStartedBy);
+        }
+        this.riskLevel = newRiskLevel;
+        if (newNodeId != null) {
+            this.nodeId = clip(newNodeId);
+        }
+        this.auditHeadHash = newAuditHeadHash;
+    }
+
+    private static String clip(String value) {
+        return value.length() > LONG_ID_MAX ? value.substring(0, LONG_ID_MAX) : value;
     }
 
     /** @return the run id */
@@ -158,4 +212,35 @@ public class RunEntity {
     public @Nullable Long getVersion() {
         return version;
     }
+
+    /** @return the autonomy level name, or null for rows written before V2 */
+    public @Nullable String getAutonomy() {
+        return autonomy;
+    }
+
+    /** @return the workspace mode name, or null for rows written before V2 */
+    public @Nullable String getWorkspaceMode() {
+        return workspaceMode;
+    }
+
+    /** @return the id of the operator who started the run, or null when unknown */
+    public @Nullable String getStartedBy() {
+        return startedBy;
+    }
+
+    /** @return the run's current risk level name, or null when unknown */
+    public @Nullable String getRiskLevel() {
+        return riskLevel;
+    }
+
+    /** @return the id of the engine node that last started work on the run, or null when unknown */
+    public @Nullable String getNodeId() {
+        return nodeId;
+    }
+
+    /** @return the hash of the run's last audit event, or null when the run has no signed events */
+    public @Nullable String getAuditHeadHash() {
+        return auditHeadHash;
+    }
+
 }

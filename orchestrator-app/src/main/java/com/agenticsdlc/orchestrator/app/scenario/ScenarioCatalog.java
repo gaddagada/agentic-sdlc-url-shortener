@@ -16,7 +16,9 @@ import com.agenticsdlc.orchestrator.core.model.WorkspaceMode;
 /**
  * The seven executable scenarios of the engineering specification (section 6.6): the three required scenarios
  * (greenfield, brownfield, ambiguous) and four failure-path and governance scenarios. Requirement texts are
- * verbatim from the specification.
+ * verbatim from the specification, except the brownfield one: the bulk link creation it originally asked for now
+ * exists in {@code url-shortener}, so it asks for campaign labels, a change the current shortener does not implement
+ * (the deterministic run over the real source tree is covered by {@code BrownfieldScenarioTest}).
  */
 @Component
 public class ScenarioCatalog {
@@ -29,10 +31,12 @@ public class ScenarioCatalog {
             + "networks.";
 
     /** Brownfield requirement. */
-    public static final String BROWNFIELD_REQUIREMENT = "Add a bulk link creation API to the existing URL shortener: "
-            + "accept up to 100 URLs per request, return per-item results with partial-failure semantics, reuse the "
-            + "existing URL validation and custom alias rules, and respect the existing per-client rate limit. "
-            + "Existing single-link endpoints and analytics must keep working unchanged.";
+    public static final String BROWNFIELD_REQUIREMENT = "Add campaign labels to the existing URL shortener. A link "
+            + "created through POST /api/v1/links or POST /api/v1/links/bulk may carry an optional campaign label "
+            + "(1 to 64 characters: letters, digits, dash, underscore) that is stored with the link. "
+            + "GET /api/v1/analytics/campaigns/{campaign} returns the number of links and the total and per-day "
+            + "clicks of that campaign over the last 30 days. Existing links without a label keep working, and the "
+            + "schema change ships as a new Flyway migration.";
 
     /** Ambiguous requirement. */
     public static final String AMBIGUOUS_REQUIREMENT = "Make the shortener faster and more reliable.";
@@ -63,15 +67,25 @@ public class ScenarioCatalog {
                         + "parallel after implement.",
                 "release-readiness always requires a human (CHG-002). Review the change record and approve it.",
                 "The run completes: inspect the audit trail, the artifact lineage and the reliability metrics.")));
-        add(new ScenarioDefinition("brownfield", "Brownfield: bulk link creation", ScenarioKind.BROWNFIELD,
-                "A change to the existing url-shortener module. Impact analysis reasons over the indexed source tree "
-                        + "(controllers, services, entities, migrations) instead of inventing a structure.",
+        add(new ScenarioDefinition("brownfield", "Brownfield: campaign labels", ScenarioKind.BROWNFIELD,
+                "A change the existing url-shortener module does not implement yet: an optional campaign label on "
+                        + "links created singly or in bulk, campaign click analytics and a new Flyway migration. "
+                        + "Impact analysis reasons over the indexed source tree (controllers, services, entities, "
+                        + "migrations) instead of inventing a structure.",
                 BROWNFIELD_REQUIREMENT, AutonomyLevel.GUIDED, WorkspaceMode.REPO, List.of(), List.of(
-                "Start the run with workspace REPO; GET /api/v1/workspace/index shows what the impact stage sees.",
-                "Open the impact artifact: LinkController and LinkService are extended, their tests become "
-                        + "regression risks.",
-                "Approve the design (new endpoint POST /api/v1/links/bulk, no schema change).",
-                "Approve release readiness to complete the run.")));
+                "Start the run with workspace REPO; GET /api/v1/workspace/index shows the controllers, services, "
+                        + "entities and Flyway migrations the impact stage reasons over.",
+                "Open the impact artifact: LinkController, BulkLinkController and AnalyticsController with "
+                        + "LinkService, BulkLinkService and AnalyticsService are extended (confidence 1.0), the Link "
+                        + "entity changes (schema change), the migrations section names the latest Flyway migration "
+                        + "and a proposed new one, and validation, rate limiting and idempotency are regression risks.",
+                "The design pauses for approval (GOV-001: risk HIGH for a schema and public API change). Review the "
+                        + "data model change on the links table with its proposed migration and approve it.",
+                "implement plans skeleton changes to the controllers, services and DTOs, a new Flyway migration in "
+                        + "url-shortener and the tests; verify, document and security-scan pass and release readiness "
+                        + "proposes GO with conditions.",
+                "Approve release readiness to complete the run; the Audit tab reports the verified hash chain.")));
+
         add(new ScenarioDefinition("ambiguous", "Ambiguous: clarification first", ScenarioKind.AMBIGUOUS,
                 "An under-specified requirement. Intake scores the ambiguity and asks targeted questions before any "
                         + "planning happens.",

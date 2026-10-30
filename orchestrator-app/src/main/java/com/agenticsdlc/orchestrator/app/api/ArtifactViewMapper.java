@@ -14,6 +14,8 @@ import com.agenticsdlc.orchestrator.app.api.dto.ArtifactView;
 import com.agenticsdlc.orchestrator.app.api.dto.LineageView;
 import com.agenticsdlc.orchestrator.app.api.dto.ProvenanceView;
 import com.agenticsdlc.orchestrator.core.artifact.Artifact;
+import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
+import com.agenticsdlc.orchestrator.core.audit.ChangeRecordSigner;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.agenticsdlc.orchestrator.core.model.Run;
 
@@ -21,7 +23,9 @@ import tools.jackson.core.type.TypeReference;
 
 /**
  * Maps the artifacts of a run to the artifact, artifact summary and lineage views. Payloads are exposed as JSON
- * objects converted with the canonical {@link JsonCodec}, so the API shows exactly the JSON that was hashed.
+ * objects converted with the canonical {@link JsonCodec}, so the API shows exactly the JSON that was hashed. The
+ * change record signature of a release-readiness artifact is verified with the configured
+ * {@link ChangeRecordSigner} each time the view is built, over the record as currently stored.
  */
 @Component
 public class ArtifactViewMapper {
@@ -30,14 +34,17 @@ public class ArtifactViewMapper {
     };
 
     private final JsonCodec codec;
+    private final ChangeRecordSigner signer;
 
     /**
      * Creates the mapper.
      *
      * @param codec JSON codec
+     * @param signer the configured change record signer (verifies release signatures)
      */
-    public ArtifactViewMapper(JsonCodec codec) {
+    public ArtifactViewMapper(JsonCodec codec, ChangeRecordSigner signer) {
         this.codec = codec;
+        this.signer = signer;
     }
 
     /**
@@ -59,9 +66,25 @@ public class ArtifactViewMapper {
      */
     public ArtifactView view(Run run, Artifact artifact) {
         Map<String, Object> payload = codec.mapper().convertValue(artifact.payload(), OBJECT);
+        ArtifactView.SignatureView signature = null;
+        Boolean verified = null;
+        if (artifact.payload() instanceof ReleaseReadiness release && release.changeRecord() != null
+                && release.changeRecord().signature() != null) {
+            ReleaseReadiness.Signature s = release.changeRecord().signature();
+            signature = new ArtifactView.SignatureView(s.algorithm(), s.keyId(), s.value(), s.signedAt());
+            verified = verify(release.changeRecord());
+        }
         return new ArtifactView(artifact.id(), artifact.stageId(), artifact.kind().name(), artifact.version(),
                 artifact.planVersion(), artifact.hash(), accepted(run, artifact), artifact.createdAt(),
-                ProvenanceView.from(artifact.provenance()), payload, artifact.markdown());
+                ProvenanceView.from(artifact.provenance()), payload, artifact.markdown(), signature, verified);
+    }
+
+    private boolean verify(ReleaseReadiness.ChangeRecord record) {
+        try {
+            return signer.verify(record);
+        } catch (RuntimeException e) {
+            return false;
+        }
     }
 
     /**

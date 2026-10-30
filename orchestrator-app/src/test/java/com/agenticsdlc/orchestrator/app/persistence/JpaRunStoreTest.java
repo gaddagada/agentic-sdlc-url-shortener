@@ -22,21 +22,26 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.agenticsdlc.orchestrator.core.agent.AgentRegistry;
 import com.agenticsdlc.orchestrator.core.agent.deterministic.DeterministicAgents;
+import com.agenticsdlc.orchestrator.app.api.RunLauncher;
 import com.agenticsdlc.orchestrator.core.audit.Actor;
+import com.agenticsdlc.orchestrator.core.audit.AuditChain;
 import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
 import com.agenticsdlc.orchestrator.core.audit.AuditEventType;
 import com.agenticsdlc.orchestrator.core.audit.AuditSink;
+import com.agenticsdlc.orchestrator.core.audit.ChainVerification;
 import com.agenticsdlc.orchestrator.core.engine.EngineConfig;
 import com.agenticsdlc.orchestrator.core.engine.OrchestrationEngine;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowGraph;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.agenticsdlc.orchestrator.core.metrics.NoopMetricsRecorder;
 import com.agenticsdlc.orchestrator.core.model.ApprovalStatus;
+import com.agenticsdlc.orchestrator.core.model.AutonomyLevel;
 import com.agenticsdlc.orchestrator.core.model.HaltReason;
 import com.agenticsdlc.orchestrator.core.model.Run;
 import com.agenticsdlc.orchestrator.core.model.RunOptions;
 import com.agenticsdlc.orchestrator.core.model.RunStatus;
 import com.agenticsdlc.orchestrator.core.model.StageStatus;
+import com.agenticsdlc.orchestrator.core.model.WorkspaceMode;
 import com.agenticsdlc.orchestrator.core.policy.PolicyEngine;
 
 /**
@@ -122,6 +127,48 @@ class JpaRunStoreTest {
             assertThat(codec.hash(codec.readTree(a.getPayloadJson()))).isEqualTo(a.getHash());
         });
         assertThat(auditSink.forRun(id, 0)).extracting(e -> e.type()).contains(AuditEventType.RUN_COMPLETED);
+
+        List<AuditEvent> trail = auditSink.forRun(id, 0);
+        ChainVerification chain = AuditChain.verify(trail);
+        assertThat(chain.valid()).as(chain.summary()).isTrue();
+        assertThat(chain.length()).isEqualTo(done.auditSeq()).isEqualTo(trail.size());
+        assertThat(trail.getLast().hash()).isEqualTo(done.auditHeadHash());
+        assertThat(row.getAuditHeadHash()).isEqualTo(done.auditHeadHash());
+        assertThat(row.getAutonomy()).isEqualTo("GUIDED");
+        assertThat(row.getWorkspaceMode()).isEqualTo("NONE");
+        assertThat(row.getStartedBy()).as("actor of RUN_CREATED").isEqualTo(Actor.system().id());
+
+        assertThat(row.getRiskLevel()).isEqualTo(done.currentRisk().level().name());
+        assertThat(row.getNodeId()).isEqualTo(EngineConfig.defaultNodeId());
+    }
+
+    @Test
+    void theListingColumnsComeFromTheRunAndItsCommittedEvents() {
+        Run run = Run.create("listed", graph, "custom", GREENFIELD, new RunOptions(AutonomyLevel.FULL_AUTO, null,
+                List.of(), null, WorkspaceMode.REPO, Map.of(JpaRunStore.CREATED_BY_TAG, "tagged-operator")), T0);
+        AuditEvent created = AuditChain.link(new AuditEvent(1, T0, "listed", null, AuditEventType.RUN_CREATED,
+                ALICE, "run created", Map.of("nodeId", "node-7")), null);
+
+        store.commit(run, List.of(created), auditSink);
+
+        RunEntity row = runs.findById("listed").orElseThrow();
+        assertThat(row.getAutonomy()).isEqualTo("FULL_AUTO");
+        assertThat(row.getWorkspaceMode()).isEqualTo("REPO");
+        assertThat(row.getStartedBy()).isEqualTo("alice");
+        assertThat(row.getNodeId()).isEqualTo("node-7");
+        assertThat(row.getRiskLevel()).isEqualTo("LOW");
+        assertThat(row.getAuditHeadHash()).as("taken from the snapshot, not from the events").isNull();
+
+        run.touch(T0.plusSeconds(1));
+        store.save(run);
+        RunEntity again = runs.findById("listed").orElseThrow();
+        assertThat(again.getStartedBy()).as("kept without a RUN_CREATED event").isEqualTo("alice");
+        assertThat(again.getNodeId()).as("kept without an event naming a node").isEqualTo("node-7");
+
+        store.save(Run.create("tagged", graph, "custom", GREENFIELD, run.options(), T0));
+        assertThat(runs.findById("tagged").orElseThrow().getStartedBy()).as("falls back to the run tag")
+                .isEqualTo("tagged-operator");
+        assertThat(JpaRunStore.CREATED_BY_TAG).isEqualTo(RunLauncher.CREATED_BY_TAG);
     }
 
     @Test
