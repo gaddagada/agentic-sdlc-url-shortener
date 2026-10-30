@@ -16,7 +16,9 @@ import org.jspecify.annotations.Nullable;
  *
  * <p>The listing columns added by V2 ({@code autonomy}, {@code workspace_mode}, {@code started_by},
  * {@code risk_level}, {@code node_id}, {@code audit_head_hash}) are copies of snapshot data for paged listings and
- * filters; they are NULL for rows written before V2 until the run is saved again.</p>
+ * filters; they are NULL for rows written before V2 until the run is saved again. The progress columns added by V3
+ * ({@code pending_actions}, {@code stages_succeeded}, {@code stages_total}) likewise feed the paged runs list without
+ * reading the snapshot; they are NULL for rows written before V3 until the run is saved again.</p>
  */
 @Entity
 @Table(name = "runs")
@@ -80,6 +82,15 @@ public class RunEntity {
 
     @Column(name = "audit_head_hash", length = 64)
     private @Nullable String auditHeadHash;
+
+    @Column(name = "pending_actions")
+    private @Nullable Integer pendingActions;
+
+    @Column(name = "stages_succeeded")
+    private @Nullable Integer stagesSucceeded;
+
+    @Column(name = "stages_total")
+    private @Nullable Integer stagesTotal;
 
     /** For JPA. */
     protected RunEntity() {
@@ -152,6 +163,19 @@ public class RunEntity {
             this.nodeId = clip(newNodeId);
         }
         this.auditHeadHash = newAuditHeadHash;
+    }
+
+    /**
+     * Copies the progress columns of a run into this row.
+     *
+     * @param newPendingActions stages waiting for a human
+     * @param newStagesSucceeded succeeded stages
+     * @param newStagesTotal stages of the workflow
+     */
+    void progress(int newPendingActions, int newStagesSucceeded, int newStagesTotal) {
+        this.pendingActions = newPendingActions;
+        this.stagesSucceeded = newStagesSucceeded;
+        this.stagesTotal = newStagesTotal;
     }
 
     private static String clip(String value) {
@@ -241,6 +265,21 @@ public class RunEntity {
     /** @return the hash of the run's last audit event, or null when the run has no signed events */
     public @Nullable String getAuditHeadHash() {
         return auditHeadHash;
+    }
+
+    /** @return stages waiting for a human after the last save, or null for rows written before V3 */
+    public @Nullable Integer getPendingActions() {
+        return pendingActions;
+    }
+
+    /** @return succeeded stages after the last save, or null for rows written before V3 */
+    public @Nullable Integer getStagesSucceeded() {
+        return stagesSucceeded;
+    }
+
+    /** @return stages of the workflow, or null for rows written before V3 */
+    public @Nullable Integer getStagesTotal() {
+        return stagesTotal;
     }
 
 }

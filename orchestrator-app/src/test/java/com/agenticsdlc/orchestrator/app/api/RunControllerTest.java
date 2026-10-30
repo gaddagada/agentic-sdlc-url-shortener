@@ -31,6 +31,11 @@ import org.springframework.test.web.servlet.assertj.MvcTestResult;
 
 import com.agenticsdlc.orchestrator.app.llm.ProviderCatalog;
 import com.agenticsdlc.orchestrator.app.llm.ProviderUnavailableException;
+import com.agenticsdlc.orchestrator.app.runs.RunListItem;
+import com.agenticsdlc.orchestrator.app.runs.RunListPage;
+import com.agenticsdlc.orchestrator.app.runs.RunListQuery;
+import com.agenticsdlc.orchestrator.app.runs.RunListSort;
+import com.agenticsdlc.orchestrator.app.runs.RunListing;
 import com.agenticsdlc.orchestrator.app.security.SecuritySliceConfiguration;
 import com.agenticsdlc.orchestrator.core.audit.Actor;
 import com.agenticsdlc.orchestrator.core.engine.InvalidCommandException;
@@ -69,6 +74,9 @@ class RunControllerTest {
 
     @MockitoBean
     private ProviderCatalog providers;
+
+    @MockitoBean
+    private RunListing listing;
 
     @Test
     void createStartsTheRunWithContractDefaultsAndReturns201() {
@@ -373,7 +381,7 @@ class RunControllerTest {
 
     @Test
     void unexpectedErrorIs500WithoutInternals() {
-        when(engine.list()).thenThrow(new UnsupportedOperationException("secret internals"));
+        when(listing.page(any())).thenThrow(new UnsupportedOperationException("secret internals"));
 
         MvcTestResult result = mvc.get().uri("/api/v1/runs").exchange();
 
@@ -382,15 +390,71 @@ class RunControllerTest {
     }
 
     @Test
-    void listReturnsSummaries() {
-        when(engine.list()).thenReturn(List.of(run("run-1", RunOptions.defaults())));
+    void listReturnsThePagedEnvelopeOfTableRowsWithoutTouchingTheEngine() {
+        when(listing.page(any())).thenReturn(new RunListPage(List.of(item("run-1", "x".repeat(250))), 0, 50, 1));
 
-        MvcTestResult result = mvc.get().uri("/api/v1/runs").exchange();
+        MvcTestResult result = mvc.get().uri("/api/v1/runs").accept(MediaType.APPLICATION_JSON).exchange();
 
         assertThat(result).hasStatus(HttpStatus.OK);
-        assertThat(result).bodyJson().extractingPath("$[0].id").isEqualTo("run-1");
-        assertThat(result).bodyJson().extractingPath("$[0].progress.total").isEqualTo(10);
-        assertThat(result).bodyJson().extractingPath("$[0].pendingActions").isEqualTo(0);
+        assertThat(result).bodyJson().extractingPath("$.page").isEqualTo(0);
+        assertThat(result).bodyJson().extractingPath("$.size").isEqualTo(50);
+        assertThat(result).bodyJson().extractingPath("$.total").isEqualTo(1);
+        assertThat(result).bodyJson().extractingPath("$.totalPages").isEqualTo(1);
+        assertThat(result).bodyJson().extractingPath("$.sort").isEqualTo("updatedAt,desc");
+        assertThat(result).bodyJson().extractingPath("$.items[0].id").isEqualTo("run-1");
+        assertThat(result).bodyJson().extractingPath("$.items[0].progress.succeeded").isEqualTo(3);
+        assertThat(result).bodyJson().extractingPath("$.items[0].progress.total").isEqualTo(10);
+        assertThat(result).bodyJson().extractingPath("$.items[0].pendingActions").isEqualTo(1);
+        assertThat(result).bodyJson().extractingPath("$.items[0].startedBy").isEqualTo(OPERATOR);
+        assertThat(result).bodyJson().extractingPath("$.items[0].nodeId").isEqualTo("node-a");
+        assertThat(result).bodyJson().extractingPath("$.items[0].autonomy").isEqualTo("GUIDED");
+        assertThat(result).bodyJson().extractingPath("$.items[0].requirement").asString().hasSize(200).endsWith("…");
+        ArgumentCaptor<RunListQuery> query = ArgumentCaptor.forClass(RunListQuery.class);
+        verify(listing).page(query.capture());
+        assertThat(query.getValue()).isEqualTo(RunListQuery.firstPage());
+        verifyNoInteractions(engine);
+    }
+
+    @Test
+    void listPassesPagingFiltersAndSortToTheListing() {
+        when(listing.page(any())).thenReturn(new RunListPage(List.of(), 2, 25, 60));
+
+        MvcTestResult result = mvc.get().uri("/api/v1/runs?page=2&size=25&status=running,waiting_human"
+                + "&scenario=greenfield&startedBy=" + OPERATOR + "&sort=createdAt,asc").exchange();
+
+        assertThat(result).hasStatus(HttpStatus.OK);
+        assertThat(result).bodyJson().extractingPath("$.totalPages").isEqualTo(3);
+        assertThat(result).bodyJson().extractingPath("$.items").asArray().isEmpty();
+        ArgumentCaptor<RunListQuery> query = ArgumentCaptor.forClass(RunListQuery.class);
+        verify(listing).page(query.capture());
+        assertThat(query.getValue()).isEqualTo(new RunListQuery(2, 25, List.of("RUNNING", "WAITING_HUMAN"),
+                "greenfield", OPERATOR, new RunListSort(RunListSort.Field.CREATED_AT, false)));
+    }
+
+    @Test
+    void listCapsThePageSizeAndRejectsNegativePages() {
+        assertThat(mvc.get().uri("/api/v1/runs?size=201").exchange()).hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson().extractingPath("$.type").isEqualTo(ProblemTypes.VALIDATION_ERROR.toString());
+        assertThat(mvc.get().uri("/api/v1/runs?size=0").exchange()).hasStatus(HttpStatus.BAD_REQUEST);
+        assertThat(mvc.get().uri("/api/v1/runs?page=-1").exchange()).hasStatus(HttpStatus.BAD_REQUEST);
+        when(listing.page(any())).thenReturn(new RunListPage(List.of(), 0, 200, 0));
+        assertThat(mvc.get().uri("/api/v1/runs?size=200").exchange()).hasStatus(HttpStatus.OK);
+    }
+
+    @Test
+    void listRejectsUnknownSortFieldsDirectionsAndStatuses() {
+        MvcTestResult unknownField = mvc.get().uri("/api/v1/runs?sort=snapshotJson,desc").exchange();
+        assertThat(unknownField).hasStatus(HttpStatus.BAD_REQUEST)
+                .hasContentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON);
+        assertThat(unknownField).bodyJson().extractingPath("$.type")
+                .isEqualTo(ProblemTypes.INVALID_ARGUMENT.toString());
+        assertThat(unknownField).bodyJson().extractingPath("$.detail").asString()
+                .contains("snapshotJson", "createdAt, updatedAt, endedAt, status, scenario, startedBy");
+        assertThat(mvc.get().uri("/api/v1/runs?sort=updatedAt,sideways").exchange())
+                .hasStatus(HttpStatus.BAD_REQUEST);
+        assertThat(mvc.get().uri("/api/v1/runs?status=DONE").exchange()).hasStatus(HttpStatus.BAD_REQUEST)
+                .bodyJson().extractingPath("$.detail").asString().contains("DONE");
+        verifyNoInteractions(listing);
     }
 
     private MvcTestResult post(String uri, String body) {
@@ -408,6 +472,11 @@ class RunControllerTest {
 
     private static Run run(String id, RunOptions options) {
         return Run.create(id, GRAPH, "custom", REQUIREMENT, options, NOW);
+    }
+
+    private static RunListItem item(String id, String requirement) {
+        return new RunListItem(id, "greenfield", "WAITING_HUMAN", null, requirement, 1, NOW, NOW.plusSeconds(5), null,
+                "GUIDED", "REPO", OPERATOR, "MEDIUM", "node-a", 1, 3, 10);
     }
 
     /**

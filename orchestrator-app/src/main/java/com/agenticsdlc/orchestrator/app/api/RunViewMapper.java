@@ -16,6 +16,7 @@ import com.agenticsdlc.orchestrator.app.api.dto.PolicyFindingView;
 import com.agenticsdlc.orchestrator.app.api.dto.RunSummaryView;
 import com.agenticsdlc.orchestrator.app.api.dto.RunView;
 import com.agenticsdlc.orchestrator.app.api.dto.StageView;
+import com.agenticsdlc.orchestrator.app.runs.RunListItem;
 import com.agenticsdlc.orchestrator.core.agent.AgentRegistry;
 import com.agenticsdlc.orchestrator.core.artifact.RiskAssessment;
 import com.agenticsdlc.orchestrator.core.graph.StageDefinition;
@@ -29,13 +30,14 @@ import com.agenticsdlc.orchestrator.core.model.StageExecution;
 import com.agenticsdlc.orchestrator.core.model.StageStatus;
 
 /**
- * Maps engine run snapshots to the run, run summary and graph views of the REST API. Stateless and thread-safe.
+ * Maps engine run snapshots to the run and graph views of the REST API, and rows of the runs list to run summaries.
+ * Stateless and thread-safe.
  */
 @Component
 public class RunViewMapper {
 
     /** Maximum length of the requirement in run summaries. */
-    static final int SUMMARY_REQUIREMENT_MAX = 120;
+    static final int SUMMARY_REQUIREMENT_MAX = RunListItem.REQUIREMENT_PROBE - 1;
 
     private final WorkflowGraph graph;
     private final Clock clock;
@@ -73,7 +75,8 @@ public class RunViewMapper {
                         c.llmTokens()),
                 new RunView.CountersView(c.retries(), c.fallbacks(), c.rollbacks(), c.replans(), c.feedbackLoops(),
                         c.approvalsRequested(), c.approvalsApproved(), c.approvalsRejected(), c.approvalsRevoked(),
-                        c.agentCalls(), c.llmCalls(), c.llmInputTokens(), c.llmOutputTokens()),
+                        c.agentCalls(), c.llmCalls(), c.llmInputTokens(), c.llmOutputTokens(), c.llmCacheReadTokens(),
+                        c.llmCacheCreationTokens(), c.llmCostUsd(), c.llmUnpricedCalls()),
                 new RunView.TimingView(run.endToEndMs(), run.activeMs(now), run.humanWaitMs(now),
                         run.firstFailureAt(), run.recoveredAt(), run.mttrMs()),
                 new RunView.RiskView(risk.level().name(), risk.factors()),
@@ -81,19 +84,21 @@ public class RunViewMapper {
     }
 
     /**
-     * Maps a run to its summary for the runs list.
+     * Maps a row of the runs list to its summary: the requirement is cut to {@value #SUMMARY_REQUIREMENT_MAX}
+     * characters (the last one an ellipsis when it was longer).
      *
-     * @param run a run snapshot
+     * @param item a list row
      * @return the summary
      */
-    public RunSummaryView toSummary(Run run) {
-        int succeeded = (int) run.stages().stream().filter(s -> s.status() == StageStatus.SUCCEEDED).count();
-        int pending = (int) run.stages().stream().filter(s -> s.status().isAwaitingHuman()).count();
-        String requirement = run.requirement().length() <= SUMMARY_REQUIREMENT_MAX ? run.requirement()
-                : run.requirement().substring(0, SUMMARY_REQUIREMENT_MAX - 1) + "…";
-        return new RunSummaryView(run.id(), run.scenarioKey(), run.status().name(), name(run.haltReason()),
-                requirement, run.planVersion(), run.createdAt(), run.updatedAt(), pending,
-                new RunSummaryView.ProgressView(succeeded, run.stages().size()));
+    public RunSummaryView toSummary(RunListItem item) {
+        String requirement = item.requirement().length() <= SUMMARY_REQUIREMENT_MAX ? item.requirement()
+                : item.requirement().substring(0, SUMMARY_REQUIREMENT_MAX - 1) + "…";
+        RunSummaryView.ProgressView progress = item.stagesSucceeded() == null || item.stagesTotal() == null ? null
+                : new RunSummaryView.ProgressView(item.stagesSucceeded(), item.stagesTotal());
+        return new RunSummaryView(item.id(), item.scenario(), item.status(), item.haltReason(), requirement,
+                item.planVersion(), item.createdAt(), item.updatedAt(), item.endedAt(), item.autonomy(),
+                item.workspaceMode(), item.startedBy(), item.riskLevel(), item.nodeId(), item.pendingActions(),
+                progress);
     }
 
     /**

@@ -100,6 +100,21 @@ class AppArchitectureTest {
             .resideInAPackage(ROOT + ".scenario..").should().dependOnClassesThat(
                     resideInAPackage(ROOT + "..").and(resideOutsideOfPackage(ROOT + ".scenario..")));
 
+    /** The runs list read model is plain data shared by the web and persistence layers. */
+    @ArchTest
+    static final ArchRule runsReadModelDependsOnNoOtherAppPackage = noClasses().that()
+            .resideInAPackage(ROOT + ".runs..").should().dependOnClassesThat(
+                    resideInAPackage(ROOT + "..").and(resideOutsideOfPackage(ROOT + ".runs..")));
+
+    /**
+     * The run event bus connects the JPA store (publisher) with the event streams and observations (subscribers)
+     * without knowing either: it depends on neither the web nor the persistence layer.
+     */
+    @ArchTest
+    static final ArchRule eventBusIsIndependentOfWebAndPersistence = noClasses().that()
+            .resideInAPackage(ROOT + ".events..").should().dependOnClassesThat(resideInAPackage(API)
+                    .or(resideInAPackage(PERSISTENCE)).or(resideInAPackage("org.springframework.web..")));
+
     @ArchTest
     static final ArchRule noFieldInjection = GeneralCodingRules.NO_CLASSES_SHOULD_USE_FIELD_INJECTION;
 

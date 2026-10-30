@@ -26,6 +26,17 @@ class ApiAuthorizationRulesTest {
         assertThat(ApiAuthorizationRules.allowedRoles("post", "/api/v1/runs/r1/stages/release-readiness/reject"))
                 .containsExactly(APPROVER);
         assertThat(ApiAuthorizationRules.allowedRoles("POST", "/api/v1/workspace/reindex")).containsExactly(ADMIN);
+        assertThat(ApiAuthorizationRules.allowedRoles("POST", "/api/v1/evaluation/suite/run"))
+                .containsExactly(ADMIN);
+    }
+
+    @Test
+    void streamsPolicyAndEvaluationAreReadsForAnyRole() {
+        for (String path : List.of("/api/v1/runs/events", "/api/v1/runs/r1/events", "/api/v1/policy",
+                "/api/v1/runs/r1/evaluation")) {
+            assertThat(ApiAuthorizationRules.allowedRoles("GET", path)).as(path)
+                    .containsExactly(OPERATOR, APPROVER, ADMIN);
+        }
     }
 
     @Test

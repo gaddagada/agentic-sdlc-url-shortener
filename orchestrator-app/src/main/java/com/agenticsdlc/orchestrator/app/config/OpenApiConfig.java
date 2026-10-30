@@ -55,11 +55,12 @@ import io.swagger.v3.oas.models.security.SecurityRequirement;
         title = "SDLC Orchestrator API",
         version = "v1",
         description = "Control plane of the agentic SDLC orchestrator: start runs, govern them (approve, reject, "
-                + "clarify, re-plan, stop, resume) and inspect artifacts, lineage, audit trail and reliability "
-                + "metrics. Every POST names the operator: the X-Operator-Id header (open and api-key mode) or the "
-                + "identity claim of the bearer token (oidc mode). Roles: OPERATOR starts and steers runs, APPROVER "
-                + "decides gates, ADMIN re-indexes the workspace, any role reads (see x-required-roles). Errors are "
-                + "RFC 9457 Problem Details.",
+                + "clarify, re-plan, stop, resume), follow them live (server-sent events) and inspect artifacts, "
+                + "lineage, audit trail, evaluation scores, the policy in force and reliability metrics. Every POST "
+                + "names the operator: the X-Operator-Id header (open and api-key mode) or the identity claim of the "
+                + "bearer token (oidc mode). Roles: OPERATOR starts and steers runs, APPROVER decides gates, ADMIN "
+                + "re-indexes the workspace and runs the evaluation suite, any role reads (see x-required-roles). "
+                + "Errors are RFC 9457 Problem Details.",
         license = @License(name = "Apache-2.0")))
 @SecurityScheme(name = OpenApiConfig.API_KEY_SCHEME, type = SecuritySchemeType.APIKEY, in = SecuritySchemeIn.HEADER,
         paramName = "X-Api-Key", description = "Shared key required on /api/** in api-key mode "
@@ -90,11 +91,14 @@ public class OpenApiConfig {
             401, "Not authenticated: X-Api-Key missing or wrong (api-key mode), bearer token missing, expired or "
                     + "invalid (oidc mode)",
             403, "Authenticated, but the caller does not hold a role in x-required-roles (oidc mode)",
-            404, "Unknown run, scenario or artifact",
+            404, "Unknown run, scenario or artifact, or an operation disabled by configuration (type "
+                    + "feature-disabled)",
             409, "Refused in the current state: wrong run or stage state, stale approvalId, invalid command "
-                    + "(exhausted budget, missing waiver, ...), four-eyes rule, unavailable agent provider, or the run "
-                    + "is executing on another engine node (type run-leased-elsewhere, with holder and runId)",
-            503, "The control plane is shutting down");
+                    + "(exhausted budget, missing waiver, ...), four-eyes rule, unavailable agent provider, the run "
+                    + "is executing on another engine node (type run-leased-elsewhere, with holder and runId), or an "
+                    + "evaluation suite run is already in progress (type evaluation-in-progress)",
+            503, "The control plane is shutting down, or (event streams) this node serves the maximum number of "
+                    + "streams (type stream-limit-reached, with Retry-After)");
 
     /**
      * Documents the {@code X-Operator-Id} header on every operation that resolves the operator identity.

@@ -48,7 +48,10 @@ import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
  * state, {@link InvalidCommandException} for invalid commands), four-eyes violations and unavailable providers are
  * 409 with the engine's message; a command on a run another engine node is executing
  * ({@link RunLeasedElsewhereException}) is 409 of type {@code run-leased-elsewhere} with {@code holder} and
- * {@code runId}; a plain {@link IllegalStateException} (engine closed or shutting down) is 503;
+ * {@code runId}; a plain {@link IllegalStateException} (engine closed or shutting down) is 503, and so is a stream
+ * request beyond {@code sdlc.console.max-sse-connections} ({@link StreamLimitException}, with {@code Retry-After});
+ * an operation disabled by configuration is 404 ({@link FeatureDisabledException}) and a second concurrent evaluation
+ * suite run 409 ({@link EvaluationInProgressException});
  * everything else is a 500 without internal details. Extends {@link ResponseEntityExceptionHandler} so Spring
  * MVC's own exceptions (405, 406, 415, missing parameters, ...) are rendered consistently.</p>
  */
@@ -56,6 +59,9 @@ import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
 public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
 
     private static final Logger LOG = LoggerFactory.getLogger(ApiExceptionHandler.class);
+
+    /** {@code Retry-After} of a stream refused by the connection limit. */
+    static final int STREAM_RETRY_AFTER_SECONDS = 30;
 
     @ExceptionHandler(OperatorIdentityException.class)
     ResponseEntity<ProblemDetail> handleOperatorIdentity(OperatorIdentityException ex) {
@@ -115,6 +121,26 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         LOG.warn("request refused while the control plane is unavailable: {}", ex.getMessage());
         return respond(problem(HttpStatus.SERVICE_UNAVAILABLE, ProblemTypes.SERVICE_UNAVAILABLE,
                 "Service unavailable", "control plane is shutting down"));
+    }
+
+    @ExceptionHandler(StreamLimitException.class)
+    ResponseEntity<ProblemDetail> handleStreamLimit(StreamLimitException ex) {
+        ProblemDetail problem = problem(HttpStatus.SERVICE_UNAVAILABLE, ProblemTypes.STREAM_LIMIT_REACHED,
+                "Too many event streams", ex.getMessage());
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).header(HttpHeaders.RETRY_AFTER,
+                String.valueOf(STREAM_RETRY_AFTER_SECONDS)).body(problem);
+    }
+
+    @ExceptionHandler(FeatureDisabledException.class)
+    ResponseEntity<ProblemDetail> handleFeatureDisabled(FeatureDisabledException ex) {
+        return respond(problem(HttpStatus.NOT_FOUND, ProblemTypes.FEATURE_DISABLED, "Feature disabled",
+                ex.getMessage()));
+    }
+
+    @ExceptionHandler(EvaluationInProgressException.class)
+    ResponseEntity<ProblemDetail> handleEvaluationInProgress(EvaluationInProgressException ex) {
+        return respond(problem(HttpStatus.CONFLICT, ProblemTypes.EVALUATION_IN_PROGRESS, "Evaluation in progress",
+                ex.getMessage()));
     }
 
     @ExceptionHandler(InvalidCommandException.class)

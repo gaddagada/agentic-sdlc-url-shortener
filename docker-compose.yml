@@ -56,6 +56,15 @@ services:
       # Passed through unchanged; empty leaves release change records unsigned. Never logged by the control plane.
       SDLC_GOVERNANCE_SIGNING_KEY: ${SDLC_GOVERNANCE_SIGNING_KEY:-}
       SDLC_LLM_OLLAMA_BASE_URL: http://host.docker.internal:11434
+      # Optional policy pack: a JSON or YAML file mounted into the container, or
+      # classpath:policy/example-policy-pack.yaml. Empty: built-in rules only. An invalid pack stops the container at
+      # startup with every problem listed.
+      SDLC_POLICY_PACK: ${SDLC_POLICY_PACK:-}
+      # Optional trace export over OTLP/HTTP: set OTLP_TRACING_ENABLED=true and OTLP_TRACES_ENDPOINT (for example
+      # http://otel-collector:4318/v1/traces). Disabled by default: spans then stay inside the container. The endpoint
+      # always has a value because Spring Boot treats an empty endpoint as configured.
+      MANAGEMENT_TRACING_EXPORT_OTLP_ENABLED: ${OTLP_TRACING_ENABLED:-false}
+      MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT: ${OTLP_TRACES_ENDPOINT:-http://otel-collector:4318/v1/traces}
     ports:
       - "127.0.0.1:8090:8090"
 

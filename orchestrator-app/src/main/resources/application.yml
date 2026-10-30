@@ -32,6 +32,26 @@ spring:
       enabled: true
 
 management:
+  # Tracing: Micrometer observations (HTTP requests, the sdlc.run and sdlc.stage observations of runs and stage
+  # attempts) become OpenTelemetry spans. They are exported over OTLP only when an endpoint is set, for example
+  # MANAGEMENT_OPENTELEMETRY_TRACING_EXPORT_OTLP_ENDPOINT=http://otel-collector:4318/v1/traces; without one, spans stay
+  # in the process (nothing is sent anywhere). Never set the endpoint to an empty value (Spring Boot then treats it as
+  # configured); management.tracing.export.otlp.enabled=false switches the export off instead. Metrics are not pushed
+  # over OTLP; they remain on /actuator/metrics.
+  tracing:
+    sampling:
+      probability: 1.0                   # low-traffic control plane: keep every trace (lower it for busy deployments)
+  metrics:
+    observations:
+      # Observations become timers (sdlc.run, sdlc.stage, http.server.requests) but no long task timers: those would be
+      # named sdlc.run.active, which is the existing timer of the active time of completed runs, and every open event
+      # stream would count as an in-flight HTTP request for up to sdlc.console.sse-timeout.
+      ignored-meters: long-task-timer
+  # opentelemetry:                     # service.name defaults to spring.application.name
+  #   tracing:
+  #     export:
+  #       otlp:
+  #         endpoint: http://localhost:4318/v1/traces
   endpoints:
     web:
       exposure:
@@ -71,6 +91,12 @@ sdlc:
     registry-retention: 1h               # runs not executing here leave memory after this idle time (reloaded on demand)
     registry-max-terminal-runs: 500      # completed and aborted runs kept in memory at most
     maintenance-interval: 30s            # fixed delay of recovery (runs of a dead node, once its lease expired) + eviction
+    # Optional external dependency scanner run by the security review of REPO runs, inside the run's sandbox (needs
+    # sandbox-enabled), through the same build runner and allow-list as build-command (Maven commands only). Only its
+    # exit status and the first 2000 characters of its output are recorded; a non-zero exit is a HIGH finding. Unset:
+    # no external scan (the built-in dependency inventory of the POMs still runs; it is not a CVE scan).
+    # dependency-scan-command: ./mvnw -B -ntp -q org.owasp:dependency-check-maven:check -DfailBuildOnCVSS=7
+    dependency-scan-timeout: 5m
   security:
     # open (default; every caller holds every role) | api-key | oidc. When unset and api-key is set, api-key applies.
     # mode: open
@@ -88,6 +114,23 @@ sdlc:
         admin: admin
   console:
     enabled: true
+    # Server-sent event streams of the console (GET /api/v1/runs/events, GET /api/v1/runs/{id}/events). They carry
+    # the run changes committed by THIS node only: with several nodes, the console polls runs held by other nodes
+    # (it compares the X-Sdlc-Node-Id header of the stream with the run's nodeId) and keeps a 30 s safety poll.
+    max-sse-connections: 200             # concurrent streams of this node; more are refused with 503 (stream-limit-reached)
+    sse-heartbeat-interval: 15s          # "heartbeat" event on every open stream (keeps proxies from closing it)
+    sse-timeout: 30m                     # lifetime of one stream; the client reconnects with Last-Event-ID
+  metrics:
+    cache-ttl: 5s                        # GET /api/v1/metrics/reliability reads every run of the store; reuse the result
+  # Policy as code: a JSON or YAML policy pack evaluated after the built-in rules (it may disable built-in rules
+  # except CHG-002, GOV-003 and SEC-002). A file path or classpath:<resource>; an invalid pack fails startup with
+  # every problem listed. Unset: built-in rules only. Environment variable: SDLC_POLICY_PACK.
+  # policy:
+  #   pack: classpath:policy/example-policy-pack.yaml
+  evaluation:
+    # POST /api/v1/evaluation/suite/run (ADMIN): the bundled evaluation suite on isolated in-memory engines with the
+    # deterministic agents. Enabled by the local profile, disabled by the prod profile.
+    enabled: false
   agents:
     default-provider: deterministic         # deterministic | anthropic | ollama
   governance:
@@ -110,3 +153,21 @@ sdlc:
       base-url: http://localhost:11434
       model: qwen2.5-coder:7b
       timeout: 240s
+    # LLM cost estimation: US dollars per million tokens per provider, as a provider "default" and per model name or
+    # model-name prefix ("claude-opus-5" also prices "claude-opus-5-5"). No prices ship with the application: copy them
+    # from the provider's CURRENT price list (they change and differ by contract). Without a price, calls are counted
+    # as unpriced and run costs are unknown. Cache prices default to the input price. Names with dots need brackets,
+    # e.g. models: { "[qwen2.5-coder:7b]": {...} }. The values below are placeholders, not real prices.
+    # pricing:
+    #   providers:
+    #     anthropic:
+    #       models:
+    #         claude-opus-5:
+    #           input-per-million: 0.00
+    #           output-per-million: 0.00
+    #           cache-read-per-million: 0.00
+    #           cache-write-per-million: 0.00
+    #     ollama:
+    #       default:                     # local models: no per-token charge
+    #         input-per-million: 0
+    #         output-per-million: 0

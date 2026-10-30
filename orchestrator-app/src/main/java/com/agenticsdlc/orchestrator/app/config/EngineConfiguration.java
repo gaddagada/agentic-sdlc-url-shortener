@@ -14,6 +14,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.transaction.PlatformTransactionManager;
 
+import com.agenticsdlc.orchestrator.app.llm.LlmProperties;
 import com.agenticsdlc.orchestrator.app.persistence.JdbcRunLeaseProvider;
 import com.agenticsdlc.orchestrator.core.agent.AgentRegistry;
 import com.agenticsdlc.orchestrator.core.audit.AuditSink;
@@ -25,17 +26,22 @@ import com.agenticsdlc.orchestrator.core.engine.OrchestrationEngine;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowDefinitions;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowGraph;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
+import com.agenticsdlc.orchestrator.core.metrics.LlmPriceBook;
 import com.agenticsdlc.orchestrator.core.metrics.MetricsRecorder;
 import com.agenticsdlc.orchestrator.core.policy.PolicyEngine;
+import com.agenticsdlc.orchestrator.core.policy.pack.PolicyPack;
+import com.agenticsdlc.orchestrator.core.policy.pack.PolicyPackException;
 import com.agenticsdlc.orchestrator.core.port.InMemoryRunLeaseProvider;
 import com.agenticsdlc.orchestrator.core.port.RunLeaseProvider;
 import com.agenticsdlc.orchestrator.core.port.RunStore;
 import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndexer;
 
 /**
- * Wires the framework-independent engine: workflow graph, policy engine, JSON codec, workspace index, the signer of
- * release change records, the run lease provider, the {@link EngineConfig} and the {@link OrchestrationEngine}
- * itself (closed on shutdown so in-flight attempts are cancelled and the node's run leases are released).
+ * Wires the framework-independent engine: workflow graph, policy engine (with the policy pack of
+ * {@code sdlc.policy.pack}, when set), JSON codec, workspace index, the signer of release change records, the run
+ * lease provider, the LLM price book ({@code sdlc.llm.pricing}), the {@link EngineConfig} and the
+ * {@link OrchestrationEngine} itself (closed on shutdown so in-flight attempts are cancelled and the node's run leases
+ * are released).
  *
  * <p>The {@link JsonCodec} owns its own canonical Jackson 3 mapper (sorted properties, ISO-8601 dates); it is used
  * for persistence snapshots, hashing and LLM output parsing. HTTP bodies use the mapper auto-configured by
@@ -67,13 +73,49 @@ public class EngineConfiguration {
     }
 
     /**
-     * Returns the policy engine with the default rule set.
+     * Returns the policy engine: the built-in rules, plus the declarative rules of the policy pack named by
+     * {@code sdlc.policy.pack} (minus the built-in rules it disables) when one is configured.
      *
+     * @param properties configuration
      * @return the policy engine
+     * @throws IllegalStateException listing every problem when the configured pack cannot be read or is invalid, so
+     *                               the application does not start with a policy other than the intended one
      */
     @Bean
-    PolicyEngine policyEngine() {
-        return PolicyEngine.withDefaultRules();
+    PolicyEngine policyEngine(OrchestratorProperties properties) {
+        OrchestratorProperties.Policy policy = properties.policy();
+        if (!policy.hasPack()) {
+            LOG.info("policy: built-in rules only (sdlc.policy.pack is not set)");
+            return PolicyEngine.withDefaultRules();
+        }
+        String location = policy.pack().strip();
+        try {
+            PolicyPack pack = PolicyPackFiles.load(location);
+            return PolicyEngine.withDefaultRulesAnd(pack);
+        } catch (PolicyPackException e) {
+            e.problems().forEach(problem -> LOG.error("policy pack problem location={} problem={}", location, problem));
+            throw new IllegalStateException("sdlc.policy.pack " + location + " is not a valid policy pack ("
+                    + e.problems().size() + " problem" + (e.problems().size() == 1 ? "" : "s") + "):\n  - "
+                    + String.join("\n  - ", e.problems()), e);
+        }
+    }
+
+    /**
+     * Returns the LLM price book mapped from {@code sdlc.llm.pricing} (empty by default: every call is unpriced).
+     *
+     * @param llm LLM configuration
+     * @return the price book
+     */
+    @Bean
+    LlmPriceBook llmPriceBook(LlmProperties llm) {
+        LlmPriceBook book = llm.pricing().toPriceBook();
+        if (book.isEmpty()) {
+            LOG.info("LLM pricing: no prices configured (sdlc.llm.pricing); LLM calls are counted as unpriced");
+        } else {
+            LOG.info("LLM pricing: {} price entries {}", book.entries().size(), book.entries().stream()
+                    .map(e -> e.providerId() + ":" + (e.model() == null ? "default" : e.model())).toList());
+        }
+        return book;
     }
 
     /**
@@ -142,12 +184,13 @@ public class EngineConfiguration {
      * @param clock clock
      * @param signer change record signer
      * @param leases run lease provider
+     * @param priceBook LLM prices
      * @return the configuration
      * @throws IllegalStateException when the lease TTL does not outlast the longest retry backoff
      */
     @Bean
     EngineConfig engineConfig(OrchestratorProperties properties, WorkspaceIndexHolder workspace, Clock clock,
-                              ChangeRecordSigner signer, RunLeaseProvider leases) {
+                              ChangeRecordSigner signer, RunLeaseProvider leases, LlmPriceBook priceBook) {
         OrchestratorProperties.Engine engine = properties.engine();
         EngineConfig config = EngineConfig.builder()
                 .ambiguityThreshold(engine.ambiguityThreshold())
@@ -166,12 +209,15 @@ public class EngineConfiguration {
                 .leaseTtl(engine.leaseTtl())
                 .registryRetention(engine.registryRetention())
                 .registryMaxTerminalRuns(engine.registryMaxTerminalRuns())
+                .priceBook(priceBook)
+                .dependencyScanCommand(engine.resolvedDependencyScanCommand())
+                .dependencyScanTimeout(engine.dependencyScanTimeout())
                 .build();
         requireLeaseOutlastsBackoff(config);
-        LOG.info("engine node={} leaseProvider={} leaseTtl={} registryRetention={} registryMaxTerminalRuns={}",
-                config.nodeId(), engine.leaseProvider().name().toLowerCase(Locale.ROOT), config.leaseTtl(),
-
-                config.registryRetention(), config.registryMaxTerminalRuns());
+        LOG.info("engine node={} leaseProvider={} leaseTtl={} registryRetention={} registryMaxTerminalRuns={} "
+                        + "dependencyScan={}", config.nodeId(), engine.leaseProvider().name().toLowerCase(Locale.ROOT),
+                config.leaseTtl(), config.registryRetention(), config.registryMaxTerminalRuns(),
+                config.dependencyScanCommand() == null ? "off" : "on (timeout " + config.dependencyScanTimeout() + ")");
         return config;
     }
 

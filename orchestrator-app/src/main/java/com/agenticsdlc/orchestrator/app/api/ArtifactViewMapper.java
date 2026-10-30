@@ -11,10 +11,12 @@ import org.springframework.stereotype.Component;
 
 import com.agenticsdlc.orchestrator.app.api.dto.ArtifactSummaryView;
 import com.agenticsdlc.orchestrator.app.api.dto.ArtifactView;
+import com.agenticsdlc.orchestrator.app.api.dto.DependencyView;
 import com.agenticsdlc.orchestrator.app.api.dto.LineageView;
 import com.agenticsdlc.orchestrator.app.api.dto.ProvenanceView;
 import com.agenticsdlc.orchestrator.core.artifact.Artifact;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
+import com.agenticsdlc.orchestrator.core.artifact.SecurityReview;
 import com.agenticsdlc.orchestrator.core.audit.ChangeRecordSigner;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.agenticsdlc.orchestrator.core.model.Run;
@@ -25,7 +27,8 @@ import tools.jackson.core.type.TypeReference;
  * Maps the artifacts of a run to the artifact, artifact summary and lineage views. Payloads are exposed as JSON
  * objects converted with the canonical {@link JsonCodec}, so the API shows exactly the JSON that was hashed. The
  * change record signature of a release-readiness artifact is verified with the configured
- * {@link ChangeRecordSigner} each time the view is built, over the record as currently stored.
+ * {@link ChangeRecordSigner} each time the view is built, over the record as currently stored. A security review
+ * carries its dependency inventory with per-declaration hygiene flags ({@link DependencyFlags}).
  */
 @Component
 public class ArtifactViewMapper {
@@ -74,9 +77,12 @@ public class ArtifactViewMapper {
             signature = new ArtifactView.SignatureView(s.algorithm(), s.keyId(), s.value(), s.signedAt());
             verified = verify(release.changeRecord());
         }
+        List<DependencyView> dependencies = artifact.payload() instanceof SecurityReview review
+                ? DependencyFlags.of(review) : null;
         return new ArtifactView(artifact.id(), artifact.stageId(), artifact.kind().name(), artifact.version(),
                 artifact.planVersion(), artifact.hash(), accepted(run, artifact), artifact.createdAt(),
-                ProvenanceView.from(artifact.provenance()), payload, artifact.markdown(), signature, verified);
+                ProvenanceView.from(artifact.provenance()), payload, artifact.markdown(), signature, verified,
+                dependencies);
     }
 
     private boolean verify(ReleaseReadiness.ChangeRecord record) {

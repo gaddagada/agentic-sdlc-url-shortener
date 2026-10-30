@@ -52,6 +52,27 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-security-oauth2-resource-server</artifactId>
     </dependency>
+    <!-- Tracing: Micrometer Observation -> OpenTelemetry bridge (Boot auto-configuration). Spans are exported over OTLP
+         only when management.opentelemetry.tracing.export.otlp.endpoint is set; otherwise nothing leaves the process.
+         The OTLP metrics registry of spring-boot-starter-opentelemetry is deliberately not used (it would push metrics
+         to localhost:4318 by default). -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-micrometer-tracing-opentelemetry</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-tracing-bridge-otel</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>io.opentelemetry</groupId>
+      <artifactId>opentelemetry-exporter-otlp</artifactId>
+    </dependency>
+    <!-- YAML policy packs (sdlc.policy.pack) are read with Jackson 3's YAML mapper and handed to the core as JSON. -->
+    <dependency>
+      <groupId>tools.jackson.dataformat</groupId>
+      <artifactId>jackson-dataformat-yaml</artifactId>
+    </dependency>
     <dependency>
       <groupId>com.anthropic</groupId>
       <artifactId>anthropic-java</artifactId>
@@ -94,6 +115,11 @@
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-observation-test</artifactId>
       <scope>test</scope>
     </dependency>
     <dependency>

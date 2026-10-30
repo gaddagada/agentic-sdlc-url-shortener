@@ -19,7 +19,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
 
-import com.agenticsdlc.orchestrator.app.metrics.MicrometerMetricsRecorder;
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmException;
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmRequest;
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmResponse;
@@ -49,7 +48,6 @@ import com.anthropic.models.messages.StopReason;
 import com.anthropic.models.messages.TextBlock;
 import com.anthropic.models.messages.Usage;
 
-import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 
@@ -203,34 +201,29 @@ class AnthropicLlmClientTest {
     }
 
     @Test
-    void cacheReadsAndWritesAreReportedAndCountedAsInputTokens() throws Exception {
-        List<Object[]> reported = new ArrayList<>();
-        AnthropicLlmClient client = new AnthropicLlmClient(settings(true, "k"), CODEC,
-                (provider, model, read, creation) -> reported.add(new Object[] {provider, model, read, creation}),
+    void cacheReadsAndWritesArePassedOnInTheUsageAndCountedAsInputTokens() throws Exception {
+        AnthropicLlmClient client = client(settings(true, "k"),
                 params -> message(TEST_PLAN_JSON, StopReason.END_TURN, 200L, 4800L, 300L));
 
         LlmResponse<TestPlan> response = client.complete(STABLE_REQUEST, TestPlan.class);
 
         assertThat(response.usage().inputTokens()).as("uncached + cache writes + cache reads").isEqualTo(5300L);
         assertThat(response.usage().outputTokens()).isEqualTo(340L);
-        assertThat(reported).singleElement().satisfies(call ->
-                assertThat(call).containsExactly("anthropic", "claude-opus-5-5", 4800L, 300L));
+        assertThat(response.usage().cacheReadTokens()).isEqualTo(4800L);
+        assertThat(response.usage().cacheCreationTokens()).isEqualTo(300L);
+        assertThat(response.usage().uncachedInputTokens()).isEqualTo(200L);
     }
 
     @Test
-    void cacheUsageReachesTheMicrometerCounters() throws Exception {
-        SimpleMeterRegistry registry = new SimpleMeterRegistry();
-        AnthropicLlmClient client = new AnthropicLlmClient(settings(true, "k"), CODEC,
-                new MicrometerMetricsRecorder(registry), params -> message(TEST_PLAN_JSON, StopReason.END_TURN,
-                100L, 4000L, 0L));
+    void usageWithoutCacheFieldsHasZeroCacheCounts() {
+        Usage reported = Usage.builder().inputTokens(1200L).outputTokens(80L)
+                .cacheCreationInputTokens(Optional.empty()).cacheReadInputTokens(Optional.empty())
+                .cacheCreation(Optional.empty()).inferenceGeo(Optional.empty())
+                .serverToolUse(Optional.empty()).serviceTier(Optional.empty())
+                .outputTokensDetails(Optional.empty()).speed(Optional.empty()).build();
 
-        client.complete(STABLE_REQUEST, TestPlan.class);
-        client.complete(STABLE_REQUEST, TestPlan.class);
-
-        assertThat(registry.get("sdlc.llm.cache.read.tokens").tags("provider", "anthropic", "model", "claude-opus-5-5")
-                .counter().count()).isEqualTo(8000.0);
-        assertThat(registry.get("sdlc.llm.cache.creation.tokens").tags("provider", "anthropic", "model",
-                "claude-opus-5-5").counter().count()).isEqualTo(0.0);
+        assertThat(AnthropicLlmClient.usage(reported))
+                .isEqualTo(new com.agenticsdlc.orchestrator.core.agent.llm.LlmUsage(1200L, 80L, 0L, 0L));
     }
 
     @Test

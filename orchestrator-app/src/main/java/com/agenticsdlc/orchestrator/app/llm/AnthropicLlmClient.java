@@ -66,8 +66,10 @@ import tools.jackson.databind.JsonNode;
  * specification, codebase index) as a first text block with its own {@code cache_control}, followed by the
  * per-attempt user text without one. Without a stable context the user message is that single text block. A
  * prefix shorter than the model's minimum cacheable length is simply not cached. Cache reads and writes are logged
- * at DEBUG and reported to the {@link PromptCacheListener}; the {@link LlmUsage} handed to the engine counts all
- * input tokens (uncached + cache writes + cache reads), so token budgets mean the same with and without caching.</p>
+ * at DEBUG and reported in the {@link LlmUsage} handed to the engine ({@code cacheReadTokens},
+ * {@code cacheCreationTokens}), which counts them in the run counters, prices them with the configured price book and
+ * reports them to the metrics recorder. {@code inputTokens} counts all input tokens (uncached + cache writes + cache
+ * reads), so token budgets mean the same with and without caching.</p>
  *
  * <p>Thinking, temperature and effort are left at the model defaults. The SDK's own retries are disabled
  * ({@code maxRetries(0)}): retries, backoff and the deterministic fallback are owned by the engine, and SDK-level
@@ -107,7 +109,6 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
 
     private final LlmProperties.Anthropic settings;
     private final JsonCodec codec;
-    private final PromptCacheListener cacheListener;
     private final @Nullable MessageSender overrideSender;
     private final Map<Class<?>, StructuredOutputSchema> schemas = new ConcurrentHashMap<>();
     private volatile @Nullable AnthropicClient sdkClient;
@@ -119,18 +120,7 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
      * @param codec JSON codec used to parse outputs
      */
     public AnthropicLlmClient(LlmProperties.Anthropic settings, JsonCodec codec) {
-        this(settings, codec, PromptCacheListener.NONE, null);
-    }
-
-    /**
-     * Creates the client with a prompt-cache listener; the SDK client is built lazily on the first request.
-     *
-     * @param settings Anthropic settings
-     * @param codec JSON codec used to parse outputs
-     * @param cacheListener receives the cache read and write token counts of every call
-     */
-    public AnthropicLlmClient(LlmProperties.Anthropic settings, JsonCodec codec, PromptCacheListener cacheListener) {
-        this(settings, codec, cacheListener, null);
+        this(settings, codec, null);
     }
 
     /**
@@ -141,22 +131,8 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
      * @param sender sender, or null for the SDK
      */
     AnthropicLlmClient(LlmProperties.Anthropic settings, JsonCodec codec, @Nullable MessageSender sender) {
-        this(settings, codec, PromptCacheListener.NONE, sender);
-    }
-
-    /**
-     * Creates the client with a prompt-cache listener and a custom sender (tests).
-     *
-     * @param settings Anthropic settings
-     * @param codec JSON codec
-     * @param cacheListener prompt-cache listener
-     * @param sender sender, or null for the SDK
-     */
-    AnthropicLlmClient(LlmProperties.Anthropic settings, JsonCodec codec, PromptCacheListener cacheListener,
-                       @Nullable MessageSender sender) {
         this.settings = settings;
         this.codec = codec;
-        this.cacheListener = cacheListener;
         this.overrideSender = sender;
     }
 
@@ -234,22 +210,30 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
         }
         JsonNode tree = schema.restore(codec.readTree(text));
         T output = codec.mapper().treeToValue(tree, outputType);
-        Usage reported = message.usage();
-        long cacheRead = reported.cacheReadInputTokens().orElse(0L);
-        long cacheCreation = reported.cacheCreationInputTokens().orElse(0L);
-        // input_tokens excludes the cached prefix: the engine is given every input token the call processed
-        LlmUsage usage = new LlmUsage(reported.inputTokens() + cacheCreation + cacheRead, reported.outputTokens());
+        // input_tokens excludes the cached prefix: the engine is given every input token the call processed, with the
+        // cache reads and writes as parts of it
+        LlmUsage usage = usage(message.usage());
         String answeringModel = message.model().asString();
         LOG.debug("anthropic call model={} latencyMs={} inputTokens={} uncachedInputTokens={} cacheReadTokens={} "
                         + "cacheCreationTokens={} outputTokens={}", answeringModel, latencyMs, usage.inputTokens(),
-                reported.inputTokens(), cacheRead, cacheCreation, usage.outputTokens());
-        try {
-            cacheListener.cacheUsage(PROVIDER_ID, answeringModel, cacheRead, cacheCreation);
-        } catch (RuntimeException e) {
-            // metrics must never fail a completed call
-            LOG.warn("prompt cache usage could not be recorded: {}", e.toString());
-        }
+                usage.uncachedInputTokens(), usage.cacheReadTokens(), usage.cacheCreationTokens(),
+                usage.outputTokens());
         return new LlmResponse<>(output, text, usage, latencyMs, answeringModel);
+    }
+
+    /**
+     * Maps the usage the Messages API reports to the engine's usage: Anthropic's {@code input_tokens} counts only the
+     * uncached input, so the cache reads and writes are added to it ({@code inputTokens} stays inclusive) and passed
+     * on as the cache counts.
+     *
+     * @param reported the reported usage
+     * @return the usage
+     */
+    static LlmUsage usage(Usage reported) {
+        long cacheRead = Math.max(0L, reported.cacheReadInputTokens().orElse(0L));
+        long cacheCreation = Math.max(0L, reported.cacheCreationInputTokens().orElse(0L));
+        return new LlmUsage(reported.inputTokens() + cacheCreation + cacheRead, reported.outputTokens(), cacheRead,
+                cacheCreation);
     }
 
     /**

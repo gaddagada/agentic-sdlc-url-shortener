@@ -34,6 +34,9 @@ import com.agenticsdlc.orchestrator.core.engine.EngineConfig;
  * @param console operator console
  * @param agents agent provider selection
  * @param governance governance rules enforced by the control plane on top of the engine's policies
+ * @param metrics the reliability metrics endpoint
+ * @param policy the policy pack loaded next to the built-in rules
+ * @param evaluation the evaluation endpoints
  */
 @Validated
 @ConfigurationProperties(prefix = "sdlc")
@@ -43,7 +46,10 @@ public record OrchestratorProperties(
         @DefaultValue @Valid @NotNull Security security,
         @DefaultValue @Valid @NotNull Console console,
         @DefaultValue @Valid @NotNull Agents agents,
-        @DefaultValue @Valid @NotNull Governance governance) {
+        @DefaultValue @Valid @NotNull Governance governance,
+        @DefaultValue @Valid @NotNull Metrics metrics,
+        @DefaultValue @Valid @NotNull Policy policy,
+        @DefaultValue @Valid @NotNull Evaluation evaluation) {
 
     /**
      * Workspace settings.
@@ -89,6 +95,12 @@ public record OrchestratorProperties(
      * @param registryMaxTerminalRuns maximum number of completed and aborted runs cached in memory
      * @param maintenanceInterval fixed delay of the engine maintenance task (recovery of runs whose node died once
      *                            their lease expired, eviction of idle runs from memory)
+     * @param dependencyScanCommand optional external dependency scanner the security review runs in the run's sandbox
+     *                              (for example an OWASP dependency-check Maven goal); it goes through the same build
+     *                              runner and allow-list as {@code buildCommand} (Maven commands only), and only its
+     *                              exit status and the first 2000 characters of its output are recorded. Unset: no
+     *                              external scan (the built-in dependency inventory still runs for REPO runs)
+     * @param dependencyScanTimeout timeout of the dependency scan
      */
     public record Engine(
             @DefaultValue("0.5") @DecimalMin("0.0") @DecimalMax("1.0") double ambiguityThreshold,
@@ -104,7 +116,9 @@ public record OrchestratorProperties(
                     message = "must be 1 to 128 letters, digits or . _ : @ -") String nodeId,
             @DefaultValue("1h") @NotNull Duration registryRetention,
             @DefaultValue("500") @Min(0) int registryMaxTerminalRuns,
-            @DefaultValue("30s") @NotNull Duration maintenanceInterval) {
+            @DefaultValue("30s") @NotNull Duration maintenanceInterval,
+            @Nullable String dependencyScanCommand,
+            @DefaultValue("5m") @NotNull Duration dependencyScanTimeout) {
 
         /**
          * Validates the durations.
@@ -121,6 +135,21 @@ public record OrchestratorProperties(
                 throw new IllegalArgumentException("sdlc.engine.maintenance-interval must be positive (got "
                         + maintenanceInterval + ")");
             }
+            if (dependencyScanTimeout != null && (dependencyScanTimeout.isNegative()
+                    || dependencyScanTimeout.isZero())) {
+                throw new IllegalArgumentException("sdlc.engine.dependency-scan-timeout must be positive (got "
+                        + dependencyScanTimeout + ")");
+            }
+        }
+
+        /**
+         * Returns the dependency scan command, or null when none is configured (blank counts as none).
+         *
+         * @return the command, stripped, or null
+         */
+        public @Nullable String resolvedDependencyScanCommand() {
+            return dependencyScanCommand == null || dependencyScanCommand.isBlank() ? null
+                    : dependencyScanCommand.strip();
         }
 
         /**
@@ -311,11 +340,86 @@ public record OrchestratorProperties(
     }
 
     /**
-     * Operator console.
+     * Operator console and its server-sent event streams.
+     *
+     * <p>The streams ({@code GET /api/v1/runs/{id}/events}, {@code GET /api/v1/runs/events}) carry the run changes
+     * committed by <em>this</em> node. In a multi-node deployment a run executing on another node changes without an
+     * event here; the console then polls that run (it compares the node in the {@code X-Sdlc-Node-Id} response header
+     * of the stream with the run's {@code nodeId}) and keeps a slow safety poll for every open stream.</p>
      *
      * @param enabled whether the static console is served at {@code /}
+     * @param maxSseConnections maximum concurrent event streams of this node; further stream requests are answered
+     *                          with 503 (problem type stream-limit-reached)
+     * @param sseHeartbeatInterval interval of the {@code heartbeat} event on every open stream
+     * @param sseTimeout lifetime of one stream; the client reconnects afterwards (with {@code Last-Event-ID})
      */
-    public record Console(@DefaultValue("true") boolean enabled) {
+    public record Console(
+            @DefaultValue("true") boolean enabled,
+            @DefaultValue("200") @Min(1) int maxSseConnections,
+            @DefaultValue("15s") @NotNull Duration sseHeartbeatInterval,
+            @DefaultValue("30m") @NotNull Duration sseTimeout) {
+
+        /**
+         * Validates the durations.
+         */
+        public Console {
+            if (sseHeartbeatInterval != null && (sseHeartbeatInterval.isNegative() || sseHeartbeatInterval.isZero())) {
+                throw new IllegalArgumentException("sdlc.console.sse-heartbeat-interval must be positive (got "
+                        + sseHeartbeatInterval + ")");
+            }
+            if (sseTimeout != null && (sseTimeout.isNegative() || sseTimeout.isZero())) {
+                throw new IllegalArgumentException("sdlc.console.sse-timeout must be positive (got " + sseTimeout
+                        + ")");
+            }
+        }
+    }
+
+    /**
+     * Reliability metrics endpoint.
+     *
+     * @param cacheTtl how long {@code GET /api/v1/metrics/reliability} reuses its last result; the computation reads
+     *                 every run of the store (zero disables the cache)
+     */
+    public record Metrics(@DefaultValue("5s") @NotNull Duration cacheTtl) {
+
+        /**
+         * Validates the duration.
+         */
+        public Metrics {
+            if (cacheTtl != null && cacheTtl.isNegative()) {
+                throw new IllegalArgumentException("sdlc.metrics.cache-ttl must not be negative (got " + cacheTtl
+                        + ")");
+            }
+        }
+    }
+
+    /**
+     * Policy as code.
+     *
+     * @param pack location of a policy pack (JSON, or YAML when the name ends with {@code .yaml} or {@code .yml}): a
+     *             file system path, or {@code classpath:<resource>}; unset for the built-in rules only. An invalid
+     *             pack fails startup with every problem listed
+     */
+    public record Policy(@Nullable String pack) {
+
+        /**
+         * Returns whether a pack is configured.
+         *
+         * @return true when {@code pack} is set and not blank
+         */
+        public boolean hasPack() {
+            return pack != null && !pack.isBlank();
+        }
+    }
+
+    /**
+     * Evaluation endpoints.
+     *
+     * @param enabled whether {@code POST /api/v1/evaluation/suite/run} may run the bundled evaluation suite (on an
+     *                isolated in-memory engine with the deterministic agents); the per-run evaluation endpoint is
+     *                always available. The local profile enables it, the prod profile disables it
+     */
+    public record Evaluation(@DefaultValue("false") boolean enabled) {
     }
 
     /**

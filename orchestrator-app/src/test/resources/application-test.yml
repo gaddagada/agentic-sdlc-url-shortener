@@ -9,6 +9,8 @@ sdlc:
     node-id: test-${random.uuid}
     # Recovery and eviction are exercised by dedicated tests; keep the periodic pass out of the scenario tests.
     maintenance-interval: 10m
+  evaluation:
+    enabled: true
 
   llm:
     anthropic:

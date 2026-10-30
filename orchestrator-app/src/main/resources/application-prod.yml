@@ -23,6 +23,9 @@ sdlc:
   governance:
     # the release cannot be approved by the operator who started the run or approved its design
     four-eyes: true
+  evaluation:
+    # the evaluation suite auto-approves gates (as evaluation-runner); run it offline, not on a production node
+    enabled: false
 
 management:
   endpoint:

@@ -1,5 +1,7 @@
 package com.agenticsdlc.orchestrator.app.api.dto;
 
+import org.jspecify.annotations.Nullable;
+
 import com.agenticsdlc.orchestrator.core.metrics.ReliabilityMetrics;
 
 /**
@@ -37,7 +39,8 @@ public record ReliabilityMetricsView(Runs runs, Stages stages, Latency latency, 
                         l.humanWaitMsAvg(), l.agentCallMsAvg(), l.agentCallMsP95()),
                 new Recovery(rc.incidents(), rc.recovered(), rc.mttrMs(), rc.unrecovered()),
                 new Approvals(a.requested(), a.approved(), a.rejected(), a.revoked(), a.meanDecisionMs()),
-                new Llm(llm.calls(), llm.inputTokens(), llm.outputTokens()));
+                new Llm(llm.calls(), llm.inputTokens(), llm.outputTokens(), llm.cacheReadTokens(),
+                        llm.cacheCreationTokens(), llm.estimatedCostUsd(), llm.unpricedCalls()));
     }
 
     /**
@@ -110,12 +113,19 @@ public record ReliabilityMetricsView(Runs runs, Stages stages, Latency latency, 
     }
 
     /**
-     * LLM usage.
+     * LLM usage and estimated cost. {@code estimatedCostUsd} sums the costs of the runs whose LLM calls were all
+     * priced, so it is a lower bound whenever {@code unpricedCalls > 0}; it is null when there were LLM calls but none
+     * could be priced (no {@code sdlc.llm.pricing}), and 0 without LLM calls.
      *
      * @param calls LLM calls
-     * @param inputTokens input tokens
+     * @param inputTokens input tokens (prompt cache reads and writes included)
      * @param outputTokens output tokens
+     * @param cacheReadTokens input tokens served from a provider's prompt cache
+     * @param cacheCreationTokens input tokens written to a provider's prompt cache
+     * @param estimatedCostUsd estimated cost in US dollars, or null when nothing could be priced
+     * @param unpricedCalls LLM calls without a configured price
      */
-    public record Llm(long calls, long inputTokens, long outputTokens) {
+    public record Llm(long calls, long inputTokens, long outputTokens, long cacheReadTokens, long cacheCreationTokens,
+                      @Nullable Double estimatedCostUsd, int unpricedCalls) {
     }
 }

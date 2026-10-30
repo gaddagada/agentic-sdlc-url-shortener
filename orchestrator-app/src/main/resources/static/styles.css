@@ -216,6 +216,30 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .run-req { font-size: 12.5px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
 .run-progress { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--text); }
 .halt-text { color: var(--c-halt); }
+.run-starter { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 12ch; }
+.pager { display: grid; gap: 6px; margin-bottom: 10px; }
+.pager-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 10px; }
+.pager-field { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+.pager-field select { width: auto; padding: 3px 6px; font-size: 12.5px; }
+.pager-info { font-variant-numeric: tabular-nums; }
+.live { font-size: 12px; font-weight: 600; border-radius: 999px; padding: 2px 9px; border: 1px solid var(--border); color: var(--muted); }
+.live.on { color: var(--c-ok); border-color: color-mix(in srgb, var(--c-ok) 45%, transparent); }
+.live.on::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--c-ok); margin-right: 6px; vertical-align: 1px; }
+.policy-entry:empty { display: none; }
+.policy-chip { font: inherit; font-size: 12px; cursor: pointer; border-radius: 999px; padding: 2px 9px; background: var(--surface-2); border: 1px solid var(--border); color: var(--muted); }
+.policy-chip.pack { color: var(--text); border-color: var(--border-strong); }
+.policy-chip:hover { border-color: var(--muted); }
+.policy-in-force { margin-bottom: 12px; }
+.policy-in-force p .chip { margin: 0 4px 4px 0; }
+.deps tr.flagged td { background: color-mix(in srgb, var(--c-retry) 6%, transparent); }
+.deps td .chip { margin: 0 4px 2px 0; }
+.score { display: inline-flex; align-items: center; gap: 8px; min-width: 160px; }
+.score .meter-track { flex: 1 1 110px; height: 8px; border-radius: 4px; }
+.score .meter-fill { border-radius: 4px; }
+.score-value { font-variant-numeric: tabular-nums; font-weight: 600; min-width: 4ch; text-align: right; }
+.score-cell { min-width: 180px; }
+.eval-overall { display: flex; align-items: center; gap: 12px; margin: 4px 0 12px; }
+.eval-overall .score { min-width: 260px; }
 .meter-track { display: block; height: 4px; border-radius: 2px; background: var(--surface-2); overflow: hidden; margin: 0; }
 .meter-fill { display: block; height: 100%; background: var(--c-ok); border-radius: 2px; transition: width 0.4s ease; }
 .meter-track.warn .meter-fill { background: var(--c-retry); }

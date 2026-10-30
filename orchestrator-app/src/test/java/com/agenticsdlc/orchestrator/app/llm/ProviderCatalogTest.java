@@ -20,7 +20,7 @@ class ProviderCatalogTest {
     private static final LlmProperties PROPERTIES = new LlmProperties(
             new LlmProperties.Anthropic(true, "claude-opus-5-5", "", 16000, Duration.ofSeconds(180)),
             new LlmProperties.Ollama(false, "http://localhost:11434", "qwen2.5-coder:7b", Duration.ofSeconds(240),
-                    16384, 8192));
+                    16384, 8192), new LlmProperties.Pricing(java.util.Map.of()));
 
     @Test
     void listsDeterministicRegisteredAndDisabledProviders() {

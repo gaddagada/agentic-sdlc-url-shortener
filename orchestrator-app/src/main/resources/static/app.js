@@ -1,16 +1,22 @@
 // SDLC Orchestrator operator console (vanilla ES2022 modules, no build step).
-// This module owns the single App state object, the polling loops, the governance
-// commands and the event wiring. Rendering is delegated to small pure functions in
-// js/views.js and js/graph.js. Every screen region re-renders only when its data
-// signature changes, so a poll never interrupts someone typing into a form.
-import { api, onReachability, RUN_LEASED_ELSEWHERE } from './js/api.js';
+// This module owns the single App state object, the server-sent event streams, the
+// polling loops (the fallback when a stream is down, and a slow safety poll while it
+// is up), the governance commands and the event wiring. Rendering is delegated to
+// small pure functions in js/views.js and js/graph.js. Every screen region re-renders
+// only when its data signature changes, so neither an event nor a poll ever
+// interrupts someone typing into a form.
+import { api, onReachability, RUN_LEASED_ELSEWHERE, EventStream, streamingSupported } from './js/api.js';
 import { h, mount, store, shortId, humanize, isNum, asList, clip, fmtTime, fmtDateTime } from './js/util.js';
 import { renderPipeline, renderLineage, renderLegend } from './js/graph.js';
 import * as V from './js/views.js';
 
-const POLL_MS = { runs: 3000, active: 2000, terminal: 10000, metrics: 5000, catalog: 30000, catalogRetry: 5000 };
+// safety: the slow poll kept while a server-sent event stream is open (a stream only carries this node's commits)
+const POLL_MS = { runs: 3000, active: 2000, terminal: 10000, metrics: 5000, catalog: 30000, catalogRetry: 5000, safety: 30000 };
 const TERMINAL = new Set(['COMPLETED', 'ABORTED']);
-const TABS = ['artifacts', 'audit', 'lineage', 'metrics', 'policy'];
+const TABS = ['artifacts', 'audit', 'lineage', 'metrics', 'policy', 'evaluation'];
+const PAGE_SIZES = [25, 50, 100];
+const RUN_STATUSES = ['RUNNING', 'WAITING_HUMAN', 'SAFE_STOPPED', 'COMPLETED', 'ABORTED'];
+const LIST_SORT = 'createdAt,desc';
 const OPERATOR_ID = /^[A-Za-z0-9._@-]{1,64}$/;
 const FAULT_STAGES = ['intake', 'decompose', 'impact', 'design', 'implement', 'test-design', 'verify', 'document', 'security-scan', 'release-readiness'];
 const AUDIT_PAGE = 500;
@@ -22,12 +28,20 @@ const enc = encodeURIComponent;
 
 // ---------------------------------------------------------------- state
 
+const storedSize = Number(store.get('sdlc.pageSize'));
+const storedStatus = store.get('sdlc.statusFilter', '');
+
 const App = {
   operatorId: store.get('sdlc.operatorId', '').trim(),
   online: true,
   providers: [],
   scenarios: null, // null until the catalog has loaded
-  runs: [], // RunSummaryView[], newest first
+  policy: null, // PolicyView (GET /api/v1/policy)
+  runs: [], // RunSummaryView[] of the current page, newest first
+  runsQuery: { page: 0, size: PAGE_SIZES.includes(storedSize) ? storedSize : 50, status: RUN_STATUSES.includes(storedStatus) ? storedStatus : '' },
+  runsPage: { total: 0, totalPages: 0, loaded: false },
+  streams: { list: null, run: null }, // EventStream of the runs list and of the selected run
+  evaluation: { key: null, status: 'idle', report: null, error: null }, // GET /runs/{id}/evaluation of the selected run
   selectedId: null,
   runCtl: null, // AbortController shared by every request of the current selection
   run: null, // RunView
@@ -192,13 +206,19 @@ function loop(task, intervalMs) {
 }
 
 async function refreshCatalog() {
-  const [providers, scenarios] = await Promise.allSettled([
+  const [providers, scenarios, policy] = await Promise.allSettled([
     api('/api/v1/providers'),
     App.scenarios ? Promise.resolve(App.scenarios) : api('/api/v1/scenarios'),
+    api('/api/v1/policy'),
   ]);
   settle(providers, (list) => {
     App.providers = asList(list).filter((p) => p?.id);
     renderProviders();
+  });
+  settle(policy, (view) => {
+    App.policy = view && typeof view === 'object' ? view : null;
+    renderPolicyChip();
+    if (App.tab === 'policy') renderPolicyTab();
   });
   settle(scenarios, (list) => {
     if (App.scenarios) return;
@@ -208,15 +228,89 @@ async function refreshCatalog() {
   });
 }
 
+function runsListPath() {
+  const { page, size, status } = App.runsQuery;
+  const params = new URLSearchParams({ page: String(page), size: String(size), sort: LIST_SORT });
+  if (status) params.set('status', status);
+  return `/api/v1/runs?${params}`;
+}
+
 async function refreshRuns() {
   try {
-    const runs = asList(await api('/api/v1/runs')).filter((r) => r?.id);
-    const time = (r) => Date.parse(r.createdAt) || 0;
-    App.runs = runs.sort((a, b) => time(b) - time(a)); // stable: keeps server order when timestamps are missing
+    const result = await api(runsListPath());
+    const envelope = result && typeof result === 'object' && !Array.isArray(result) ? result : { items: asList(result) };
+    App.runs = asList(envelope.items).filter((r) => r?.id);
+    const total = isNum(envelope.total) ? envelope.total : App.runs.length;
+    App.runsPage = { total, totalPages: isNum(envelope.totalPages) ? envelope.totalPages : 1, loaded: true };
+    if (App.runsQuery.page > 0 && App.runsQuery.page >= App.runsPage.totalPages) {
+      // the page emptied (runs were filtered out): show the last page that has rows
+      App.runsQuery.page = Math.max(0, App.runsPage.totalPages - 1);
+      loops.runs?.kick();
+    }
   } catch (err) {
     pollError(err);
   }
   renderRunsList();
+}
+
+let runsRefetch = 0;
+/** A run that is not on the current page changed: the first page may have a new row, refetch it soon. */
+function scheduleRunsRefetch() {
+  clearTimeout(runsRefetch);
+  runsRefetch = setTimeout(() => loops.runs?.kick(), 400);
+}
+
+/** Applies a run-summary event of the list stream to the current page. */
+function applyRunSummary(item) {
+  if (!item?.id) return;
+  const index = App.runs.findIndex((r) => r.id === item.id);
+  if (index >= 0) {
+    const matches = !App.runsQuery.status || App.runsQuery.status === item.status;
+    if (matches) App.runs[index] = { ...App.runs[index], ...item };
+    else scheduleRunsRefetch(); // it no longer matches the status filter
+    renderRunsList();
+  } else if (App.runsQuery.page === 0 && (!App.runsQuery.status || App.runsQuery.status === item.status)) {
+    scheduleRunsRefetch();
+  }
+}
+
+/** The runs list stream: summaries of every run change this node commits; the list poll slows down while it is open. */
+function startListStream() {
+  if (!streamingSupported) return;
+  App.streams.list = new EventStream('/api/v1/runs/events', {
+    onEvent: (event) => {
+      if (event.type !== 'run-summary') return;
+      applyRunSummary(parseData(event));
+    },
+    onState: (state) => {
+      renderStreamState();
+      if (state === 'open') loops.runs?.kick(); // catch up with what changed while the stream was down
+    },
+  }).start();
+}
+
+function parseData(event) {
+  try {
+    return JSON.parse(event.data);
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the selected run is held by another engine node, whose commits never reach this node's stream. */
+function selectedRunOnOtherNode() {
+  const node = App.streams.run?.nodeId;
+  const summary = App.runs.find((r) => r.id === App.selectedId);
+  return Boolean(node && summary?.nodeId && summary.nodeId !== node && !TERMINAL.has(App.run?.status));
+}
+
+function runPollInterval() {
+  if (App.streams.run?.open && !selectedRunOnOtherNode()) return POLL_MS.safety;
+  return TERMINAL.has(App.run?.status) ? POLL_MS.terminal : POLL_MS.active;
+}
+
+function runsPollInterval() {
+  return App.streams.list?.open ? POLL_MS.safety : POLL_MS.runs;
 }
 
 async function fetchAudit(ctl) {
@@ -261,6 +355,86 @@ async function refreshSelectedRun() {
 }
 
 /**
+ * After a streamed run change: the pipeline graph, the artifact list (and the lineage or the chain verification when
+ * their tab is open) are not part of the stream, so they are refetched once the burst of events has settled.
+ */
+let extrasTimer = 0;
+function scheduleRunExtras() {
+  clearTimeout(extrasTimer);
+  extrasTimer = setTimeout(refreshRunExtras, 250);
+}
+
+async function refreshRunExtras() {
+  const ctl = App.runCtl;
+  if (!App.selectedId || !ctl) return;
+  const base = runPath();
+  const [graph, artifacts, lineage, integrity] = await Promise.allSettled([
+    api(`${base}/graph`, { signal: ctl.signal }),
+    api(`${base}/artifacts`, { signal: ctl.signal }),
+    App.tab === 'lineage' ? api(`${base}/lineage`, { signal: ctl.signal }) : Promise.resolve(App.lineage),
+    App.tab === 'audit' ? api(`${base}/audit/integrity`, { signal: ctl.signal }) : Promise.resolve(App.audit.integrity),
+  ]);
+  if (ctl !== App.runCtl) return;
+  settle(graph, (g) => { App.graph = g; });
+  settle(artifacts, (list) => { App.artifacts = asList(list).filter((a) => a?.stageId); });
+  settle(lineage, (l) => { App.lineage = l; });
+  settle(integrity, (v) => { App.audit.integrity = v && typeof v === 'object' ? v : null; });
+  invalidateViewsOnChange();
+  renderRunView();
+}
+
+/** Adds streamed audit events (sequence order, no duplicates) to the audit trail of the selected run. */
+function applyAuditEvent(event) {
+  if (!event || !isNum(Number(event.seq))) return;
+  const seq = Number(event.seq);
+  if (seq <= App.audit.lastSeq) return;
+  App.audit.events.push(event);
+  App.audit.lastSeq = seq;
+  scheduleAuditRender();
+}
+
+let auditRenderTimer = 0;
+function scheduleAuditRender() {
+  clearTimeout(auditRenderTimer);
+  auditRenderTimer = setTimeout(() => {
+    if (App.tab === 'audit') renderAuditTab();
+  }, 100);
+}
+
+/** The stream of the selected run: its audit events and run views as this node commits them. */
+function startRunStream(id) {
+  App.streams.run?.close();
+  App.streams.run = null;
+  if (!id || !streamingSupported) {
+    renderStreamState();
+    return;
+  }
+  const stream = new EventStream(`${runPath(id)}/events`, {
+    lastEventId: () => App.audit.lastSeq,
+    onEvent: (event) => {
+      if (stream !== App.streams.run) return;
+      const data = parseData(event);
+      if (event.type === 'audit') applyAuditEvent(data);
+      else if (event.type === 'run' && data?.id === App.selectedId) {
+        applyRun(data);
+        renderRunView();
+        scheduleRunExtras();
+      }
+    },
+    // the server ends the stream after the final event of a COMPLETED or ABORTED run: no reconnect then
+    onEnd: () => !TERMINAL.has(App.run?.status),
+    onState: (state) => {
+      if (stream !== App.streams.run) return;
+      renderStreamState();
+      if (state === 'open' || state === 'retrying' || state === 'failed') loops.run?.kick();
+    },
+  });
+  App.streams.run = stream;
+  stream.start();
+  renderStreamState();
+}
+
+/**
  * What a cached artifact view can go stale on: a decided or revoked approval flips the accepted flag of a version,
  * a rework or replan adds versions. The payload and Markdown of a version never change.
  */
@@ -287,6 +461,34 @@ function invalidateArtifactViews(runId) {
   }
 }
 
+const evaluationKey = () => (App.selectedId ? `${App.selectedId}|${App.artifacts.map((a) => `${a.stageId}:${a.version}:${a.accepted}`).join(',')}` : null);
+
+/** Evaluates the selected run while the Evaluation tab is open, again whenever its artifacts change. */
+async function refreshEvaluation({ force = false } = {}) {
+  if (App.tab !== 'evaluation' || !App.selectedId) {
+    renderEvaluationTab();
+    return;
+  }
+  const key = evaluationKey();
+  if (!force && App.evaluation.key === key && App.evaluation.status !== 'error') {
+    renderEvaluationTab();
+    return;
+  }
+  const ctl = App.runCtl;
+  App.evaluation = { ...App.evaluation, key, status: App.evaluation.report ? 'refreshing' : 'loading', error: null };
+  renderEvaluationTab();
+  try {
+    const report = await api(`${runPath()}/evaluation`, { signal: ctl?.signal });
+    if (ctl !== App.runCtl) return;
+    App.evaluation = { key, status: 'ready', report, error: null };
+  } catch (err) {
+    if (err?.aborted || ctl !== App.runCtl) return;
+    App.evaluation = { key, status: 'error', report: App.evaluation.report, error: err };
+    pollError(err);
+  }
+  renderEvaluationTab();
+}
+
 async function refreshMetrics() {
   if (App.tab !== 'metrics') return;
   try {
@@ -308,8 +510,12 @@ function applyRun(run) {
   else if (pending > asList(prev.pendingActions).length) announce(`${pending} pending action${pending === 1 ? '' : 's'} need attention.`);
   const summary = App.runs.find((r) => r.id === run.id);
   if (summary) {
-    // Reflect the fresh state in the sidebar right away instead of waiting for the next list poll.
-    Object.assign(summary, { status: run.status, haltReason: run.haltReason, pendingActions: pending });
+    // Reflect the fresh state in the sidebar right away instead of waiting for the next list update.
+    const succeeded = asList(run.stages).filter((s) => s?.status === 'SUCCEEDED').length;
+    Object.assign(summary, {
+      status: run.status, haltReason: run.haltReason, pendingActions: pending, updatedAt: run.updatedAt,
+      progress: { succeeded, total: asList(run.stages).length },
+    });
     renderRunsList();
   }
 }
@@ -335,9 +541,11 @@ function selectRun(id, { fromHash = false } = {}) {
     run: null, graph: null, artifacts: [], lineage: null, drafts: {},
     artifactSel: { stageId: null, version: null }, artifactStateSig: null,
     audit: { events: [], lastSeq: 0, filter: new Set(), follow: App.audit.follow, open: new Set(), integrity: null },
-    sigs: { providers: App.sigs.providers },
+    evaluation: { key: null, status: 'idle', report: null, error: null },
+    sigs: { providers: App.sigs.providers, policyChip: App.sigs.policyChip },
   });
   if (!fromHash) history.replaceState(null, '', next ? `#run=${enc(next)}` : `${location.pathname}${location.search}`);
+  startRunStream(next);
   renderRunsList();
   renderRunView();
   loops.run?.kick();
@@ -544,8 +752,55 @@ function renderRunsList() {
   renderIfChanged('runs', [App.runs, App.selectedId], () => {
     const list = $('runs-list');
     preservingFocus(list, () => mount(list, V.renderRunsList(App.runs, App.selectedId, (id) => selectRun(id))));
-    $('runs-count').textContent = App.runs.length ? String(App.runs.length) : '';
   });
+  renderIfChanged('runs-pager', [App.runsQuery, App.runsPage], () => {
+    const pager = $('runs-pager');
+    $('runs-count').textContent = App.runsPage.total ? String(App.runsPage.total) : '';
+    preservingFocus(pager, () => mount(pager, V.renderPager({
+      ...App.runsQuery, ...App.runsPage, sizes: PAGE_SIZES, statuses: RUN_STATUSES, on: pagerHandlers,
+    })));
+  });
+}
+
+const pagerHandlers = {
+  page(page) {
+    App.runsQuery.page = Math.max(0, page);
+    loops.runs?.kick();
+    renderRunsList();
+  },
+  size(size) {
+    const value = Number(size);
+    if (!PAGE_SIZES.includes(value)) return;
+    App.runsQuery = { ...App.runsQuery, size: value, page: 0 };
+    store.set('sdlc.pageSize', String(value));
+    loops.runs?.kick();
+    renderRunsList();
+  },
+  status(status) {
+    App.runsQuery = { ...App.runsQuery, status: RUN_STATUSES.includes(status) ? status : '', page: 0 };
+    store.set('sdlc.statusFilter', App.runsQuery.status);
+    loops.runs?.kick();
+    renderRunsList();
+  },
+};
+
+/** Live / polling indicator of the streams (the console polls while a stream is down). */
+function renderStreamState() {
+  const list = App.streams.list?.state ?? 'closed';
+  const run = App.streams.run?.state ?? (App.selectedId ? 'closed' : null);
+  renderIfChanged('stream-state', [list, run, streamingSupported], () => {
+    const live = list === 'open' && (run === null || run === 'open' || (run === 'closed' && TERMINAL.has(App.run?.status)));
+    const el = $('live');
+    el.textContent = live ? 'Live' : 'Polling';
+    el.className = `live ${live ? 'on' : 'off'}`;
+    el.title = !streamingSupported ? 'This browser cannot read event streams; the console polls.'
+      : live ? 'Server-sent events: changes arrive as they are committed (plus a slow safety poll).'
+        : 'The event stream is reconnecting; the console polls meanwhile.';
+  });
+}
+
+function renderPolicyChip() {
+  renderIfChanged('policyChip', App.policy, () => mount($('policy-chip'), V.renderPolicyChip(App.policy, () => setTab('policy'))));
 }
 
 function renderRunView() {
@@ -582,7 +837,10 @@ function renderGraph() {
 }
 
 function renderActiveTab() {
-  ({ artifacts: renderArtifactsTab, audit: renderAuditTab, lineage: renderLineageTab, metrics: renderMetricsTab, policy: renderPolicyTab })[App.tab]();
+  ({
+    artifacts: renderArtifactsTab, audit: renderAuditTab, lineage: renderLineageTab, metrics: renderMetricsTab,
+    policy: renderPolicyTab, evaluation: () => refreshEvaluation(),
+  })[App.tab]();
 }
 
 function renderArtifactsTab() {
@@ -688,9 +946,21 @@ function renderMetricsTab() {
 
 function renderPolicyTab() {
   const run = App.run;
-  renderIfChanged('tab:policy', [App.selectedId, run?.policyFindings ?? null], () => mount($('panel-policy'),
+  renderIfChanged('tab:policy', [App.selectedId, run?.policyFindings ?? null, App.policy], () => mount($('panel-policy'),
+    V.renderPolicyInForce(App.policy),
     !App.selectedId ? V.placeholder('Select a run to see its policy findings.')
       : run ? V.renderPolicy(run.policyFindings) : V.placeholder('Loading\u2026')));
+}
+
+function renderEvaluationTab() {
+  const panel = $('panel-evaluation');
+  if (!App.selectedId) {
+    renderIfChanged('tab:evaluation', 'none', () => mount(panel, V.placeholder('Select a run to see the evaluation of its artifacts.')));
+    return;
+  }
+  const { status, report, error } = App.evaluation;
+  renderIfChanged('tab:evaluation', [status, report, error?.detail ?? error?.title ?? null], () => mount(panel,
+    V.renderEvaluation({ status, report, error, onRefresh: () => refreshEvaluation({ force: true }) })));
 }
 
 // ---------------------------------------------------------------- wiring
@@ -707,6 +977,7 @@ function setTab(tab, { focus = false } = {}) {
   }
   if (focus) $(`tab-${App.tab}`).focus();
   if (App.tab === 'metrics') loops.metrics?.kick();
+  if (App.tab === 'evaluation') refreshEvaluation();
   if (App.tab === 'lineage' || App.tab === 'audit') loops.run?.kick();
   renderActiveTab();
 }
@@ -854,11 +1125,14 @@ function boot() {
     if (!document.hidden) Object.values(loops).forEach((l) => l.kick());
   });
   loops.catalog = loop(refreshCatalog, () => (App.scenarios ? POLL_MS.catalog : POLL_MS.catalogRetry));
-  loops.runs = loop(refreshRuns, () => POLL_MS.runs);
-  loops.run = loop(refreshSelectedRun, () => (TERMINAL.has(App.run?.status) ? POLL_MS.terminal : POLL_MS.active));
+  loops.runs = loop(refreshRuns, runsPollInterval);
+  loops.run = loop(refreshSelectedRun, runPollInterval);
   loops.metrics = loop(refreshMetrics, () => POLL_MS.metrics);
+  startListStream();
   selectRun(runIdFromHash(), { fromHash: true });
   renderRunView();
+  renderRunsList();
+  renderStreamState();
 }
 
 boot();

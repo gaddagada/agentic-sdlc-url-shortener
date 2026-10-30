@@ -2,12 +2,13 @@ openapi: 3.1.0
 info:
   title: SDLC Orchestrator API
   description: "Control plane of the agentic SDLC orchestrator: start runs, govern\
-    \ them (approve, reject, clarify, re-plan, stop, resume) and inspect artifacts,\
-    \ lineage, audit trail and reliability metrics. Every POST names the operator:\
-    \ the X-Operator-Id header (open and api-key mode) or the identity claim of the\
-    \ bearer token (oidc mode). Roles: OPERATOR starts and steers runs, APPROVER decides\
-    \ gates, ADMIN re-indexes the workspace, any role reads (see x-required-roles).\
-    \ Errors are RFC 9457 Problem Details."
+    \ them (approve, reject, clarify, re-plan, stop, resume), follow them live (server-sent\
+    \ events) and inspect artifacts, lineage, audit trail, evaluation scores, the\
+    \ policy in force and reliability metrics. Every POST names the operator: the\
+    \ X-Operator-Id header (open and api-key mode) or the identity claim of the bearer\
+    \ token (oidc mode). Roles: OPERATOR starts and steers runs, APPROVER decides\
+    \ gates, ADMIN re-indexes the workspace and runs the evaluation suite, any role\
+    \ reads (see x-required-roles). Errors are RFC 9457 Problem Details."
   license:
     name: Apache-2.0
   version: v1
@@ -25,12 +26,18 @@ tags:
   description: Reliability metrics
 - name: Workflow
   description: Workflow definition
+- name: Run events
+  description: Server-sent event streams of runs and of the runs list
 - name: Workspace
   description: Codebase index of the repository workspace
+- name: Evaluation
+  description: Artifact quality scores and the evaluation suite
 - name: Providers
   description: Agent providers
 - name: Run evidence
   description: "Artifacts, lineage and audit trail of a run"
+- name: Policy
+  description: Built-in rules and the active policy pack
 - name: Runs
   description: Run lifecycle and governance commands
 paths:
@@ -143,7 +150,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -151,14 +159,17 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule, unavailable agent provider, or the run is executing\
-            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
+            \ four-eyes rule, unavailable agent provider, the run is executing on\
+            \ another engine node (type run-leased-elsewhere, with holder and runId),\
+            \ or an evaluation suite run is already in progress (type evaluation-in-progress)"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "503":
-          description: The control plane is shutting down
+          description: "The control plane is shutting down, or (event streams) this\
+            \ node serves the maximum number of streams (type stream-limit-reached,\
+            \ with Retry-After)"
           content:
             application/problem+json:
               schema:
@@ -169,17 +180,79 @@ paths:
     get:
       tags:
       - Runs
-      summary: "List runs, newest first"
+      summary: List runs (paged and filterable)
+      description: "Returns {items, page, size, total, totalPages, sort}. Items are\
+        \ RunSummaryView rows read from the runs table (no run snapshot is read):\
+        \ pendingActions and progress are null for rows not saved since the column\
+        \ was added. Filters are exact matches combined with AND: status (RUNNING,\
+        \ WAITING_HUMAN, SAFE_STOPPED, COMPLETED, ABORTED; repeatable or comma separated),\
+        \ scenario, startedBy. sort is <field>[,asc|desc] with field one of createdAt,\
+        \ updatedAt, endedAt, status, scenario, startedBy (ties broken by id); any\
+        \ other field is a 400. size is 1..200. Breaking change: this operation returned\
+        \ a bare array before the paged envelope."
       operationId: listRuns
+      parameters:
+      - name: page
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 0
+          minimum: 0
+      - name: size
+        in: query
+        required: false
+        schema:
+          type: integer
+          format: int32
+          default: 50
+          maximum: 200
+          minimum: 1
+      - name: status
+        in: query
+        required: false
+        schema:
+          type:
+          - array
+          - "null"
+          items:
+            type: string
+      - name: scenario
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - "null"
+      - name: startedBy
+        in: query
+        required: false
+        schema:
+          type:
+          - string
+          - "null"
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type: string
+          default: "updatedAt,desc"
       responses:
         "200":
           description: OK
           content:
             '*/*':
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/RunSummaryView"
+                $ref: "#/components/schemas/RunPageView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
         "401":
           description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
             \ bearer token missing, expired or invalid (oidc mode)"
@@ -252,14 +325,17 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule, unavailable agent provider, or the run is executing\
-            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
+            \ four-eyes rule, unavailable agent provider, the run is executing on\
+            \ another engine node (type run-leased-elsewhere, with holder and runId),\
+            \ or an evaluation suite run is already in progress (type evaluation-in-progress)"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "503":
-          description: The control plane is shutting down
+          description: "The control plane is shutting down, or (event streams) this\
+            \ node serves the maximum number of streams (type stream-limit-reached,\
+            \ with Retry-After)"
           content:
             application/problem+json:
               schema:
@@ -323,7 +399,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -331,14 +408,17 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule, unavailable agent provider, or the run is executing\
-            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
+            \ four-eyes rule, unavailable agent provider, the run is executing on\
+            \ another engine node (type run-leased-elsewhere, with holder and runId),\
+            \ or an evaluation suite run is already in progress (type evaluation-in-progress)"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "503":
-          description: The control plane is shutting down
+          description: "The control plane is shutting down, or (event streams) this\
+            \ node serves the maximum number of streams (type stream-limit-reached,\
+            \ with Retry-After)"
           content:
             application/problem+json:
               schema:
@@ -410,7 +490,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -418,14 +499,17 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule, unavailable agent provider, or the run is executing\
-            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
+            \ four-eyes rule, unavailable agent provider, the run is executing on\
+            \ another engine node (type run-leased-elsewhere, with holder and runId),\
+            \ or an evaluation suite run is already in progress (type evaluation-in-progress)"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "503":
-          description: The control plane is shutting down
+          description: "The control plane is shutting down, or (event streams) this\
+            \ node serves the maximum number of streams (type stream-limit-reached,\
+            \ with Retry-After)"
           content:
             application/problem+json:
               schema:
@@ -497,7 +581,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -505,14 +590,17 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule, unavailable agent provider, or the run is executing\
-            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
+            \ four-eyes rule, unavailable agent provider, the run is executing on\
+            \ another engine node (type run-leased-elsewhere, with holder and runId),\
+            \ or an evaluation suite run is already in progress (type evaluation-in-progress)"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "503":
-          description: The control plane is shutting down
+          description: "The control plane is shutting down, or (event streams) this\
+            \ node serves the maximum number of streams (type stream-limit-reached,\
+            \ with Retry-After)"
           content:
             application/problem+json:
               schema:
@@ -571,7 +659,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -579,14 +668,17 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule, unavailable agent provider, or the run is executing\
-            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
+            \ four-eyes rule, unavailable agent provider, the run is executing on\
+            \ another engine node (type run-leased-elsewhere, with holder and runId),\
+            \ or an evaluation suite run is already in progress (type evaluation-in-progress)"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "503":
-          description: The control plane is shutting down
+          description: "The control plane is shutting down, or (event streams) this\
+            \ node serves the maximum number of streams (type stream-limit-reached,\
+            \ with Retry-After)"
           content:
             application/problem+json:
               schema:
@@ -651,7 +743,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -659,14 +752,17 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule, unavailable agent provider, or the run is executing\
-            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
+            \ four-eyes rule, unavailable agent provider, the run is executing on\
+            \ another engine node (type run-leased-elsewhere, with holder and runId),\
+            \ or an evaluation suite run is already in progress (type evaluation-in-progress)"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "503":
-          description: The control plane is shutting down
+          description: "The control plane is shutting down, or (event streams) this\
+            \ node serves the maximum number of streams (type stream-limit-reached,\
+            \ with Retry-After)"
           content:
             application/problem+json:
               schema:
@@ -731,7 +827,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -739,20 +836,103 @@ paths:
         "409":
           description: "Refused in the current state: wrong run or stage state, stale\
             \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
-            \ four-eyes rule, unavailable agent provider, or the run is executing\
-            \ on another engine node (type run-leased-elsewhere, with holder and runId)"
+            \ four-eyes rule, unavailable agent provider, the run is executing on\
+            \ another engine node (type run-leased-elsewhere, with holder and runId),\
+            \ or an evaluation suite run is already in progress (type evaluation-in-progress)"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "503":
-          description: The control plane is shutting down
+          description: "The control plane is shutting down, or (event streams) this\
+            \ node serves the maximum number of streams (type stream-limit-reached,\
+            \ with Retry-After)"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
       x-required-roles:
       - OPERATOR
+  /api/v1/evaluation/suite/run:
+    post:
+      tags:
+      - Evaluation
+      summary: "Run the bundled evaluation suite (deterministic agents, isolated engine)"
+      description: "Runs every case of the core's bundled suite on a fresh in-memory\
+        \ engine per case (deterministic agents, in-memory store, audit sink and leases;\
+        \ the production engine, store, audit trail and metrics are never touched).\
+        \ The runner answers clarifications with the first suggested answer and approves\
+        \ gates as the operator identity evaluation-runner (never a NO_GO release).\
+        \ Only provider=deterministic: LLM-backed suite runs are an offline job. Disabled\
+        \ (404 feature-disabled) unless sdlc.evaluation.enabled=true; one suite run\
+        \ at a time (409)."
+      operationId: runEvaluationSuite
+      parameters:
+      - name: provider
+        in: query
+        description: Agent provider; only deterministic is supported
+        required: false
+        schema:
+          type: string
+          default: deterministic
+      - name: X-Operator-Id
+        in: header
+        description: "Id of the human operator issuing the request (recorded in the\
+          \ audit trail; engine, system, deterministic and fallback:* are reserved).\
+          \ Required in open and api-key mode; optional in oidc mode, where the operator\
+          \ is the token's identity claim and a different value is refused with 400"
+        required: true
+        schema:
+          type: string
+          pattern: "[A-Za-z0-9._@-]{1,64}"
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/SuiteResultView"
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "409":
+          description: "Refused in the current state: wrong run or stage state, stale\
+            \ approvalId, invalid command (exhausted budget, missing waiver, ...),\
+            \ four-eyes rule, unavailable agent provider, the run is executing on\
+            \ another engine node (type run-leased-elsewhere, with holder and runId),\
+            \ or an evaluation suite run is already in progress (type evaluation-in-progress)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - ADMIN
   /api/v1/workspace/index:
     get:
       tags:
@@ -882,7 +1062,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -925,7 +1106,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -968,7 +1150,146 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
+  /api/v1/runs/{id}/events:
+    get:
+      tags:
+      - Run events
+      summary: Stream the changes of a run (server-sent events)
+      description: "Server-sent events (text/event-stream). Every event's data is\
+        \ one JSON document. On connect: the audit events after Last-Event-ID (all\
+        \ without it) as 'audit' events (SSE id = audit seq, data = AuditEventView),\
+        \ then the current 'run' (RunView). Then, for every change this node commits:\
+        \ the new 'audit' events, then the new 'run'. 'heartbeat' every sdlc.console.sse-heartbeat-interval\
+        \ (15 s), data {\"time\": ISO-8601}. When the run is COMPLETED or ABORTED\
+        \ the stream ends after its final 'run' event. Reconnect with Last-Event-ID\
+        \ to resume without gaps. Only commits of this node are streamed (header X-Sdlc-Node-Id);\
+        \ poll runs held by other nodes. 503 (stream-limit-reached, Retry-After) beyond\
+        \ sdlc.console.max-sse-connections."
+      operationId: streamRunEvents
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: Last-Event-ID
+        in: header
+        description: Last audit seq the client received (resume point)
+        required: false
+        schema:
+          type:
+          - string
+          - "null"
+      responses:
+        "200":
+          description: The event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: text/event-stream
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "503":
+          description: "The control plane is shutting down, or (event streams) this\
+            \ node serves the maximum number of streams (type stream-limit-reached,\
+            \ with Retry-After)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
+  /api/v1/runs/{id}/evaluation:
+    get:
+      tags:
+      - Evaluation
+      summary: Evaluate the artifacts of a run
+      description: "Scores the accepted artifact of every stage (else the latest one\
+        \ of the current plan, noted as under review) with deterministic criteria:\
+        \ per stage a score within 0..1 and every criterion with weight, value and\
+        \ rationale, plus the overall mean. format=markdown returns the same report\
+        \ as text/markdown."
+      operationId: getRunEvaluation
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: format
+        in: query
+        description: json (default) or markdown
+        required: false
+        schema:
+          type: string
+          default: json
+      responses:
+        "200":
+          description: The evaluation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluationReportView"
+            text/markdown:
+              schema:
+                type: string
+        "400":
+          description: "Invalid request: validation failed (see errors), malformed\
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "404":
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -1040,7 +1361,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -1087,7 +1409,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -1132,7 +1455,8 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
           content:
             application/problem+json:
               schema:
@@ -1200,7 +1524,55 @@ paths:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
         "404":
-          description: "Unknown run, scenario or artifact"
+          description: "Unknown run, scenario or artifact, or an operation disabled\
+            \ by configuration (type feature-disabled)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
+  /api/v1/runs/events:
+    get:
+      tags:
+      - Run events
+      summary: Stream run list changes (server-sent events)
+      description: "Server-sent events (text/event-stream). Every event's data is\
+        \ one JSON document. A 'heartbeat' first and then every sdlc.console.sse-heartbeat-interval\
+        \ (15 s); a 'run-summary' (RunSummaryView, the item shape of GET /api/v1/runs)\
+        \ for every run change this node commits. No replay: load the list with GET\
+        \ /api/v1/runs and apply the summaries to it. Only commits of this node are\
+        \ streamed (header X-Sdlc-Node-Id). 503 (stream-limit-reached, Retry-After)\
+        \ beyond sdlc.console.max-sse-connections."
+      operationId: streamRunListEvents
+      responses:
+        "200":
+          description: The event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: text/event-stream
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "503":
+          description: "The control plane is shutting down, or (event streams) this\
+            \ node serves the maximum number of streams (type stream-limit-reached,\
+            \ with Retry-After)"
           content:
             application/problem+json:
               schema:
@@ -1248,11 +1620,45 @@ paths:
       - OPERATOR
       - APPROVER
       - ADMIN
+  /api/v1/policy:
+    get:
+      tags:
+      - Policy
+      summary: Get the policy in force (built-in rules and the active policy pack)
+      operationId: getPolicy
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/PolicyView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/metrics/reliability:
     get:
       tags:
       - Metrics
       summary: Get reliability metrics over all runs
+      description: "Computed over every run of the store (expensive: every run is\
+        \ read); the result is reused for sdlc.metrics.cache-ttl (5 s by default),\
+        \ so it may lag the latest changes by that much."
       operationId: getReliabilityMetrics
       responses:
         "200":
@@ -1523,6 +1929,18 @@ components:
         llmOutputTokens:
           type: integer
           format: int64
+        llmCacheReadTokens:
+          type: integer
+          format: int64
+        llmCacheCreationTokens:
+          type: integer
+          format: int64
+        llmCostUsd:
+          type: number
+          format: double
+        llmUnpricedCalls:
+          type: integer
+          format: int32
     PendingActionView:
       type: object
       properties:
@@ -1826,6 +2244,95 @@ components:
           minProperties: 1
       required:
       - answers
+    CaseView:
+      type: object
+      properties:
+        caseId:
+          type: string
+        passed:
+          type: boolean
+        failures:
+          type: array
+          items:
+            type: string
+        observations:
+          type: array
+          items:
+            type: string
+        runId:
+          type: string
+        status:
+          type: string
+        haltReason:
+          type: string
+        report:
+          $ref: "#/components/schemas/EvaluationReportView"
+    CriterionView:
+      type: object
+      properties:
+        name:
+          type: string
+        weight:
+          type: number
+          format: double
+        value:
+          type: number
+          format: double
+        applies:
+          type: boolean
+        rationale:
+          type: string
+    EvaluationReportView:
+      type: object
+      properties:
+        runId:
+          type: string
+        overall:
+          type: number
+          format: double
+        stages:
+          type: array
+          items:
+            $ref: "#/components/schemas/StageScoreView"
+        notes:
+          type: array
+          items:
+            type: string
+    StageScoreView:
+      type: object
+      properties:
+        stageId:
+          type: string
+        score:
+          type: number
+          format: double
+        criteria:
+          type: array
+          items:
+            $ref: "#/components/schemas/CriterionView"
+    SuiteResultView:
+      type: object
+      properties:
+        suite:
+          type: string
+        version:
+          type: string
+        provider:
+          type: string
+        passed:
+          type: boolean
+        passedCount:
+          type: integer
+          format: int64
+        total:
+          type: integer
+          format: int32
+        cases:
+          type: array
+          items:
+            $ref: "#/components/schemas/CaseView"
+        markdown:
+          type: string
     StageDefinitionView:
       type: object
       properties:
@@ -1913,6 +2420,27 @@ components:
         total:
           type: integer
           format: int32
+    RunPageView:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunSummaryView"
+        page:
+          type: integer
+          format: int32
+        size:
+          type: integer
+          format: int32
+        total:
+          type: integer
+          format: int64
+        totalPages:
+          type: integer
+          format: int32
+        sort:
+          type: string
     RunSummaryView:
       type: object
       properties:
@@ -1935,6 +2463,19 @@ components:
         updatedAt:
           type: string
           format: date-time
+        endedAt:
+          type: string
+          format: date-time
+        autonomy:
+          type: string
+        workspace:
+          type: string
+        startedBy:
+          type: string
+        riskLevel:
+          type: string
+        nodeId:
+          type: string
         pendingActions:
           type: integer
           format: int32
@@ -2126,6 +2667,15 @@ components:
         planVersion:
           type: integer
           format: int32
+        cacheReadTokens:
+          type: integer
+          format: int64
+        cacheCreationTokens:
+          type: integer
+          format: int64
+        costMicroUsd:
+          type: integer
+          format: int64
     ArtifactView:
       type: object
       properties:
@@ -2159,6 +2709,40 @@ components:
           $ref: "#/components/schemas/SignatureView"
         signatureVerified:
           type: boolean
+        dependencies:
+          type: array
+          items:
+            $ref: "#/components/schemas/DependencyView"
+    DependencyView:
+      type: object
+      properties:
+        module:
+          type: string
+        groupId:
+          type: string
+        artifactId:
+          type: string
+        version:
+          type: string
+        scope:
+          type: string
+        kind:
+          type: string
+        section:
+          type: string
+        coordinate:
+          type: string
+        flags:
+          type: array
+          items:
+            $ref: "#/components/schemas/FlagView"
+    FlagView:
+      type: object
+      properties:
+        kind:
+          type: string
+        severity:
+          type: string
     SignatureView:
       type: object
       properties:
@@ -2206,6 +2790,69 @@ components:
           type: string
         circuit:
           $ref: "#/components/schemas/ProviderCircuitView"
+    BuiltInRuleView:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        active:
+          type: boolean
+        disableable:
+          type: boolean
+    PackRuleView:
+      type: object
+      properties:
+        id:
+          type: string
+        description:
+          type: string
+        phase:
+          type: string
+        stages:
+          type: array
+          items:
+            type: string
+        effect:
+          type: string
+        severity:
+          type: string
+        message:
+          type: string
+        when:
+          type: object
+          additionalProperties: {}
+    PackView:
+      type: object
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        hash:
+          type: string
+        disabledRules:
+          type: array
+          items:
+            type: string
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/PackRuleView"
+    PolicyView:
+      type: object
+      properties:
+        builtInRules:
+          type: array
+          items:
+            $ref: "#/components/schemas/BuiltInRuleView"
+        activeRuleIds:
+          type: array
+          items:
+            type: string
+        pack:
+          $ref: "#/components/schemas/PackView"
     Approvals:
       type: object
       properties:
@@ -2260,6 +2907,18 @@ components:
         outputTokens:
           type: integer
           format: int64
+        cacheReadTokens:
+          type: integer
+          format: int64
+        cacheCreationTokens:
+          type: integer
+          format: int64
+        estimatedCostUsd:
+          type: number
+          format: double
+        unpricedCalls:
+          type: integer
+          format: int32
     Recovery:
       type: object
       properties:

@@ -70,7 +70,7 @@ class ApiKeyAuthFilterServletTest {
                 assertThat(response.body()).as("GET %s with key", path).doesNotContain("\"scenario\"");
             } else {
                 assertThat(response.statusCode()).as("GET %s with key", path).isEqualTo(200);
-                assertThat(response.body()).as("GET %s with key", path).startsWith("[");
+                assertThat(response.body()).as("GET %s with key", path).startsWith("{\"items\":[");
             }
         }
     }

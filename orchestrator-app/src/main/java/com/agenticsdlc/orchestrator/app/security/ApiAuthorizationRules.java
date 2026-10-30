@@ -27,11 +27,14 @@ import org.springframework.web.util.pattern.PathPatternParser;
  *   <li>OPERATOR: {@code POST /api/v1/runs}, {@code POST /api/v1/runs/{id}/clarify|replan|stop|resume},
  *       {@code POST /api/v1/scenarios/{key}/run};</li>
  *   <li>APPROVER: {@code POST /api/v1/runs/{id}/stages/{stageId}/approve|reject};</li>
- *   <li>ADMIN: {@code POST /api/v1/workspace/reindex}, and any other non-GET {@code /api/**} request (fail closed
- *       for endpoints added without a rule);</li>
- *   <li>any role: every {@code GET /api/**} and every other path (other actuator endpoints, documents when not
- *       public).</li>
+ *   <li>ADMIN: {@code POST /api/v1/workspace/reindex}, {@code POST /api/v1/evaluation/suite/run}, and any other
+ *       non-GET {@code /api/**} request (fail closed for endpoints added without a rule);</li>
+ *   <li>any role: every {@code GET /api/**} (including the server-sent event streams, the policy and the run
+ *       evaluation) and every other path (other actuator endpoints, documents when not public).</li>
  * </ul>
+ *
+ * <p>Async dispatches (the completion of a server-sent event stream) are permitted: they only continue a request
+ * whose original dispatch was already authorized by these rules.</p>
  *
  * <p>Paths are matched with {@link PathPattern}s on the decoded path; requests whose path is not normalized
  * ({@code ;} parameters, {@code //}, dot segments, encoded slashes) are rejected by Spring Security's
@@ -60,7 +63,8 @@ public final class ApiAuthorizationRules {
             new Rule(HttpMethod.POST, "/api/v1/scenarios/*/run", ControlPlaneRole.OPERATOR),
             new Rule(HttpMethod.POST, "/api/v1/runs/*/stages/*/approve", ControlPlaneRole.APPROVER),
             new Rule(HttpMethod.POST, "/api/v1/runs/*/stages/*/reject", ControlPlaneRole.APPROVER),
-            new Rule(HttpMethod.POST, "/api/v1/workspace/reindex", ControlPlaneRole.ADMIN));
+            new Rule(HttpMethod.POST, "/api/v1/workspace/reindex", ControlPlaneRole.ADMIN),
+            new Rule(HttpMethod.POST, "/api/v1/evaluation/suite/run", ControlPlaneRole.ADMIN));
 
     private static final String API_PATTERN = "/api/**";
     private static final PathPatternParser PARSER = PathPatternParser.defaultInstance;
@@ -92,7 +96,7 @@ public final class ApiAuthorizationRules {
      */
     static void configure(AuthorizeHttpRequestsConfigurer<HttpSecurity>.AuthorizationManagerRequestMatcherRegistry auth,
                           boolean publicDocs) {
-        auth.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+        auth.dispatcherTypeMatchers(DispatcherType.ERROR, DispatcherType.ASYNC).permitAll()
                 .requestMatchers(MATCHERS.matcher("/error")).permitAll()
                 .requestMatchers(matchers(CONSOLE_PATHS)).permitAll()
                 .requestMatchers(matchers(HEALTH_PATHS)).permitAll();

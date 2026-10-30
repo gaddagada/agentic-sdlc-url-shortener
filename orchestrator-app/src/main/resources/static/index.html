@@ -21,6 +21,8 @@
     </div>
     <div id="providers" class="providers" role="group" aria-label="Agent providers"></div>
     <div class="topbar-tools">
+      <span id="policy-chip" class="policy-entry" role="group" aria-label="Policy in force"></span>
+      <span id="live" class="live off" role="status" title="Connecting to the event streams">Polling</span>
       <span id="conn" class="conn" hidden>Backend unreachable</span>
       <label class="operator">
         <span>Operator</span>
@@ -101,8 +103,9 @@
       <section class="card runs-card" aria-labelledby="runs-title">
         <div class="card-head">
           <h2 id="runs-title">Runs</h2>
-          <span id="runs-count" class="count"></span>
+          <span id="runs-count" class="count" title="Runs matching the filter"></span>
         </div>
+        <div id="runs-pager" class="pager" role="group" aria-label="Runs list paging and filter"></div>
         <ul id="runs-list" class="runs-list"></ul>
       </section>
     </aside>
@@ -138,6 +141,7 @@
           <button type="button" class="tab" role="tab" id="tab-lineage" data-tab="lineage" aria-controls="panel-lineage">Lineage</button>
           <button type="button" class="tab" role="tab" id="tab-metrics" data-tab="metrics" aria-controls="panel-metrics">Metrics</button>
           <button type="button" class="tab" role="tab" id="tab-policy" data-tab="policy" aria-controls="panel-policy">Policy</button>
+          <button type="button" class="tab" role="tab" id="tab-evaluation" data-tab="evaluation" aria-controls="panel-evaluation">Evaluation</button>
         </div>
         <div id="panel-artifacts" class="panel" role="tabpanel" aria-labelledby="tab-artifacts" tabindex="0">
           <div class="artifacts">
@@ -149,6 +153,7 @@
         <div id="panel-lineage" class="panel" role="tabpanel" aria-labelledby="tab-lineage" tabindex="0" hidden></div>
         <div id="panel-metrics" class="panel" role="tabpanel" aria-labelledby="tab-metrics" tabindex="0" hidden></div>
         <div id="panel-policy" class="panel" role="tabpanel" aria-labelledby="tab-policy" tabindex="0" hidden></div>
+        <div id="panel-evaluation" class="panel" role="tabpanel" aria-labelledby="tab-evaluation" tabindex="0" hidden></div>
       </section>
     </main>
   </div>

@@ -91,7 +91,9 @@ public record RunView(
     }
 
     /**
-     * Cumulative counters.
+     * Cumulative counters, including the LLM usage and its estimated cost. {@code llmCostUsd} is the sum of the
+     * priced costs of the run's LLM calls (from {@code sdlc.llm.pricing}); it is null as soon as one call could not be
+     * priced ({@code llmUnpricedCalls} counts those), and 0 for a run without LLM calls.
      *
      * @param retries retries scheduled
      * @param fallbacks deterministic fallbacks
@@ -104,13 +106,18 @@ public record RunView(
      * @param approvalsRevoked approvals revoked
      * @param agentCalls agent calls
      * @param llmCalls LLM calls
-     * @param llmInputTokens LLM input tokens
+     * @param llmInputTokens LLM input tokens (prompt cache reads and writes included)
      * @param llmOutputTokens LLM output tokens
+     * @param llmCacheReadTokens LLM input tokens served from a provider's prompt cache
+     * @param llmCacheCreationTokens LLM input tokens written to a provider's prompt cache
+     * @param llmCostUsd estimated LLM cost in US dollars, or null when at least one call could not be priced
+     * @param llmUnpricedCalls LLM calls without a configured price
      */
     public record CountersView(int retries, int fallbacks, int rollbacks, int replans, int feedbackLoops,
                                int approvalsRequested, int approvalsGranted, int approvalsRejected,
                                int approvalsRevoked, int agentCalls, int llmCalls, long llmInputTokens,
-                               long llmOutputTokens) {
+                               long llmOutputTokens, long llmCacheReadTokens, long llmCacheCreationTokens,
+                               @Nullable Double llmCostUsd, int llmUnpricedCalls) {
     }
 
     /**

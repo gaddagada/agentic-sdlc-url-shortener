@@ -1,6 +1,7 @@
 package com.agenticsdlc.orchestrator.app.api.dto;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 import org.jspecify.annotations.Nullable;
@@ -25,10 +26,14 @@ import org.jspecify.annotations.Nullable;
  * @param signatureVerified for a release-readiness artifact with a signature: whether it verifies with the
  *                          configured signer (same algorithm, key id and key, over the record as stored now); null
  *                          when there is no signature
+ * @param dependencies for a security review: its dependency inventory (declared dependencies and build plugins of
+ *                     the workspace's Maven files, empty for runs without a workspace) with the hygiene flags of every
+ *                     declaration; null for other kinds
  */
 public record ArtifactView(String id, String stageId, String kind, int version, int planVersion, String hash,
                            boolean accepted, Instant createdAt, ProvenanceView provenance, Map<String, Object> payload,
-                           String markdown, @Nullable SignatureView signature, @Nullable Boolean signatureVerified) {
+                           String markdown, @Nullable SignatureView signature, @Nullable Boolean signatureVerified,
+                           @Nullable List<DependencyView> dependencies) {
 
     /**
      * The signature over a finalized release change record (HMAC-SHA256 of its canonical JSON without the

@@ -47,6 +47,15 @@ public final class ProblemTypes {
     public static final URI INVALID_ARGUMENT = of("invalid-argument");
     /** The control plane is shutting down (engine closed); retry against a running instance. */
     public static final URI SERVICE_UNAVAILABLE = of("service-unavailable");
+    /**
+     * This node serves the maximum number of server-sent event streams ({@code sdlc.console.max-sse-connections}); the
+     * response carries {@code Retry-After}. Poll the REST endpoints instead or retry later.
+     */
+    public static final URI STREAM_LIMIT_REACHED = of("stream-limit-reached");
+    /** The operation is switched off by configuration in this deployment (the detail names the property). */
+    public static final URI FEATURE_DISABLED = of("feature-disabled");
+    /** An evaluation suite run is already in progress on this node. */
+    public static final URI EVALUATION_IN_PROGRESS = of("evaluation-in-progress");
     /** Unexpected server error. */
     public static final URI INTERNAL_ERROR = of("internal-error");
 

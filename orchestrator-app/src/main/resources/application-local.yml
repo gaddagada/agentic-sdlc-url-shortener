@@ -7,6 +7,9 @@ sdlc:
   governance:
     # one person can walk through every scenario, including approving a release they started
     four-eyes: false
+  evaluation:
+    # POST /api/v1/evaluation/suite/run may run the bundled suite (isolated in-memory engines, deterministic agents)
+    enabled: true
 
 management:
   endpoint:

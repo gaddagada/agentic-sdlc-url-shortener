@@ -1,0 +1,64 @@
+# Example policy pack (YAML form of the core's sample pack, policy/sample-policy-pack.json).
+#
+# Activate it with sdlc.policy.pack=classpath:policy/example-policy-pack.yaml (or copy it, edit it and point
+# sdlc.policy.pack at the file). The control plane converts YAML to JSON and the core validates it strictly: unknown
+# fields, invalid regexes or globs, duplicate rule ids, ids of built-in rules and attempts to disable CHG-002, GOV-003 or
+# SEC-002 are rejected, and startup fails listing every problem. Quote values that must stay strings but look like
+# numbers (version: "1.0.0").
+#
+# Rule ids: two to five upper-case letters, a dash and three digits. Phases: RUN_START (the requirement), ENTRY and EXIT
+# gates of stages. Effects: DENY (safe-stops the run), REQUIRE_APPROVAL (a human gate), WARN (a finding only).
+# Conditions: intentMatches, pathMatches, payloadMatches, riskAtLeast, changeSizeOver, releaseDecisionIs, autonomyIs,
+# combined with allOf, anyOf and not.
+name: sample-baseline
+version: "1.0.0"
+disabledRules: []
+rules:
+  - id: ORG-001
+    description: Applied Flyway migrations are immutable
+    phase: EXIT
+    stages: [implement]
+    when:
+      type: allOf
+      conditions:
+        - type: pathMatches
+          globs: ["**/db/migration/V1__*"]
+        - type: payloadMatches
+          regexes: ['"operation":"(MODIFY|DELETE)","path":"[^"]*db/migration/V1__']
+    effect: DENY
+    severity: HIGH
+    message: the change modifies or deletes the applied migration V1; add a new versioned migration instead
+
+  - id: ORG-002
+    description: Security code needs a security reviewer
+    phase: EXIT
+    stages: [implement]
+    when:
+      type: pathMatches
+      globs: ["**/security/**", "**/*Security*.java"]
+    effect: REQUIRE_APPROVAL
+    severity: HIGH
+    message: the change touches security code; a security reviewer must approve it
+
+  - id: ORG-003
+    description: Personal data mentioned in the requirement
+    phase: RUN_START
+    when:
+      type: intentMatches
+      regexes: ['\bPII\b', '\bSSN\b', social security number]
+    effect: WARN
+    message: the requirement mentions personal data (PII/SSN); involve the privacy officer before release
+
+  - id: ORG-004
+    description: Critical risk is never fully autonomous
+    phase: EXIT
+    when:
+      type: allOf
+      conditions:
+        - type: autonomyIs
+          autonomy: FULL_AUTO
+        - type: riskAtLeast
+          level: CRITICAL
+    effect: REQUIRE_APPROVAL
+    severity: HIGH
+    message: CRITICAL risk in FULL_AUTO autonomy requires a human approval at every stage exit

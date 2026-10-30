@@ -122,12 +122,23 @@ class OrchestratorEndToEndTest {
         assertThat(metrics.path("runs").path("completed").asInt()).isGreaterThanOrEqualTo(1);
         assertThat(metrics.path("approvals").path("approved").asLong()).isGreaterThanOrEqualTo(2L);
 
-        JsonNode runs = get("/api/v1/runs");
-        assertThat(runs).anySatisfy(r -> {
+        JsonNode page = get("/api/v1/runs?size=200&status=COMPLETED");
+        assertThat(page.path("total").asLong()).isGreaterThanOrEqualTo(1L);
+        assertThat(page.path("items")).anySatisfy(r -> {
             assertThat(r.path("id").asString()).isEqualTo(id);
+            assertThat(r.path("status").asString()).isEqualTo("COMPLETED");
             assertThat(r.path("progress").path("succeeded").asInt()).isEqualTo(10);
+            assertThat(r.path("progress").path("total").asInt()).isEqualTo(10);
             assertThat(r.path("pendingActions").asInt()).isZero();
+            assertThat(r.path("startedBy").asString()).isEqualTo(OPERATOR);
+            assertThat(r.path("endedAt").isNull()).isFalse();
         });
+
+        JsonNode evaluation = get("/api/v1/runs/" + id + "/evaluation");
+        assertThat(evaluation.path("runId").asString()).isEqualTo(id);
+        assertThat(evaluation.path("overall").asDouble()).isBetween(0.5, 1.0);
+        assertThat(texts(evaluation.path("stages"), "stageId")).contains("intake", "design", "release-readiness");
+        assertThat(evaluation.path("stages").get(0).path("criteria").get(0).path("rationale").asString()).isNotBlank();
     }
 
     @Test

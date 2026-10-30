@@ -57,9 +57,10 @@ class OpenApiContractTest {
     @Test
     void committedContractListsEveryOperationTheControllersExpose() throws IOException {
         SortedSet<String> exposed = exposedOperations();
-        assertThat(exposed).hasSize(22).contains("POST /api/v1/runs", "GET /api/v1/runs/{id}/lineage",
+        assertThat(exposed).hasSize(27).contains("POST /api/v1/runs", "GET /api/v1/runs/{id}/lineage",
                 "POST /api/v1/runs/{id}/stages/{stageId}/approve", "GET /api/v1/providers",
-                "GET /api/v1/runs/{id}/audit/integrity");
+                "GET /api/v1/runs/{id}/audit/integrity", "GET /api/v1/runs/events", "GET /api/v1/runs/{id}/events",
+                "GET /api/v1/runs/{id}/evaluation", "GET /api/v1/policy", "POST /api/v1/evaluation/suite/run");
 
         assertThat(operations(committed())).as("committed contract").isEqualTo(exposed);
         assertThat(operations(generated())).as("springdoc document").isEqualTo(exposed);
@@ -160,6 +161,76 @@ class OpenApiContractTest {
                     .containsKeys("signature", "signatureVerified");
             assertThat(asMap(asMap(schemas.get("SignatureView")).get("properties")))
                     .containsKeys("algorithm", "keyId", "value", "signedAt");
+        }
+    }
+
+    @Test
+    void theEventStreamsArePlainTextEventStreamsWithTheirProblems() throws IOException {
+        for (Map<String, Object> document : List.of(committed(), generated())) {
+            for (String path : List.of("/api/v1/runs/{id}/events", "/api/v1/runs/events")) {
+                Map<String, Object> responses = asMap(operation(document, path, "get").get("responses"));
+                assertThat(asMap(asMap(responses.get("200")).get("content"))).as("GET %s", path)
+                        .containsOnlyKeys("text/event-stream");
+                assertThat(responses).as("GET %s", path).containsKey("503");
+                assertThat(asList(operation(document, path, "get").get("x-required-roles")))
+                        .containsExactly("OPERATOR", "APPROVER", "ADMIN");
+            }
+            assertThat(asMap(operation(document, "/api/v1/runs/{id}/events", "get").get("responses")))
+                    .containsKey("404");
+            assertThat(asList(operation(document, "/api/v1/runs/{id}/events", "get").get("parameters")))
+                    .anySatisfy(p -> assertThat(asMap(p)).containsEntry("in", "header")
+                            .containsEntry("name", "Last-Event-ID"));
+        }
+    }
+
+    @Test
+    void theRunsListIsAPagedFilterableEnvelope() throws IOException {
+        for (Map<String, Object> document : List.of(committed(), generated())) {
+            Map<String, Object> list = operation(document, "/api/v1/runs", "get");
+            assertThat(asList(list.get("parameters"))).extracting(p -> asMap(p).get("name"))
+                    .containsExactlyInAnyOrder("page", "size", "status", "scenario", "startedBy", "sort");
+            Map<String, Object> ok = asMap(asMap(list.get("responses")).get("200"));
+            assertThat(asMap(asMap(asMap(ok.get("content")).values().iterator().next()).get("schema")))
+                    .containsEntry("$ref", "#/components/schemas/RunPageView");
+            assertThat(asMap(list.get("responses"))).containsKey("400");
+            Map<String, Object> schemas = asMap(asMap(document.get("components")).get("schemas"));
+            assertThat(asMap(asMap(schemas.get("RunPageView")).get("properties"))).containsKeys("items", "page",
+                    "size", "total", "totalPages", "sort");
+            assertThat(asMap(asMap(schemas.get("RunSummaryView")).get("properties"))).containsKeys("endedAt",
+                    "autonomy", "workspace", "startedBy", "riskLevel", "nodeId", "pendingActions", "progress");
+        }
+    }
+
+    @Test
+    void costCachePolicyEvaluationAndDependenciesAreDocumented() throws IOException {
+        for (Map<String, Object> document : List.of(committed(), generated())) {
+            Map<String, Object> schemas = asMap(asMap(document.get("components")).get("schemas"));
+            assertThat(asMap(asMap(schemas.get("CountersView")).get("properties"))).containsKeys(
+                    "llmCacheReadTokens", "llmCacheCreationTokens", "llmCostUsd", "llmUnpricedCalls");
+            assertThat(asMap(asMap(schemas.get("ProvenanceView")).get("properties"))).containsKeys(
+                    "cacheReadTokens", "cacheCreationTokens", "costMicroUsd");
+            assertThat(asMap(asMap(schemas.get("Llm")).get("properties"))).containsKeys("cacheReadTokens",
+                    "cacheCreationTokens", "estimatedCostUsd", "unpricedCalls");
+            assertThat(asMap(asMap(schemas.get("ArtifactView")).get("properties"))).containsKey("dependencies");
+            assertThat(asMap(asMap(schemas.get("DependencyView")).get("properties"))).containsKeys("coordinate",
+                    "flags");
+            assertThat(asMap(asMap(schemas.get("PolicyView")).get("properties"))).containsKeys("builtInRules",
+                    "activeRuleIds", "pack");
+            assertThat(asMap(asMap(schemas.get("PackView")).get("properties"))).containsKeys("name", "version",
+                    "hash", "disabledRules", "rules");
+            assertThat(asMap(asMap(schemas.get("EvaluationReportView")).get("properties"))).containsKeys("runId",
+                    "overall", "stages", "notes");
+            assertThat(asMap(asMap(schemas.get("SuiteResultView")).get("properties"))).containsKeys("suite",
+                    "passed", "cases", "markdown");
+
+            Map<String, Object> evaluation = operation(document, "/api/v1/runs/{id}/evaluation", "get");
+            assertThat(asMap(asMap(asMap(evaluation.get("responses")).get("200")).get("content")))
+                    .containsKeys("application/json", "text/markdown");
+            Map<String, Object> suite = operation(document, "/api/v1/evaluation/suite/run", "post");
+            assertThat(asList(suite.get("x-required-roles"))).containsExactly("ADMIN");
+            assertThat(asMap(suite.get("responses"))).containsKeys("200", "400", "404", "409");
+            assertThat(asList(operation(document, "/api/v1/policy", "get").get("x-required-roles")))
+                    .containsExactly("OPERATOR", "APPROVER", "ADMIN");
         }
     }
 

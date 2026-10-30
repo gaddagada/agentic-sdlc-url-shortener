@@ -208,6 +208,26 @@ class OidcSecurityTest {
         assertThat(mvc.get().uri("/actuator/metrics").exchange()).hasStatus(HttpStatus.UNAUTHORIZED);
     }
 
+    @Test
+    void theSuiteNeedsAdminAndIsDisabledInProdWhileStreamsPolicyAndEvaluationServeAnyRole() {
+        assertThat(post("/api/v1/evaluation/suite/run", token("alice", List.of("operator"))).exchange())
+                .hasStatus(HttpStatus.FORBIDDEN);
+        MvcTestResult admin = post("/api/v1/evaluation/suite/run", token("root", List.of("admin"))).exchange();
+        assertThat(admin).hasStatus(HttpStatus.NOT_FOUND);
+        assertThat(body(admin).path("type").asString()).isEqualTo("https://agenticsdlc.dev/problems/feature-disabled");
+
+        MvcTestResult stream = mvc.get().uri("/api/v1/runs/events")
+                .header(HttpHeaders.AUTHORIZATION, "Bearer " + token("bob", List.of("approver")))
+                .accept(MediaType.TEXT_EVENT_STREAM).asyncExchange();
+        assertThat(stream).hasStatus(HttpStatus.OK);
+        assertThat(stream.getResponse().getContentType()).startsWith(MediaType.TEXT_EVENT_STREAM_VALUE);
+        assertThat(mvc.get().uri("/api/v1/runs/events").accept(MediaType.TEXT_EVENT_STREAM).exchange())
+                .hasStatus(HttpStatus.UNAUTHORIZED);
+        assertThat(get("/api/v1/policy", token("bob", List.of("approver")))).hasStatus(HttpStatus.OK);
+        assertThat(get("/api/v1/runs?status=COMPLETED&size=10", token("bob", List.of("approver"))))
+                .hasStatus(HttpStatus.OK);
+    }
+
     private MvcTestResult get(String path, String token) {
         return mvc.get().uri(path).header(HttpHeaders.AUTHORIZATION, "Bearer " + token).exchange();
     }

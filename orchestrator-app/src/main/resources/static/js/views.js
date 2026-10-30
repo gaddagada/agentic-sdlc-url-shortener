@@ -29,10 +29,33 @@ export function renderRunsList(runs, selectedId, onSelect) {
         h('span', { class: 'run-line meta' },
           h('span', { class: 'mono', title: run.id }, shortId(run.id)),
           h('span', { title: fmtDateTime(run.createdAt) }, fmtWhen(run.createdAt)),
+          run.startedBy ? h('span', { class: 'run-starter', title: 'Started by' }, run.startedBy) : null,
           run.haltReason ? h('span', { class: 'halt-text' }, humanize(run.haltReason)) : null,
           h('span', { class: 'run-progress', title: 'Stages succeeded / total' }, `${isNum(succeeded) ? succeeded : DASH}/${isNum(total) ? total : DASH}`)),
         h('span', { class: 'meter-track', 'aria-hidden': 'true' }, h('span', { class: 'meter-fill', style: { width: `${pct}%` } }))));
   });
+}
+
+/** Paging and status filter of the runs list. */
+export function renderPager({ page, size, status, total, totalPages, loaded, sizes, statuses, on }) {
+  const pages = Math.max(1, totalPages || 0);
+  const first = total ? page * size + 1 : 0;
+  const last = Math.min(total, (page + 1) * size);
+  return [
+    h('div', { class: 'pager-row' },
+      h('label', { class: 'pager-field' }, h('span', {}, 'Status'),
+        h('select', { 'data-fk': 'pager:status', onchange: (e) => on.status(e.currentTarget.value) },
+          h('option', { value: '', selected: !status }, 'All'),
+          statuses.map((s) => h('option', { value: s, selected: s === status }, humanize(s))))),
+      h('label', { class: 'pager-field' }, h('span', {}, 'Per page'),
+        h('select', { 'data-fk': 'pager:size', onchange: (e) => on.size(e.currentTarget.value) },
+          sizes.map((n) => h('option', { value: String(n), selected: n === size }, String(n)))))),
+    h('div', { class: 'pager-row' },
+      h('button', { type: 'button', class: 'btn small', 'data-fk': 'pager:prev', disabled: page <= 0, onclick: () => on.page(page - 1), 'aria-label': 'Previous page' }, '\u2039 Prev'),
+      h('span', { class: 'muted small pager-info', 'aria-live': 'polite' },
+        loaded ? (total ? `${fmtNum(first)}\u2013${fmtNum(last)} of ${fmtNum(total)} \u00b7 page ${page + 1}/${pages}` : 'No runs') : 'Loading\u2026'),
+      h('button', { type: 'button', class: 'btn small', 'data-fk': 'pager:next', disabled: page + 1 >= pages, onclick: () => on.page(page + 1), 'aria-label': 'Next page' }, 'Next \u203a')),
+  ];
 }
 
 // ---------------------------------------------------------------- status banner
@@ -47,6 +70,27 @@ function budgetMeter(label, used, max) {
     h('dt', {}, label),
     h('dd', {}, `${fmtCompact(used)} / ${fmtCompact(max)}`),
     h('dd', { class: `meter-track${level}`, 'aria-hidden': 'true' }, h('span', { class: 'meter-fill', style: { width: `${Math.min(100, (ratio ?? 0) * 100)}%` } })));
+}
+
+/** "LLM cost: $x.xx" when every LLM call of the run was priced, else "unpriced (n calls)"; null without LLM calls. */
+function llmCostStat(counters) {
+  if (!isNum(counters.llmCalls) || counters.llmCalls <= 0) return null;
+  const cache = isNum(counters.llmCacheReadTokens) || isNum(counters.llmCacheCreationTokens)
+    ? `Prompt cache: ${fmtNum(counters.llmCacheReadTokens ?? 0)} tokens read, ${fmtNum(counters.llmCacheCreationTokens ?? 0)} written`
+    : null;
+  if (isNum(counters.llmCostUsd)) {
+    return stat('LLM cost', fmtUsd(counters.llmCostUsd), [`Estimated from sdlc.llm.pricing over ${fmtNum(counters.llmCalls)} LLM calls`, cache].filter(Boolean).join('\n'));
+  }
+  const n = isNum(counters.llmUnpricedCalls) ? counters.llmUnpricedCalls : counters.llmCalls;
+  return stat('LLM cost', `unpriced (${fmtNum(n)} call${n === 1 ? '' : 's'})`,
+    ['No price is configured for the provider and model of these calls (sdlc.llm.pricing), so the cost is unknown', cache].filter(Boolean).join('\n'));
+}
+
+/** US dollars with cents, or more decimals for amounts under one cent. */
+export function fmtUsd(value) {
+  if (!isNum(value)) return DASH;
+  if (value > 0 && value < 0.01) return `$${value.toFixed(4)}`;
+  return `$${value.toFixed(2)}`;
 }
 
 export function renderBanner(run) {
@@ -77,6 +121,7 @@ export function renderBanner(run) {
       stat('Human wait', fmtMs(timing.humanWaitMs)),
       budgetMeter('Agent calls', budget.agentCallsUsed, budget.maxAgentCalls),
       budgetMeter('LLM tokens', budget.llmTokensUsed, budget.maxLlmTokens),
+      llmCostStat(counters),
       stat('Retries', fmtNum(counters.retries)),
       stat('Fallbacks', fmtNum(counters.fallbacks)),
       stat('Rollbacks', fmtNum(counters.rollbacks)),
@@ -233,10 +278,16 @@ function renderProvenance(p) {
   if (!p || typeof p !== 'object') return placeholder('No provenance recorded.');
   const derived = p.derivedFrom && typeof p.derivedFrom === 'object' ? Object.entries(p.derivedFrom) : [];
   const tokens = p.inputTokens != null || p.outputTokens != null ? `${fmtNum(p.inputTokens)} / ${fmtNum(p.outputTokens)}` : null;
+  const llm = Boolean(p.model) || (p.inputTokens ?? 0) > 0;
+  const cache = llm && (isNum(p.cacheReadTokens) || isNum(p.cacheCreationTokens))
+    ? `${fmtNum(p.cacheReadTokens ?? 0)} / ${fmtNum(p.cacheCreationTokens ?? 0)}` : null;
+  const cost = !llm ? null : isNum(p.costMicroUsd) ? fmtUsd(p.costMicroUsd / 1_000_000) : 'unpriced';
   return [
     facts([
       ['Agent role', p.agentRole], ['Provider', p.providerId], ['Model', p.model], ['Attempt', p.attempt != null ? String(p.attempt) : null],
-      ['Latency', isNum(p.latencyMs) ? fmtMs(p.latencyMs) : null], ['Tokens in / out', tokens], ['Prompt hash', p.promptHash],
+      ['Latency', isNum(p.latencyMs) ? fmtMs(p.latencyMs) : null], ['Tokens in / out', tokens],
+      ...(cache ? [['Cache read / written', cache]] : []), ...(cost ? [['Estimated cost', cost]] : []),
+      ['Prompt hash', p.promptHash],
     ]),
     h('p', { class: 'derived' }, h('span', { class: 'muted' }, 'Derived from: '),
       derived.length ? derived.map(([stage, version]) => chip(`${stage} v${version}`, 'mono')) : 'no upstream artifacts (root)'),
@@ -257,10 +308,38 @@ function artifactBody(summary, state, open, onToggle) {
   else markdown.append(placeholder('No Markdown rendering for this artifact; see the payload below.'));
   const section = (name, title, content, defaultOpen = false) =>
     h('details', { class: 'raw', open: open[name] || defaultOpen, ontoggle: (e) => onToggle(name, e.currentTarget.open) }, h('summary', {}, title), content);
+  const dependencies = Array.isArray(view.dependencies) ? view.dependencies : null;
   return [
     markdown,
+    dependencies ? section('dependencies', `Dependency inventory (${dependencies.length})`, renderDependencies(dependencies), true) : null,
     section('payload', 'Payload JSON', h('pre', { class: 'json' }, pretty(view.payload)), !view.markdown),
     section('provenance', 'Provenance', renderProvenance(view.provenance ?? summary.provenance)),
+  ];
+}
+
+const DEPENDENCY_RENDER_CAP = 300;
+const SEVERITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+
+/** The dependency inventory of a security review: flagged declarations first, each flag as a severity chip. */
+function renderDependencies(rows) {
+  if (!rows.length) return placeholder('No dependency inventory: the run has no workspace (REPO runs inventory the Maven build files).');
+  const worst = (d) => Math.min(...asList(d.flags).map((f) => SEVERITY_ORDER[f.severity] ?? 9), 9);
+  const sorted = rows.slice().sort((a, b) => worst(a) - worst(b));
+  const flagged = rows.filter((d) => asList(d.flags).length).length;
+  return [
+    h('p', { class: 'muted small' }, `${fmtNum(rows.length)} declarations, ${fmtNum(flagged)} flagged. An inventory and hygiene check of the Maven build files, not a vulnerability (CVE) scan.`),
+    h('div', { class: 'table-wrap' }, h('table', { class: 'data deps' },
+      h('thead', {}, h('tr', {}, ['Module', 'Kind', 'Coordinate', 'Scope', 'Section', 'Flags'].map((c) => h('th', { scope: 'col' }, c)))),
+      h('tbody', {}, sorted.slice(0, DEPENDENCY_RENDER_CAP).map((d) => h('tr', { class: asList(d.flags).length ? 'flagged' : null },
+        h('td', { class: 'mono small' }, d.module ?? DASH),
+        h('td', {}, humanize(d.kind)),
+        h('td', { class: 'mono small' }, d.coordinate ?? DASH),
+        h('td', {}, d.scope ?? DASH),
+        h('td', { class: 'small' }, d.section ?? DASH),
+        h('td', {}, asList(d.flags).length
+          ? asList(d.flags).map((f) => chip(humanize(f.kind), `sev-${statusToken(f.severity)}`, `${humanize(f.severity)} severity`))
+          : h('span', { class: 'muted small' }, 'none'))))))),
+    rows.length > DEPENDENCY_RENDER_CAP ? h('p', { class: 'muted small' }, `Showing ${DEPENDENCY_RENDER_CAP} of ${rows.length} declarations (flagged first); the payload JSON has all of them.`) : null,
   ];
 }
 
@@ -417,11 +496,59 @@ export function renderMetrics(m, fetchedAt) {
       tile('Agent call avg / p95', `${fmtMs(latency.agentCallMsAvg)} / ${fmtMs(latency.agentCallMsP95)}`, 'From artifact provenance'),
       tile('Approvals', `${fmtNum(approvals.approved)} / ${fmtNum(approvals.requested)}`,
         `${fmtNum(approvals.rejected)} rejected, ${fmtNum(approvals.revoked)} revoked, mean decision ${fmtMs(approvals.meanDecisionMs)}`),
-      tile('LLM tokens', fmtCompact(tokens), `${fmtNum(llm.calls)} calls, ${fmtCompact(llm.inputTokens)} in / ${fmtCompact(llm.outputTokens)} out`)),
+      tile('LLM tokens', fmtCompact(tokens), `${fmtNum(llm.calls)} calls, ${fmtCompact(llm.inputTokens)} in / ${fmtCompact(llm.outputTokens)} out`),
+      tile('LLM prompt cache', `${fmtCompact(llm.cacheReadTokens)} read`, `${fmtCompact(llm.cacheCreationTokens)} written \u00b7 input tokens served from / written to the provider's cache`),
+      tile('Estimated LLM cost', costTile(llm), costNote(llm))),
   ];
 }
 
+function costTile(llm) {
+  if (isNum(llm.estimatedCostUsd)) return fmtUsd(llm.estimatedCostUsd);
+  return isNum(llm.calls) && llm.calls > 0 ? 'unpriced' : fmtUsd(0);
+}
+
+function costNote(llm) {
+  const unpriced = isNum(llm.unpricedCalls) ? llm.unpricedCalls : 0;
+  if (!unpriced) return 'From the configured prices (sdlc.llm.pricing)';
+  const lowerBound = isNum(llm.estimatedCostUsd) ? 'a lower bound: ' : '';
+  return `${lowerBound}${fmtNum(unpriced)} call${unpriced === 1 ? '' : 's'} without a configured price (sdlc.llm.pricing)`;
+}
+
 // ---------------------------------------------------------------- policy
+
+/** Header entry of the policy in force: the active pack (name, version, hash) or the built-in rules. */
+export function renderPolicyChip(policy, onOpen) {
+  if (!policy || typeof policy !== 'object') return null;
+  const pack = policy.pack;
+  const text = pack ? `Policy: ${pack.name} v${pack.version}` : 'Policy: built-in rules';
+  const title = pack
+    ? [`Policy pack ${pack.name} ${pack.version}`, `SHA-256 ${pack.hash}`, `${asList(pack.rules).length} declarative rules`,
+      asList(pack.disabledRules).length ? `Disables ${asList(pack.disabledRules).join(', ')}` : 'Disables no built-in rule'].join('\n')
+    : `${asList(policy.builtInRules).length} built-in rules; no policy pack (sdlc.policy.pack) is configured`;
+  return h('button', { type: 'button', class: `policy-chip${pack ? ' pack' : ''}`, title, onclick: onOpen },
+    text, pack?.hash ? h('span', { class: 'mono muted' }, ` #${String(pack.hash).slice(0, 8)}`) : null);
+}
+
+/** The policy in force, above the findings of the selected run. */
+export function renderPolicyInForce(policy) {
+  if (!policy || typeof policy !== 'object') return null;
+  const pack = policy.pack;
+  const disabled = new Set(asList(pack?.disabledRules));
+  return h('details', { class: 'raw policy-in-force' },
+    h('summary', {}, pack ? `Policy in force: pack ${pack.name} ${pack.version} (#${String(pack.hash ?? '').slice(0, 12)}) and the built-in rules` : 'Policy in force: built-in rules'),
+    h('p', { class: 'muted small' }, 'Built-in rules: ',
+      asList(policy.builtInRules).map((r) => chip(r.id, disabled.has(r.id) || r.active === false ? 'mono chip-muted' : 'mono',
+        `${r.name}${r.active === false ? ' (disabled by the pack)' : ''}${r.disableable === false ? '; cannot be disabled' : ''}`))),
+    pack && asList(pack.rules).length
+      ? h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
+        h('thead', {}, h('tr', {}, ['Rule', 'Phase', 'Stages', 'Effect', 'Severity', 'Message'].map((c) => h('th', { scope: 'col' }, c)))),
+        h('tbody', {}, asList(pack.rules).map((r) => h('tr', { title: r.description || null },
+          h('td', { class: 'mono nowrap' }, r.id), h('td', {}, humanize(r.phase)),
+          h('td', { class: 'mono small' }, asList(r.stages).join(', ') || 'all'),
+          h('td', {}, humanize(r.effect)), h('td', {}, chip(humanize(r.severity), `sev-${statusToken(r.severity)}`)),
+          h('td', {}, r.message ?? DASH))))))
+      : null);
+}
 
 const VERDICT_STATUS = { DENY: 'FAILED', REQUIRE_APPROVAL: 'AWAITING_APPROVAL', ALLOW: 'SUCCEEDED' };
 
@@ -437,4 +564,55 @@ export function renderPolicy(findings) {
       h('td', {}, chip(humanize(f.severity), `sev-${statusToken(f.severity)}`)),
       h('td', {}, h('span', { class: `pill st-${VERDICT_STATUS[f.verdict] ?? 'PENDING'}` }, humanize(f.verdict))),
       h('td', {}, f.message ?? DASH))))));
+}
+
+// ---------------------------------------------------------------- evaluation
+
+/** A 0..1 score as a percentage with a bar (colour from the score, the number is always shown). */
+function scoreBar(value, label) {
+  const pct = isNum(value) ? Math.max(0, Math.min(1, value)) * 100 : 0;
+  const level = !isNum(value) ? '' : value < 0.5 ? ' danger' : value < 0.75 ? ' warn' : '';
+  return h('span', { class: 'score' },
+    h('span', { class: `meter-track${level}`, role: 'img', 'aria-label': `${label ?? 'Score'} ${fmtPct(value)}` },
+      h('span', { class: 'meter-fill', style: { width: `${pct}%` } })),
+    h('span', { class: 'score-value' }, fmtPct(value)));
+}
+
+const weakest = (stage) => asList(stage.criteria).filter((c) => c.applies)
+  .reduce((min, c) => (!min || c.value < min.value ? c : min), null);
+
+/** The evaluation of the selected run: overall score, a score bar per stage and every criterion with its rationale. */
+export function renderEvaluation({ status, report, error, onRefresh }) {
+  if (!report) {
+    if (status === 'error') return placeholder(`Could not evaluate this run (${error?.detail || error?.title || 'error'}).`);
+    return placeholder('Evaluating the artifacts of this run\u2026');
+  }
+  const stages = asList(report.stages);
+  return [
+    h('div', { class: 'card-head' },
+      h('p', { class: 'muted small' }, 'Deterministic scores of the accepted artifact of every stage (else the latest one under review); recomputed whenever the artifacts change.'),
+      h('button', { type: 'button', class: 'btn small', onclick: onRefresh, disabled: status === 'loading' || status === 'refreshing' }, status === 'refreshing' ? 'Refreshing\u2026' : 'Re-evaluate')),
+    h('div', { class: 'eval-overall' }, h('strong', {}, 'Overall'), scoreBar(report.overall, 'Overall score')),
+    stages.length
+      ? h('div', { class: 'table-wrap' }, h('table', { class: 'data eval' },
+        h('thead', {}, h('tr', {}, ['Stage', 'Score', 'Weakest criterion'].map((c) => h('th', { scope: 'col' }, c)))),
+        h('tbody', {}, stages.map((s) => {
+          const low = weakest(s);
+          return h('tr', {},
+            h('td', { class: 'mono' }, s.stageId),
+            h('td', { class: 'score-cell' }, scoreBar(s.score, `${s.stageId} score`)),
+            h('td', {}, low ? `${low.name} (${fmtPct(low.value)})` : DASH));
+        }))))
+      : placeholder('No stage has produced an artifact yet.'),
+    stages.map((s) => h('details', { class: 'raw' },
+      h('summary', {}, `${s.stageId} \u00b7 ${fmtPct(s.score)}`),
+      h('div', { class: 'table-wrap' }, h('table', { class: 'data' },
+        h('thead', {}, h('tr', {}, ['Criterion', 'Weight', 'Value', 'Rationale'].map((c) => h('th', { scope: 'col' }, c)))),
+        h('tbody', {}, asList(s.criteria).map((c) => h('tr', { class: c.applies ? null : 'muted' },
+          h('td', { class: 'mono small' }, c.name),
+          h('td', {}, c.applies ? fmtRatio(c.weight) : 'n/a'),
+          h('td', { class: 'score-cell' }, scoreBar(c.value, c.name)),
+          h('td', { class: 'small' }, c.rationale ?? DASH)))))))),
+    asList(report.notes).length ? h('ul', { class: 'muted small' }, asList(report.notes).map((n) => h('li', {}, String(n)))) : null,
+  ];
 }
