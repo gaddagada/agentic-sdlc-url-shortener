@@ -30,6 +30,14 @@ jobs:
             **/target/surefire-reports/**
             **/target/site/jacoco/**
           if-no-files-found: ignore
+      - name: Generate CycloneDX SBOM (aggregate)
+        run: ./mvnw -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.9.3:makeAggregateBom -DoutputFormat=json -DoutputName=sbom
+      - name: Upload SBOM
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sbom
+          path: target/sbom.json
+          if-no-files-found: error
 
   containers:
     name: Container images build
