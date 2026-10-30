@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Function;
 
@@ -28,7 +29,8 @@ import com.agenticsdlc.orchestrator.core.port.RunLease;
  * <p>Bounded retention ({@link #evictIdle}): a run that is not executing on this node (not RUNNING, no in-flight
  * attempt, no lease held) is evicted once it has not changed for the retention period, and terminal runs beyond a
  * maximum count are evicted least recently ended first. Eviction never loses data: every mutation is committed to
- * the store before it becomes visible, and runs whose last commit failed (in memory ahead of the store) are kept.</p>
+ * the store before it becomes visible. A holder whose state can no longer be trusted (lease lost, failed commit) is
+ * evicted at once ({@link #evictNow}).</p>
  */
 final class RunRegistry {
 
@@ -38,10 +40,15 @@ final class RunRegistry {
      */
     static final class RunHolder {
         final ReentrantLock lock = new ReentrantLock();
+        /**
+         * Correlation tokens of attempts and retries, unique across all holders of this JVM: a holder that replaces an
+         * abandoned one (lease lost, failed commit) never reuses a token of an attempt that is still running.
+         */
+        private static final AtomicLong TOKEN_SEQUENCE = new AtomicLong();
+
         /** The live aggregate; replaced under the lock when a newer state written by another node is loaded. */
         Run run;
         final Map<String, InFlight> inFlight = new HashMap<>();
-        private long tokenSequence;
         /** False for a new run until its first commit succeeded (runs loaded from the store are committed). */
         volatile boolean committed = true;
         /**
@@ -49,10 +56,11 @@ final class RunRegistry {
          * the holder before (for example the completion of an attempt that finished meanwhile) must not commit it.
          */
         volatile boolean discarded;
-        /** Set when the holder was evicted: a mutation that obtained it before must resolve the run again. */
+        /**
+         * Set when the holder was evicted (idle, or abandoned because its lease was lost or a commit failed): a
+         * mutation that obtained it before must resolve the run again (from the store).
+         */
         volatile boolean evicted;
-        /** Set while the last commit failed (the run in memory is ahead of the store); such a run is not evicted. */
-        volatile boolean dirty;
         /** The lease this node holds on the run, or null. Written under the lock, read by attempt heartbeats. */
         volatile @Nullable RunLease lease;
         /**
@@ -67,7 +75,7 @@ final class RunRegistry {
         }
 
         long nextToken() {
-            return ++tokenSequence;
+            return TOKEN_SEQUENCE.incrementAndGet();
         }
     }
 
@@ -105,6 +113,18 @@ final class RunRegistry {
      */
     RunHolder registerLoaded(Run run) {
         return holders.computeIfAbsent(run.id(), id -> new RunHolder(run));
+    }
+
+    /**
+     * Evicts a holder right away, whatever its state, because its in-memory state can no longer be trusted (this node
+     * lost the run's lease, or a commit failed): it is marked evicted and unregistered, so the next mutation or read
+     * of the run loads it from the store. The caller holds the holder's lock.
+     *
+     * @param holder the holder
+     */
+    void evictNow(RunHolder holder) {
+        holder.evicted = true;
+        holders.remove(holder.run.id(), holder);
     }
 
     /**
@@ -223,7 +243,7 @@ final class RunRegistry {
     }
 
     private static boolean idle(RunHolder holder) {
-        return !holder.evicted && !holder.discarded && !holder.dirty && holder.committed && holder.lease == null
+        return !holder.evicted && !holder.discarded && holder.committed && holder.lease == null
                 && !holder.releasePending
                 && holder.inFlight.isEmpty() && holder.run.status() != RunStatus.RUNNING;
     }

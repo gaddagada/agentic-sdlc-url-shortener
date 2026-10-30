@@ -24,4 +24,15 @@ public class InvalidRunStateException extends IllegalStateException {
     public InvalidRunStateException(String message) {
         super(message);
     }
+
+    /**
+     * Creates the exception with its cause (for example the store exception of a commit that failed, which the engine
+     * reports as a conflict with the stored state of the run).
+     *
+     * @param message what is wrong with the state
+     * @param cause the cause
+     */
+    public InvalidRunStateException(String message, Throwable cause) {
+        super(message, cause);
+    }
 }

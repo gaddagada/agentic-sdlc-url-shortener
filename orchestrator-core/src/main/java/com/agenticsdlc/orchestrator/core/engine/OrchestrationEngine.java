@@ -111,16 +111,26 @@ import com.agenticsdlc.orchestrator.core.workspace.WorkspaceSandbox;
  * <p>Threading and persistence: every mutation of a run happens under its lock; agent attempts run off the lock
  * and re-acquire it on completion. After every mutation the run and the buffered audit events are handed to
  * {@link RunStore#commit} (by default {@code save} then {@link AuditSink#append}; a transactional store overrides
- * it to persist both atomically) while still holding the lock. When the commit fails, the exception reaches the
- * caller of the command; the in-memory run keeps the mutation, so it may be ahead of the store (and the audit log)
- * until the next successful commit, which persists the full current state. A failed {@code start} unregisters
+ * it to persist both atomically) while still holding the lock, right after the run's lease was renewed: a node whose
+ * lease was taken over never commits. When the commit fails, the caller gets an {@link InvalidRunStateException}
+ * (a conflict, with the store exception as its cause; the store's own exception never escapes) and the mutation is
+ * discarded: the run is dropped from the in-memory registry (its in-flight attempts are abandoned and its lease is
+ * released), so the next command or read loads the stored state again. A failed {@code start} unregisters
  * the new run, so no run that was never persisted stays visible. {@link #get} and {@link #list} return copies built
  * under the lock.</p>
  *
+ * <p>Lost leases: when this node finds that it lost the lease of a run it was executing (an attempt heartbeat whose
+ * renewal fails, a renewal at the start of a mutation, or the renewal right before a commit), it writes nothing to the
+ * store, drops the lease, abandons the run's in-flight attempts (an attempt that finds out through its heartbeat is
+ * interrupted with a LEASE_LOST outcome, treated like an interruption: nothing is applied or retried on this node),
+ * evicts the run from the registry and logs a WARN; a command that ran into it gets a
+ * {@link RunLeasedElsewhereException}.</p>
+ *
  * <p>Audit hash chain: every audit event is linked to the run's previous event ({@code prevHash}, {@code hash}; see
  * {@link com.agenticsdlc.orchestrator.core.audit.AuditChain}) when it is created; the chain head is part of the
- * run's snapshot and is resynchronized with {@link AuditSink#lastEvent} when a run is loaded from the store or a
- * commit fails, so the chain continues across restarts, nodes and failed commits without gaps.</p>
+ * run's snapshot and is resynchronized with {@link AuditSink#lastEvent} when a run is loaded from the store (also
+ * right after a failed commit, which drops the in-memory copy), so the chain continues across restarts, nodes and
+ * failed commits without gaps.</p>
  *
  * <p>Failure texts: agent and provider error messages may echo credentials or whole request and response bodies, so
  * the engine records them (stage last error, RETRY_SCHEDULED, FALLBACK_ENGAGED and STAGE_FAILED audit events, logs,
@@ -809,7 +819,7 @@ public final class OrchestrationEngine implements AutoCloseable {
      * Evicts runs that are not executing on this node from the in-memory registry: runs without a change for
      * {@link EngineConfig#registryRetention()}, then the least recently ended terminal runs beyond
      * {@link EngineConfig#registryMaxTerminalRuns()}. A run is never evicted while it is RUNNING, has an in-flight
-     * attempt, is leased by this node or is ahead of the store after a failed commit. Evicted runs remain readable
+     * attempt, is leased by this node or has a pending lease release. Evicted runs remain readable
      * through {@link #get} and {@link #list} (from the store) and are loaded again by the next command. The engine
      * calls this after every command and in {@link #list()}; adapters may also call it periodically.
      *
@@ -1021,56 +1031,67 @@ public final class OrchestrationEngine implements AutoCloseable {
     private Run mutate(String runId, Consumer<RunMutation> body) {
         ensureOpen();
         while (true) {
-            RunRegistry.RunHolder holder = registry.holder(runId);
-            Run copy;
-            Instant at;
-            holder.lock.lock();
+            Run copy = mutateHolder(registry.holder(runId), body);
+            if (copy != null) {
+                return copy;
+            }
+            // evicted meanwhile: resolve the run again (from the store)
+        }
+    }
+
+    /**
+     * Runs one mutation on a given holder, as {@link #mutate} does, unless the holder was evicted meanwhile. Agent
+     * attempts apply their results through it with the holder they were submitted to, so that a run that was
+     * abandoned on this node (lease lost, failed commit) is never reloaded, re-leased or written by a stale result.
+     *
+     * @return the committed copy, or null when the holder was evicted
+     */
+    private @Nullable Run mutateHolder(RunRegistry.RunHolder holder, Consumer<RunMutation> body) {
+        ensureOpen();
+        String runId = holder.run.id();
+        Run copy;
+        Instant at;
+        holder.lock.lock();
+        try {
+            if (holder.evicted) {
+                return null;
+            }
+            if (holder.discarded) {
+                // the creation of this run could not be committed; it is unregistered and must stay unpersisted
+                throw new RunNotFoundException(runId);
+            }
+            RunMutation tx = null;
+            boolean committed = false;
             try {
-                if (holder.evicted) {
-                    continue; // evicted meanwhile: resolve the run again (from the store)
-                }
-                if (holder.discarded) {
-                    // the creation of this run could not be committed; it is unregistered and must stay unpersisted
-                    throw new RunNotFoundException(runId);
-                }
-                RunMutation tx = null;
-                boolean committed = false;
+                ensureLease(holder);
+                tx = new RunMutation(holder, now(), nodeId);
+                body.accept(tx);
+                pump(tx);
+                tx.run.touch(tx.now);
+                requireLeaseBeforeCommit(holder);
                 try {
-                    ensureLease(holder);
-                    tx = new RunMutation(holder, now(), nodeId);
-                    body.accept(tx);
-                    pump(tx);
-                    tx.run.touch(tx.now);
-                    try {
-                        runStore.commit(tx.run, tx.events(), auditSink);
-                    } catch (RuntimeException e) {
-                        if (!holder.committed) {
-                            holder.discarded = true;
-                        }
-                        holder.dirty = true;
-                        throw e;
-                    }
-                    committed = true;
-                    holder.committed = true;
-                    holder.dirty = false;
-                    copy = tx.run.copy();
-                    at = tx.now;
-                } finally {
-                    if (!committed && tx != null) {
-                        tx.rollbackAuditChain();
-                        if (holder.dirty) {
-                            resyncAuditChain(tx.run);
-                        }
-                    }
+                    runStore.commit(tx.run, tx.events(), auditSink);
+                } catch (RuntimeException e) {
+                    throw commitFailed(holder, e);
+                }
+                committed = true;
+                holder.committed = true;
+                copy = tx.run.copy();
+                at = tx.now;
+            } finally {
+                if (!committed && tx != null && !holder.evicted) {
+                    tx.rollbackAuditChain();
+                }
+                if (!holder.evicted) {
                     releaseLeaseUnlessExecuting(holder);
                 }
-            } finally {
-                holder.lock.unlock();
             }
-            notifyListener(copy);
-            evictQuietly(at);
-            return copy;
+        } finally {
+            holder.lock.unlock();
         }
+        notifyListener(copy);
+        evictQuietly(at);
+        return copy;
     }
 
     // =========================================================================================== leases and store
@@ -1095,6 +1116,10 @@ public final class OrchestrationEngine implements AutoCloseable {
             if (leases.renew(held, config.leaseTtl())) {
                 return;
             }
+            if (!holder.releasePending) {
+                // this node was executing the run: what it holds in memory may be superseded
+                throw leaseLost(holder, "at the start of a mutation");
+            }
             holder.lease = null;
             holder.releasePending = false;
             LOG.warn("run lease lost (expired and taken over or released) runId={} node={}", runId, nodeId);
@@ -1117,6 +1142,89 @@ public final class OrchestrationEngine implements AutoCloseable {
         holder.releasePending = false;
         if (holder.committed) {
             refreshIfStale(holder);
+        }
+    }
+
+    /**
+     * Renews the lease right before a commit: when this node no longer holds it (another node took it over after it
+     * expired, or it is gone), the mutation must not be written.
+     *
+     * @throws RunLeasedElsewhereException when the lease is lost (the run was abandoned on this node)
+     */
+    private void requireLeaseBeforeCommit(RunRegistry.RunHolder holder) {
+        RunLease lease = holder.lease;
+        if (lease != null && !leases.renew(lease, config.leaseTtl())) {
+            throw leaseLost(holder, "right before a commit");
+        }
+    }
+
+    /**
+     * Handles a lost lease of a run this node was executing: nothing is written, the run is abandoned on this node
+     * (lease dropped without a release, in-flight attempts abandoned, registry copy evicted) and the returned exception
+     * names the new holder. Called under the run lock.
+     */
+    private RunLeasedElsewhereException leaseLost(RunRegistry.RunHolder holder, String when) {
+        String runId = holder.run.id();
+        String owner = leases.holderOf(runId).orElse("unknown");
+        LOG.warn("run lease lost {}; nothing is written, the run is abandoned on this node and reloaded on its next "
+                + "use runId={} node={} holder={}", when, runId, nodeId, owner);
+        abandon(holder, false);
+        return new RunLeasedElsewhereException(runId, owner);
+    }
+
+    /**
+     * Handles a failed commit: the store exception never reaches the caller as such. For a run that was never
+     * committed (a failed {@code start}) the holder is discarded; otherwise the mutation is discarded with the
+     * holder (in-flight attempts abandoned, lease released, registry copy evicted), so the next command reloads the
+     * stored state. Called under the run lock.
+     */
+    private InvalidRunStateException commitFailed(RunRegistry.RunHolder holder, RuntimeException failure) {
+        String runId = holder.run.id();
+        String cause = safeFailureText(failure.toString());
+        if (!holder.committed) {
+            holder.discarded = true;
+            return new InvalidRunStateException("run " + runId + " could not be persisted, so it was not created: "
+                    + cause, failure);
+        }
+        LOG.warn("run commit failed; the mutation is discarded and the run is reloaded from the store on its next use "
+                + "runId={} node={} error={}", runId, nodeId, cause);
+        abandon(holder, true);
+        return new InvalidRunStateException("run " + runId + " could not be persisted (" + cause + "); the change "
+                + "was discarded and the stored state of the run is used from now on; retry the command", failure);
+    }
+
+    /**
+     * Abandons the run on this node because its in-memory state can no longer be trusted: in-flight attempts are
+     * abandoned (not interrupted, since this may run on the thread of one of them; their results are discarded), the
+     * lease is dropped (released when {@code releaseLease}, so that recovery can take the run over) and the holder is
+     * evicted from the registry. Called under the run lock.
+     */
+    private void abandon(RunRegistry.RunHolder holder, boolean releaseLease) {
+        holder.inFlight.values().forEach(f -> f.future().cancel(false));
+        holder.inFlight.clear();
+        RunLease lease = holder.lease;
+        holder.lease = null;
+        holder.releasePending = false;
+        if (releaseLease && lease != null) {
+            tryRelease(lease);
+        }
+        registry.evictNow(holder);
+    }
+
+    /**
+     * Called by an attempt whose heartbeat reported a lost lease: unless the run was abandoned or its lease changed
+     * meanwhile, the lease is renewed once more and, when it is still lost, the run is abandoned on this node.
+     */
+    private void abandonIfLeaseLost(RunRegistry.RunHolder holder) {
+        holder.lock.lock();
+        try {
+            RunLease lease = holder.lease;
+            if (holder.evicted || lease == null || leases.renew(lease, config.leaseTtl())) {
+                return;
+            }
+            leaseLost(holder, "while an attempt was running");
+        } finally {
+            holder.lock.unlock();
         }
     }
 
@@ -1199,13 +1307,16 @@ public final class OrchestrationEngine implements AutoCloseable {
         return released;
     }
 
-    /** Renews the run's lease from an attempt's heartbeat (off the run lock). */
-    private void renewLeaseFromAttempt(String runId) {
-        RunRegistry.RunHolder holder = registry.find(runId);
-        RunLease lease = holder == null ? null : holder.lease;
-        if (lease != null && !leases.renew(lease, config.leaseTtl())) {
-            LOG.warn("run lease lost while an attempt was running runId={} node={}", runId, nodeId);
+    /**
+     * Renews the run's lease from an attempt's heartbeat (off the run lock). Returns false when the lease is lost (the
+     * renewal was refused, or the run was abandoned on this node), which ends the attempt with LEASE_LOST.
+     */
+    private boolean renewLeaseFromAttempt(RunRegistry.RunHolder holder) {
+        if (holder.evicted) {
+            return false;
         }
+        RunLease lease = holder.lease;
+        return lease == null || leases.renew(lease, config.leaseTtl());
     }
 
     private Duration heartbeatInterval() {
@@ -1230,7 +1341,6 @@ public final class OrchestrationEngine implements AutoCloseable {
         holder.inFlight.values().forEach(f -> f.future().cancel(false));
         holder.inFlight.clear();
         holder.run = fresh;
-        holder.dirty = false;
         LOG.info("run refreshed from the store runId={} auditSeq={} -> {} status={}", current.id(), current.auditSeq(),
                 fresh.auditSeq(), fresh.status());
     }
@@ -1453,9 +1563,10 @@ public final class OrchestrationEngine implements AutoCloseable {
         String stageId = def.id();
         StageAgent chosen = agent;
         String breaker = circuitProvider;
+        RunRegistry.RunHolder submittedTo = tx.holder;
         try {
-            var future = executor.submit(() -> runAttempt(runId, stageId, token, chosen, agentId, context,
-                    timeout, breaker));
+            var future = executor.submit(() -> runAttempt(submittedTo, runId, stageId, token, chosen, agentId,
+                    context, timeout, breaker));
             tx.holder.inFlight.put(stageId, new RunRegistry.InFlight(token, future));
         } catch (RejectedExecutionException e) {
             throw new IllegalStateException("engine is shutting down", e);
@@ -1474,19 +1585,31 @@ public final class OrchestrationEngine implements AutoCloseable {
                 .orElse(false);
     }
 
-    private void runAttempt(String runId, String stageId, long token, StageAgent agent, String agentId,
-                            StageContext context, Duration timeout, @Nullable String circuitProvider) {
+    private void runAttempt(RunRegistry.RunHolder submittedTo, String runId, String stageId, long token,
+                            StageAgent agent, String agentId, StageContext context, Duration timeout,
+                            @Nullable String circuitProvider) {
         StageExecutor.AttemptOutcome outcome = stageExecutor.execute(agent, context, timeout,
-                () -> renewLeaseFromAttempt(runId), heartbeatInterval());
+                () -> renewLeaseFromAttempt(submittedTo), heartbeatInterval());
         if (circuitProvider != null) {
             // recorded before the result is applied, so that a retry scheduled by it already sees the new state
             recordCircuitOutcome(circuitProvider, runId, stageId, outcome);
+        }
+        if (outcome != null && outcome.leaseLost()) {
+            // LEASE_LOST: like an interruption, nothing is applied or retried on this node
+            abandonIfLeaseLost(submittedTo);
+            LOG.warn("attempt abandoned: this node lost the run's lease runId={} stageId={} node={}", runId, stageId,
+                    nodeId);
+            return;
         }
         if (outcome == null || closed || Thread.currentThread().isInterrupted()) {
             return;
         }
         try {
-            mutate(runId, tx -> onAttemptFinished(tx, stageId, token, agentId, outcome));
+            if (mutateHolder(submittedTo, tx -> onAttemptFinished(tx, stageId, token, agentId, outcome)) == null) {
+                // the run was abandoned on this node (lease lost, failed commit) or evicted: the result is stale
+                LOG.debug("attempt result discarded: the run was abandoned on this node runId={} stageId={}", runId,
+                        stageId);
+            }
         } catch (RunNotFoundException e) {
             LOG.debug("attempt result discarded: the run is no longer registered runId={} stageId={}", runId,
                     stageId);
@@ -1499,7 +1622,7 @@ public final class OrchestrationEngine implements AutoCloseable {
                 return;
             }
             LOG.error("applying attempt result failed runId={} stageId={}", runId, stageId, e);
-            failAfterInternalError(runId, stageId, token, e);
+            failAfterInternalError(submittedTo, runId, stageId, token, e);
         }
     }
 
@@ -1511,11 +1634,12 @@ public final class OrchestrationEngine implements AutoCloseable {
     private void recordCircuitOutcome(String providerId, String runId, String stageId,
                                       StageExecutor.@Nullable AttemptOutcome outcome) {
         try {
-            if (outcome == null) {
-                circuits.recordInconclusive(providerId);
+            StageResult attempted = outcome == null ? null : outcome.result();
+            if (attempted == null) {
+                circuits.recordInconclusive(providerId); // cancelled, or LEASE_LOST
                 return;
             }
-            ProviderCircuits.Transition transition = switch (outcome.result()) {
+            ProviderCircuits.Transition transition = switch (attempted) {
                 case StageResult.Success s -> circuits.recordSuccess(providerId);
                 case StageResult.NeedsClarification c -> circuits.recordSuccess(providerId);
                 case StageResult.Failure f when ProviderCircuits.counts(f.failure().kind()) ->
@@ -1562,9 +1686,11 @@ public final class OrchestrationEngine implements AutoCloseable {
                 providerId);
     }
 
-    private void failAfterInternalError(String runId, String stageId, long token, RuntimeException error) {
+    private void failAfterInternalError(RunRegistry.RunHolder submittedTo, String runId, String stageId, long token,
+                                        RuntimeException error) {
         try {
-            mutate(runId, tx -> {
+            // only on the holder the attempt ran for: a run abandoned on this node is recovered from the store
+            mutateHolder(submittedTo, tx -> {
                 StageExecution exec = tx.run.stage(stageId);
                 if (exec.status() != StageStatus.RUNNING || exec.token() != token || !tx.run.status().isActive()) {
                     return;
@@ -1592,7 +1718,8 @@ public final class OrchestrationEngine implements AutoCloseable {
         }
         StageDefinition def = graph.stage(stageId);
         exec.setEndedAt(tx.now);
-        LlmTrace trace = switch (outcome.result()) {
+        StageResult result = Objects.requireNonNull(outcome.result(), "only completed attempts are applied");
+        LlmTrace trace = switch (result) {
             case StageResult.Success s -> s.llm();
             case StageResult.NeedsClarification c -> c.llm();
             case StageResult.Failure f -> f.failure().trace();
@@ -1614,7 +1741,7 @@ public final class OrchestrationEngine implements AutoCloseable {
             safeMetric(() -> metrics.llmCost(provider, def.role(), cost));
         }
         Map<String, Object> llmData = llmAuditData(trace, cost);
-        switch (outcome.result()) {
+        switch (result) {
             case StageResult.Success s -> handleSuccess(tx, def, exec, s, outcome, agentId, cost, llmData);
             case StageResult.NeedsClarification c -> handleClarification(tx, exec, c, agentId, llmData);
             case StageResult.Failure f -> handleFailure(tx, def, exec, f.failure());
@@ -2059,8 +2186,10 @@ public final class OrchestrationEngine implements AutoCloseable {
     }
 
     private void onRetryDue(String runId, String stageId, long token, Duration delay, int failedWakeUps) {
-        if (closed || !isCached(runId)) {
-            // an evicted run was not executing here, so its scheduled retry is obsolete (resume re-arms retries)
+        if (closed || (!isCached(runId) && !storedWakeUpTarget(runId, stageId, token))) {
+            // the run is not cached here and its stored state no longer waits for this retry (an idle run that was
+            // evicted, or one another node took over): the wake-up is obsolete (resume re-arms retries). A run that
+            // was dropped after a failed commit still waits for it in the store and is reloaded by the mutation.
             return;
         }
         try {
@@ -2071,10 +2200,23 @@ public final class OrchestrationEngine implements AutoCloseable {
                 }
                 submitAttempt(tx, graph.stage(stageId), exec);
             });
+        } catch (RunLeasedElsewhereException e) {
+            LOG.info("retry wake-up dropped: node {} executes the run runId={} stageId={}", e.holder(), runId,
+                    stageId);
         } catch (RuntimeException e) {
             if (!closed) {
                 onWakeUpFailed(runId, stageId, token, delay, failedWakeUps, e);
             }
+        }
+    }
+
+    /** Whether the stored state of a run still waits for this retry wake-up (true when the store cannot tell). */
+    private boolean storedWakeUpTarget(String runId, String stageId, long token) {
+        try {
+            return runStore.load(runId).map(run -> graph.contains(stageId)
+                    && isWakeUpTarget(run, run.stage(stageId), token)).orElse(false);
+        } catch (RuntimeException e) {
+            return true; // let the mutation decide (and fail, and be retried, while the store is unavailable)
         }
     }
 
@@ -2115,8 +2257,14 @@ public final class OrchestrationEngine implements AutoCloseable {
         }
     }
 
+    /**
+     * Whether a stage still waits for this retry wake-up: RETRY_SCHEDULED in an active run, with the wake-up's token,
+     * or with no token at all (tokens live in memory only: the run was reloaded from the store, for example after a
+     * failed commit dropped the in-memory copy, so the stored retry is adopted by the first wake-up that finds it).
+     */
     private static boolean isWakeUpTarget(Run run, StageExecution exec, long token) {
-        return exec.status() == StageStatus.RETRY_SCHEDULED && exec.token() == token && run.status().isActive();
+        return exec.status() == StageStatus.RETRY_SCHEDULED && (exec.token() == token || exec.token() == 0L)
+                && run.status().isActive();
     }
 
     // =========================================================================================== helpers

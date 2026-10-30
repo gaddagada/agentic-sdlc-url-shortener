@@ -133,21 +133,25 @@ class OrchestrationEngineAuditChainTest {
 
         failNext.set(1);
         assertThatThrownBy(() -> engine.approve(id, DESIGN, ALICE, "ok"))
-                .hasMessageContaining("database unavailable");
+                .isInstanceOf(InvalidRunStateException.class).hasMessageContaining("database unavailable");
         assertThat(harness.store.load(id).orElseThrow().stage(DESIGN).status())
                 .isEqualTo(StageStatus.AWAITING_APPROVAL);
 
-        // the in-memory run is ahead of the store (design approved, branches running); the next commits continue the
-        // chain from the last committed event: the lost events' sequence numbers are reused, nothing is re-sent
+        // the failed mutation was discarded: the next command works on the stored state and continues the chain from
+        // the last committed event (the lost events' sequence numbers are reused, nothing is re-sent)
+        engine.approve(id, DESIGN, ALICE, "ok, again");
         harness.awaitApproval(id, RELEASE);
         engine.approve(id, RELEASE, ALICE, null);
         Run done = harness.awaitStatus(id, RunStatus.COMPLETED);
         List<AuditEvent> events = harness.events(id);
         assertValidChain(events, done);
-        assertThat(events.get((int) committedSeq).type()).as("the first event after the failed commit")
-                .isNotEqualTo(AuditEventType.APPROVAL_GRANTED);
+        assertThat(events.get((int) committedSeq)).as("the first event after the failed commit").satisfies(e -> {
+            assertThat(e.type()).isEqualTo(AuditEventType.APPROVAL_GRANTED);
+            assertThat(e.seq()).isEqualTo(committedSeq + 1);
+            assertThat(e.data()).containsEntry("comment", "ok, again");
+        });
         assertThat(events).filteredOn(e -> e.type() == AuditEventType.APPROVAL_GRANTED)
-                .extracting(AuditEvent::stageId).containsExactly(RELEASE);
+                .extracting(AuditEvent::stageId).containsExactly(DESIGN, RELEASE);
     }
 
     @Test
@@ -187,9 +191,11 @@ class OrchestrationEngineAuditChainTest {
         assertThat(stored.updatedAt()).isEqualTo(before.updatedAt());
         assertThat(harness.audit.lastEvent(id)).as("no event of the failed commit").contains(last);
         Run live = engine.get(id);
+        assertThat(live.status()).as("the failed mutation was discarded in memory too").isEqualTo(RunStatus.WAITING_HUMAN);
         assertThat(live.auditSeq()).as("the chain head is restored").isEqualTo(last.seq());
         assertThat(live.auditHeadHash()).isEqualTo(last.hash());
 
+        engine.stop(id, ALICE, "pause, again");
         engine.resume(id, ALICE);
         harness.awaitApproval(id, DESIGN);
         engine.approve(id, DESIGN, ALICE, null);

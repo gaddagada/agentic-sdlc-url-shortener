@@ -31,10 +31,11 @@ public interface RunStore {
      * holds, so the hash chain continues without a gap, but the audit trail does not record that one mutation.
      * Override this method in a store that can persist both in one transaction.</p>
      *
-     * <p>When this method throws, the engine propagates the exception to the caller of the command and restores the
-     * run's audit sequence and chain head to the last committed event. The engine's in-memory run keeps the
-     * mutation, so it may be ahead of the store until the next successful commit, which persists the complete
-     * current state again (events of the failed commit are not re-sent).</p>
+     * <p>When this method throws, the engine reports an {@code InvalidRunStateException} (with this exception as its
+     * cause) to the caller of the command and discards the mutation: the run is dropped from the engine's in-memory
+     * registry, so the next command or read loads the stored state (whose audit chain head is resynchronized with
+     * the audit log). The engine renews the run's lease right before calling this method and never calls it once
+     * it lost the lease.</p>
      *
      * @param run the run (live aggregate; do not retain)
      * @param events the audit events of the mutation, in sequence order (may be empty)

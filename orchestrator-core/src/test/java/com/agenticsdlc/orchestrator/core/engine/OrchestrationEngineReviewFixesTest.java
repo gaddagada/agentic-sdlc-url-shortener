@@ -30,9 +30,11 @@ import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
 import com.agenticsdlc.orchestrator.core.artifact.RiskAssessment;
 import com.agenticsdlc.orchestrator.core.artifact.RiskLevel;
 import com.agenticsdlc.orchestrator.core.artifact.VerificationReport;
+import com.agenticsdlc.orchestrator.core.audit.AuditChain;
 import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
 import com.agenticsdlc.orchestrator.core.audit.AuditEventType;
 import com.agenticsdlc.orchestrator.core.audit.AuditSink;
+import com.agenticsdlc.orchestrator.core.audit.ChainVerification;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowDefinitions;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowGraph;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
@@ -373,13 +375,15 @@ class OrchestrationEngineReviewFixesTest {
     }
 
     @Test
-    void aCommitFailureOnALaterCommandReachesTheCallerAndTheStoreCatchesUpLater() {
+    void aCommitFailureIsAConflictThatDiscardsTheMutationAndTheNextCommandReloadsTheStoredRun() {
         FlakyStore store = new FlakyStore(harness.store);
         harness.storeDecorator(s -> store);
         CountDownLatch hold = new CountDownLatch(1);
+        AtomicInteger started = new AtomicInteger();
         for (AgentRole role : List.of(AgentRole.IMPLEMENTATION, AgentRole.TEST_DESIGN)) {
-            // nothing else commits while the assertions about the stale store run
+            // the attempts started by the failed approval must never reach the store
             harness.agent(new FakeAgent(role, (ctx, call) -> {
+                started.incrementAndGet();
                 hold.await(10, TimeUnit.SECONDS);
                 return StageResult.success(Payloads.forRole(role), "done");
             }));
@@ -387,20 +391,27 @@ class OrchestrationEngineReviewFixesTest {
         OrchestrationEngine engine = harness.start();
         String id = engine.start(REQUIREMENT, "later-failure", options(AutonomyLevel.GUIDED)).id();
         harness.awaitApproval(id, DESIGN);
-        try {
-            store.failNextCommits(1);
-            assertThatThrownBy(() -> engine.approve(id, DESIGN, ALICE, "ok"))
-                    .hasMessageContaining("database unavailable");
-            assertThat(engine.get(id).stage(DESIGN).status()).as("in-memory state is ahead of the store")
-                    .isEqualTo(StageStatus.SUCCEEDED);
-            assertThat(harness.store.load(id).orElseThrow().stage(DESIGN).status())
-                    .isEqualTo(StageStatus.AWAITING_APPROVAL);
-        } finally {
-            hold.countDown();
-        }
+        long eventsBefore = harness.events(id).size();
+
+        store.failNextCommits(1);
+        assertThatThrownBy(() -> engine.approve(id, DESIGN, ALICE, "ok"))
+                .isExactlyInstanceOf(InvalidRunStateException.class)
+                .hasMessageContaining("could not be persisted").hasMessageContaining("database unavailable")
+                .hasCauseInstanceOf(IllegalStateException.class);
+        assertThat(engine.isCached(id)).as("the stale in-memory copy was dropped").isFalse();
+        assertThat(engine.get(id).stage(DESIGN).status()).as("reads show the stored state")
+                .isEqualTo(StageStatus.AWAITING_APPROVAL);
+        hold.countDown();
+        await().atMost(EngineHarness.TIMEOUT).until(() -> started.get() == 2);
+        await().during(Duration.ofMillis(200)).atMost(EngineHarness.TIMEOUT)
+                .until(() -> harness.events(id).size() == eventsBefore);
+        assertThat(harness.store.load(id).orElseThrow().stage(DESIGN).status())
+                .as("the abandoned attempts committed nothing").isEqualTo(StageStatus.AWAITING_APPROVAL);
+
+        engine.approve(id, DESIGN, ALICE, "ok, again");
         harness.awaitApproval(id, RELEASE);
-        await().atMost(EngineHarness.TIMEOUT).until(() ->
-                harness.store.load(id).orElseThrow().stage(DESIGN).status() == StageStatus.SUCCEEDED);
+        ChainVerification chain = AuditChain.verify(harness.events(id));
+        assertThat(chain.valid()).as(chain.summary()).isTrue();
     }
 
     // ------------------------------------------------------------------ F6 typed state exception

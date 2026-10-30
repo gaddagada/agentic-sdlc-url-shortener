@@ -22,6 +22,7 @@ import com.agenticsdlc.orchestrator.core.agent.StageResult;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
 import com.agenticsdlc.orchestrator.core.audit.AuditChain;
 import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
+import com.agenticsdlc.orchestrator.core.audit.AuditSink;
 import com.agenticsdlc.orchestrator.core.audit.AuditEventType;
 import com.agenticsdlc.orchestrator.core.audit.ChainVerification;
 import com.agenticsdlc.orchestrator.core.audit.InMemoryAuditSink;
@@ -292,6 +293,10 @@ class OrchestrationEngineLeaseTest {
         final AtomicInteger releaseCalls = new AtomicInteger();
         volatile boolean dropReleases;
         volatile boolean reclaimSupported = true;
+        /** Renewals are refused (the lease is lost) without anyone else taking it. */
+        volatile boolean failRenewals;
+        /** The next renewal finds the lease taken over by this node id (and is refused). */
+        volatile String stealOnRenewFor;
 
         FlakyLeases(InMemoryRunLeaseProvider delegate) {
             this.delegate = delegate;
@@ -304,7 +309,14 @@ class OrchestrationEngineLeaseTest {
 
         @Override
         public boolean renew(RunLease lease, Duration ttl) {
-            return delegate.renew(lease, ttl);
+            String thief = stealOnRenewFor;
+            if (thief != null) {
+                stealOnRenewFor = null;
+                delegate.release(lease);
+                delegate.tryAcquire(lease.runId(), thief, ttl);
+                return false;
+            }
+            return !failRenewals && delegate.renew(lease, ttl);
         }
 
         @Override
@@ -459,6 +471,134 @@ class OrchestrationEngineLeaseTest {
         }
         ChainVerification chain = AuditChain.verify(events(id));
         assertThat(chain.valid()).as(chain.summary()).isTrue();
+    }
+
+    /** Counts the commits of one node (the store itself is shared). */
+    private static RunStore counting(RunStore store, AtomicInteger commits) {
+        return new RunStore() {
+            @Override
+            public void commit(Run run, List<AuditEvent> events, AuditSink auditSink) {
+                commits.incrementAndGet();
+                store.commit(run, events, auditSink);
+            }
+
+            @Override
+            public void save(Run run) {
+                store.save(run);
+            }
+
+            @Override
+            public Optional<Run> load(String runId) {
+                return store.load(runId);
+            }
+
+            @Override
+            public List<Run> loadAll() {
+                return store.loadAll();
+            }
+        };
+    }
+
+    @Test
+    void aNodeWhoseLeaseExpiredAndWasTakenOverNeverCommitsTheResultOfItsAttempt() {
+        AtomicInteger commitsOfA = new AtomicInteger();
+        CountDownLatch slow = new CountDownLatch(1);
+        nodeA.storeDecorator(s -> counting(s, commitsOfA)).agent(blockingImplementation(slow));
+        OrchestrationEngine a = nodeA.start();
+        OrchestrationEngine b = nodeB.start();
+        String id = a.start(REQUIREMENT, "takeover", RunOptions.defaults().withAutonomy(AutonomyLevel.FULL_AUTO)).id();
+        nodeA.awaitStage(id, IMPLEMENT, StageStatus.RUNNING);
+
+        clock.advance(TTL.plusSeconds(1)); // node A's lease expires (its next heartbeat is 20 s of real time away)
+        assertThat(b.recoverInterruptedCount()).as("node B takes the run over and commits").isEqualTo(1);
+        List<AuditEvent> afterTakeover = events(id);
+        int commitsBefore = commitsOfA.get();
+
+        slow.countDown(); // node A's attempt finishes only now
+        await().atMost(10, TimeUnit.SECONDS).until(() -> !a.isCached(id));
+        await().during(300, TimeUnit.MILLISECONDS).atMost(10, TimeUnit.SECONDS)
+                .until(() -> events(id).size() == afterTakeover.size());
+        assertThat(commitsOfA.get()).as("node A committed nothing after losing its lease").isEqualTo(commitsBefore);
+        assertThat(events(id)).isEqualTo(afterTakeover);
+        assertThat(leases.holderOf(id)).isEmpty();
+        ChainVerification chain = AuditChain.verify(events(id));
+        assertThat(chain.valid()).as(chain.summary()).isTrue();
+
+        b.resume(id, ALICE);
+        nodeB.awaitApproval(id, RELEASE);
+        b.approve(id, RELEASE, ALICE, "shipped by node b");
+        nodeB.awaitStatus(id, RunStatus.COMPLETED);
+        assertThat(nodesOf(events(id), AuditEventType.STAGE_STARTED, IMPLEMENT)).containsExactly("node-a", "node-b");
+        ChainVerification done = AuditChain.verify(events(id));
+        assertThat(done.valid()).as(done.summary()).isTrue();
+    }
+
+    @Test
+    void aLeaseTakenOverBetweenTheMutationAndItsCommitWritesNothing() {
+        AtomicInteger commitsOfA = new AtomicInteger();
+        FlakyLeases stealing = new FlakyLeases(leases);
+        try (EngineHarness stolenA = new EngineHarness(store, audit).storeDecorator(s -> counting(s, commitsOfA))
+                .config(b -> b.nodeId("node-a").clock(clock).leaseProvider(stealing).leaseTtl(TTL))) {
+            OrchestrationEngine a = stolenA.start();
+            String id = a.start(REQUIREMENT, "stolen", RunOptions.defaults()).id();
+            stolenA.awaitApproval(id, DESIGN);
+            List<AuditEvent> before = events(id);
+            int commitsBefore = commitsOfA.get();
+
+            stealing.stealOnRenewFor = "node-b";
+            assertThatThrownBy(() -> a.approve(id, DESIGN, ALICE, "approved on node a"))
+                    .isInstanceOfSatisfying(RunLeasedElsewhereException.class,
+                            e -> assertThat(e.holder()).isEqualTo("node-b"));
+            assertThat(a.isCached(id)).as("the run is abandoned on node a").isFalse();
+            await().during(300, TimeUnit.MILLISECONDS).atMost(10, TimeUnit.SECONDS)
+                    .until(() -> events(id).size() == before.size());
+            assertThat(commitsOfA.get()).as("neither the approval nor the attempts it started were committed")
+                    .isEqualTo(commitsBefore);
+            assertThat(store.load(id).orElseThrow().stage(DESIGN).status()).isEqualTo(StageStatus.AWAITING_APPROVAL);
+
+            OrchestrationEngine b = nodeB.start();
+            b.approve(id, DESIGN, ALICE, "approved on node b");
+            nodeB.awaitApproval(id, RELEASE);
+            ChainVerification chain = AuditChain.verify(events(id));
+            assertThat(chain.valid()).as(chain.summary()).isTrue();
+        }
+    }
+
+    @Test
+    void anAttemptWhoseHeartbeatFindsTheLeaseLostIsInterruptedAndNothingIsWritten() {
+        AtomicInteger commitsOfA = new AtomicInteger();
+        java.util.concurrent.atomic.AtomicBoolean interrupted = new java.util.concurrent.atomic.AtomicBoolean();
+        CountDownLatch never = new CountDownLatch(1);
+        FlakyLeases losing = new FlakyLeases(leases);
+        try (EngineHarness lostA = new EngineHarness(store, audit).storeDecorator(s -> counting(s, commitsOfA))
+                .config(b -> b.nodeId("node-a").clock(clock).leaseProvider(losing)
+                        .leaseTtl(Duration.ofMillis(300)))) {
+            lostA.agent(new FakeAgent(AgentRole.IMPLEMENTATION, (ctx, call) -> {
+                try {
+                    never.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    interrupted.set(true);
+                    throw e;
+                }
+                return StageResult.success(Payloads.forRole(AgentRole.IMPLEMENTATION), "too late");
+            }));
+            OrchestrationEngine a = lostA.start();
+            String id = a.start(REQUIREMENT, "heartbeat-lost", RunOptions.defaults()
+                    .withAutonomy(AutonomyLevel.FULL_AUTO)).id();
+            lostA.awaitStage(id, IMPLEMENT, StageStatus.RUNNING);
+            List<AuditEvent> before = events(id);
+            int commitsBefore = commitsOfA.get();
+
+            losing.failRenewals = true; // the next heartbeat (every 100 ms) finds the lease lost
+            await().atMost(10, TimeUnit.SECONDS).until(() -> !a.isCached(id) && interrupted.get());
+            await().during(300, TimeUnit.MILLISECONDS).atMost(10, TimeUnit.SECONDS)
+                    .until(() -> events(id).size() == before.size());
+            assertThat(commitsOfA.get()).as("LEASE_LOST is an interruption: nothing applied, nothing retried")
+                    .isEqualTo(commitsBefore);
+            assertThat(store.load(id).orElseThrow().stage(IMPLEMENT).status()).isEqualTo(StageStatus.RUNNING);
+        } finally {
+            never.countDown();
+        }
     }
 
     @Test

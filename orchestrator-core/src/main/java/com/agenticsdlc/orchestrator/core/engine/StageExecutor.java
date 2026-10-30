@@ -19,6 +19,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -73,11 +74,22 @@ final class StageExecutor {
     /**
      * Outcome of an attempt.
      *
-     * @param result the result
+     * @param result the result, or null for a {@link #leaseLost() LEASE_LOST} outcome
      * @param latencyMs agent latency
      * @param context the context the agent was given
+     * @param leaseLost LEASE_LOST: the heartbeat found that this node lost the run's lease while the agent ran; the
+     *                  agent was interrupted and the attempt must be treated like an interruption (nothing is applied
+     *                  or retried on this node)
      */
-    record AttemptOutcome(StageResult result, long latencyMs, StageContext context) {
+    record AttemptOutcome(@Nullable StageResult result, long latencyMs, StageContext context, boolean leaseLost) {
+
+        AttemptOutcome(StageResult result, long latencyMs, StageContext context) {
+            this(result, latencyMs, context, false);
+        }
+
+        static AttemptOutcome leaseLost(StageContext context, long latencyMs) {
+            return new AttemptOutcome(null, latencyMs, context, true);
+        }
     }
 
     private final WorkflowGraph graph;
@@ -291,17 +303,18 @@ final class StageExecutor {
     /**
      * Executes an attempt like {@link #execute(StageAgent, StageContext, Duration)}, calling {@code heartbeat} every
      * {@code heartbeatInterval} while the agent runs (the engine renews the run's lease with it). A heartbeat that
-     * throws is logged and does not affect the attempt.
+     * throws is logged and does not affect the attempt; a heartbeat that returns false (this node lost the run's
+     * lease) interrupts the agent and ends the attempt with a {@link AttemptOutcome#leaseLost() LEASE_LOST} outcome.
      *
      * @param agent the agent
      * @param context the context
      * @param timeout attempt timeout
-     * @param heartbeat called periodically while waiting, or null
+     * @param heartbeat called periodically while waiting (false: the lease is lost), or null
      * @param heartbeatInterval interval between heartbeats (positive)
      * @return the outcome, or null when the attempt was cancelled or the executor rejected it
      */
     @Nullable AttemptOutcome execute(StageAgent agent, StageContext context, Duration timeout,
-                                     @Nullable Runnable heartbeat, Duration heartbeatInterval) {
+                                     @Nullable BooleanSupplier heartbeat, Duration heartbeatInterval) {
         long start = System.nanoTime();
         Future<StageResult> inner;
         try {
@@ -326,8 +339,9 @@ final class StageExecutor {
                             TimeUnit.NANOSECONDS);
                     break;
                 } catch (TimeoutException slice) {
-                    if (heartbeat != null && timeoutNanos - (System.nanoTime() - start) > 0) {
-                        beat(heartbeat);
+                    if (heartbeat != null && timeoutNanos - (System.nanoTime() - start) > 0 && !beat(heartbeat)) {
+                        inner.cancel(true);
+                        return AttemptOutcome.leaseLost(context, (System.nanoTime() - start) / 1_000_000L);
                     }
                 }
             }
@@ -352,11 +366,13 @@ final class StageExecutor {
         return new AttemptOutcome(result, latencyMs, context);
     }
 
-    private static void beat(Runnable heartbeat) {
+    /** Runs a heartbeat; returns false only when it reports a lost lease (a failing heartbeat proves nothing). */
+    private static boolean beat(BooleanSupplier heartbeat) {
         try {
-            heartbeat.run();
+            return heartbeat.getAsBoolean();
         } catch (RuntimeException e) {
             LOG.warn("attempt heartbeat failed error={}", e.toString());
+            return true;
         }
     }
 
