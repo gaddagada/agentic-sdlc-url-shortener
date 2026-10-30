@@ -67,6 +67,17 @@ final class RunRegistry {
     }
 
     /**
+     * Unregisters a run (used when the creation of a new run could not be committed, so that no run that was
+     * never persisted stays visible).
+     *
+     * @param runId run id
+     * @return the removed holder, or null when the run was not registered
+     */
+    @Nullable RunHolder remove(String runId) {
+        return holders.remove(runId);
+    }
+
+    /**
      * Returns the holder of a run, loading it from the store if needed.
      *
      * @param runId run id

@@ -33,6 +33,7 @@ import com.agenticsdlc.orchestrator.core.model.RunStatus;
 import com.agenticsdlc.orchestrator.core.model.StageStatus;
 import com.agenticsdlc.orchestrator.core.policy.PolicyEngine;
 import com.agenticsdlc.orchestrator.core.port.InMemoryRunStore;
+import com.agenticsdlc.orchestrator.core.port.RunStore;
 
 /**
  * Builds an engine with fake agents, in-memory ports and immediate retries, and offers Awaitility helpers.
@@ -51,6 +52,7 @@ public final class EngineHarness implements AutoCloseable {
     private UnaryOperator<EngineConfig.Builder> configCustomizer = b -> b;
     private PolicyEngine policy = PolicyEngine.withDefaultRules();
     private MetricsRecorder metrics = NoopMetricsRecorder.INSTANCE;
+    private UnaryOperator<RunStore> storeDecorator = s -> s;
     private final List<OrchestrationEngine> engines = new ArrayList<>();
     private OrchestrationEngine engine;
 
@@ -91,6 +93,12 @@ public final class EngineHarness implements AutoCloseable {
         return this;
     }
 
+    /** Wraps the in-memory store handed to the engine (for example to inject persistence failures). */
+    public EngineHarness storeDecorator(UnaryOperator<RunStore> decorator) {
+        this.storeDecorator = decorator;
+        return this;
+    }
+
     public EngineHarness config(UnaryOperator<EngineConfig.Builder> customizer) {
         UnaryOperator<EngineConfig.Builder> previous = configCustomizer;
         configCustomizer = b -> customizer.apply(previous.apply(b));
@@ -112,7 +120,7 @@ public final class EngineHarness implements AutoCloseable {
         EngineConfig config = configCustomizer.apply(EngineConfig.builder().backoffScale(0)
                 .compensationHandler(handler)).build();
         engine = new OrchestrationEngine(new WorkflowGraph(definition), AgentRegistry.of(agents.values()), policy,
-                store, audit, metrics, config);
+                storeDecorator.apply(store), audit, metrics, config);
         engines.add(engine);
         return engine;
     }

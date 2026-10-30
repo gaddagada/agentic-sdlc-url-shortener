@@ -40,6 +40,20 @@ public final class InMemoryAuditSink implements AuditSink {
         }
     }
 
+    @Override
+    public List<AuditEvent> forRun(String runId, long afterSeq, int limit) {
+        if (limit <= 0) {
+            throw new IllegalArgumentException("limit must be positive: " + limit);
+        }
+        List<AuditEvent> list = eventsByRun.get(runId);
+        if (list == null) {
+            return List.of();
+        }
+        synchronized (list) {
+            return list.stream().filter(e -> e.seq() > afterSeq).limit(limit).toList();
+        }
+    }
+
     /**
      * Returns all events of a run whose type is {@code type}.
      *

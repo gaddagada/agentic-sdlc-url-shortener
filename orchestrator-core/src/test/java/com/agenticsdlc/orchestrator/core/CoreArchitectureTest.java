@@ -9,8 +9,14 @@ import static com.tngtech.archunit.lang.syntax.ArchRuleDefinition.noClasses;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.Set;
+
 import com.agenticsdlc.orchestrator.core.agent.AgentRole;
+import com.agenticsdlc.orchestrator.core.model.Run;
+import com.agenticsdlc.orchestrator.core.model.StageExecution;
+import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.JavaClasses;
+import com.tngtech.archunit.core.domain.JavaMethodCall;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import com.tngtech.archunit.core.importer.ImportOption;
 import com.tngtech.archunit.library.GeneralCodingRules;
@@ -65,6 +71,21 @@ class CoreArchitectureTest {
                 .should().dependOnClassesThat().resideInAPackage("..core.engine..").check(classes);
         noClasses().that().resideInAPackage("..core.agent.llm..").should().dependOnClassesThat()
                 .resideInAPackage("..core.agent.deterministic..").check(classes);
+    }
+
+    @Test
+    void policyRulesNeverMutateTheRun() {
+        // Policy contexts carry a copy of the run; this keeps rules read-only by construction as well.
+        Set<String> nonVoidMutators = Set.of("incrementPlanVersion", "removeArtifact", "nextArtifactVersion",
+                "recordFaultInjection", "nextAuditSeq");
+        DescribedPredicate<JavaMethodCall> runMutator = DescribedPredicate.describe(
+                "a mutator of Run or StageExecution", call ->
+                        (call.getTargetOwner().isEquivalentTo(Run.class)
+                                || call.getTargetOwner().isEquivalentTo(StageExecution.class))
+                                && (call.getTarget().getRawReturnType().isEquivalentTo(void.class)
+                                || nonVoidMutators.contains(call.getName())));
+        noClasses().that().resideInAPackage("..core.policy..").should().callMethodWhere(runMutator)
+                .because("policy rules evaluate a read-only view of the run").check(classes);
     }
 
     @Test

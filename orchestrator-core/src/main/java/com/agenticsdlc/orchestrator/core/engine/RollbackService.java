@@ -26,8 +26,14 @@ import com.agenticsdlc.orchestrator.core.model.StageStatus;
 
 /**
  * Saga-style rollback: executes compensations registered after the failed stage's checkpoint in reverse
- * order, restores accepted artifact versions and the plan version from the checkpoint, resets stages whose
- * accepted artifact was rolled back, and always ends in a safe-stop.
+ * order, restores accepted artifact versions from the checkpoint, resets stages whose accepted artifact was
+ * rolled back, and always ends in a safe-stop.
+ *
+ * <p>Only checkpoints of the current plan version are used: a checkpoint taken before a re-plan describes a plan
+ * that was superseded, and restoring it would move the plan version (and accepted artifacts) backwards. When the
+ * failed stage has no checkpoint in the current plan version (for example its entry gate denied it before it
+ * ever started in this plan), the rollback behaves as without a checkpoint: every registered compensation is
+ * executed and accepted versions are left as they are.</p>
  */
 final class RollbackService {
 
@@ -57,7 +63,12 @@ final class RollbackService {
     void rollback(RunMutation tx, String stageId, String reason, HaltReason haltReason) {
         Run run = tx.run;
         Actor system = Actor.system();
-        Optional<Checkpoint> checkpoint = run.latestCheckpointFor(stageId);
+        Optional<Checkpoint> checkpoint = latestCheckpointOfCurrentPlan(run, stageId);
+        Optional<Checkpoint> latest = run.latestCheckpointFor(stageId);
+        if (latest.isPresent() && checkpoint.isEmpty()) {
+            LOG.info("ignoring checkpoint of a superseded plan runId={} stageId={} checkpointPlanVersion={} "
+                    + "planVersion={}", run.id(), stageId, latest.get().planVersion(), run.planVersion());
+        }
         Set<String> before = checkpoint.map(c -> Set.copyOf(c.compensationIds())).orElse(Set.of());
         List<Compensation> toRun = new ArrayList<>();
         for (Compensation c : run.compensations()) {
@@ -71,7 +82,6 @@ final class RollbackService {
         List<String> resetStages = new ArrayList<>();
         if (checkpoint.isPresent()) {
             run.replaceAcceptedVersions(checkpoint.get().acceptedVersions());
-            run.setPlanVersion(checkpoint.get().planVersion());
             for (StageExecution exec : run.stages()) {
                 String id = exec.stageId();
                 if (id.equals(stageId)) {
@@ -96,6 +106,8 @@ final class RollbackService {
                 "rolled back to the checkpoint of " + stageId + "; " + toRun.size() + " compensations executed"
                         + (compensationsOk ? "" : " (with failures)"),
                 RunMutation.data("checkpointId", checkpoint.map(Checkpoint::id).orElse(null),
+                        "ignoredCheckpointId", latest.filter(c -> checkpoint.isEmpty()).map(Checkpoint::id)
+                                .orElse(null),
                         "compensations", toRun.stream().map(Compensation::id).toList(),
                         "restoredAcceptedVersions", run.acceptedVersions(), "resetStages", resetStages,
                         "compensationsSucceeded", compensationsOk));
@@ -105,6 +117,12 @@ final class RollbackService {
             control.safeStop(tx, HaltReason.ROLLBACK_FAILED, "rollback after " + haltReason + " (" + reason
                     + ") had failing compensations", system);
         }
+    }
+
+    private static Optional<Checkpoint> latestCheckpointOfCurrentPlan(Run run, String stageId) {
+        return run.checkpoints().reversed().stream()
+                .filter(c -> c.stageId().equals(stageId) && c.planVersion() == run.planVersion())
+                .findFirst();
     }
 
     /**

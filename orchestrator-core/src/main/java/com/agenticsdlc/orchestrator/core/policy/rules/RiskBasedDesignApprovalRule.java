@@ -3,7 +3,9 @@ package com.agenticsdlc.orchestrator.core.policy.rules;
 import java.util.Optional;
 
 import com.agenticsdlc.orchestrator.core.artifact.DesignSpec;
+import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis;
 import com.agenticsdlc.orchestrator.core.artifact.RiskAssessment;
+import com.agenticsdlc.orchestrator.core.artifact.RiskFloor;
 import com.agenticsdlc.orchestrator.core.artifact.RiskLevel;
 import com.agenticsdlc.orchestrator.core.artifact.Severity;
 import com.agenticsdlc.orchestrator.core.model.AutonomyLevel;
@@ -14,7 +16,9 @@ import com.agenticsdlc.orchestrator.core.policy.Verdict;
 
 /**
  * {@code GOV-001 RiskBasedDesignApproval} (EXIT of the design stage): requires design approval when the
- * autonomy is GUIDED and the risk is at least MEDIUM, or when the autonomy is STRICT.
+ * autonomy is GUIDED and the risk is at least MEDIUM, or when the autonomy is STRICT. The risk is the run's
+ * current risk merged with the candidate design's reported risk and with the engine's deterministic
+ * {@link RiskFloor} of the candidate design (so a design that under-reports its risk is still gated).
  */
 public final class RiskBasedDesignApprovalRule implements PolicyRule {
 
@@ -44,10 +48,11 @@ public final class RiskBasedDesignApprovalRule implements PolicyRule {
         if (design == null) {
             return Optional.empty();
         }
-        RiskAssessment risk = ctx.runSnapshot().currentRisk();
+        RiskAssessment risk = ctx.run().currentRisk();
         if (design.risk() != null) {
             risk = risk.merge(design.risk());
         }
+        risk = risk.merge(RiskFloor.assess(design, ctx.run().acceptedPayload(ImpactAnalysis.class).orElse(null)));
         String factors = risk.factors().isEmpty() ? "" : " (" + String.join(", ", risk.factors()) + ")";
         if (ctx.autonomy() == AutonomyLevel.STRICT) {
             return Optional.of(new PolicyFinding(ID, Severity.MEDIUM, Verdict.REQUIRE_APPROVAL,

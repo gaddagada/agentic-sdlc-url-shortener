@@ -18,8 +18,10 @@ import org.jspecify.annotations.Nullable;
 import com.agenticsdlc.orchestrator.core.artifact.Artifact;
 import com.agenticsdlc.orchestrator.core.artifact.ArtifactPayload;
 import com.agenticsdlc.orchestrator.core.artifact.DesignSpec;
+import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.RiskAssessment;
+import com.agenticsdlc.orchestrator.core.artifact.RiskFloor;
 import com.agenticsdlc.orchestrator.core.graph.StageDefinition;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowGraph;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
@@ -71,6 +73,7 @@ public final class Run {
     private @Nullable String firstFailureStageId;
     private @Nullable Instant recoveredAt;
     private long auditSeq;
+    private final LinkedHashMap<String, Integer> lastArtifactVersions;
 
     private Run(String id, String workflowId, int workflowVersion, String scenarioKey, String requirement,
                 RunOptions options, RunBudget budget, Instant createdAt) {
@@ -96,6 +99,7 @@ public final class Run {
         this.humanWaitIntervals = new ArrayList<>();
         this.policyFindings = new ArrayList<>();
         this.injectedFaults = new LinkedHashMap<>();
+        this.lastArtifactVersions = new LinkedHashMap<>();
     }
 
     /**
@@ -153,6 +157,7 @@ public final class Run {
         copy.firstFailureStageId = firstFailureStageId;
         copy.recoveredAt = recoveredAt;
         copy.auditSeq = auditSeq;
+        copy.lastArtifactVersions.putAll(lastArtifactVersions);
         return copy;
     }
 
@@ -185,7 +190,7 @@ public final class Run {
                 budget, status, haltReason, haltDetail, planVersion, createdAt, startedAt, endedAt, updatedAt,
                 stageSnapshots, artifactSnapshots, acceptedVersions, approvals, clarification,
                 new ArrayList<>(checkpoints), compensations, counters, humanWaitIntervals, policyFindings,
-                injectedFaults, firstFailureAt, firstFailureStageId, recoveredAt, auditSeq);
+                injectedFaults, firstFailureAt, firstFailureStageId, recoveredAt, auditSeq, lastArtifactVersions);
     }
 
     /**
@@ -256,6 +261,11 @@ public final class Run {
         run.firstFailureStageId = snapshot.firstFailureStageId();
         run.recoveredAt = snapshot.recoveredAt();
         run.auditSeq = snapshot.auditSeq();
+        snapshot.lastArtifactVersions().forEach((stageId, version) -> {
+            if (run.stages.containsKey(stageId)) {
+                run.lastArtifactVersions.put(stageId, version);
+            }
+        });
         return run;
     }
 
@@ -397,7 +407,9 @@ public final class Run {
     }
 
     /**
-     * Returns the accepted artifact of a stage.
+     * Returns the accepted artifact of a stage. An artifact that awaits an exit-gate approval is not accepted
+     * yet: while the stage is AWAITING_APPROVAL this returns the previously accepted version (or empty), and the
+     * version under review is {@code stage(stageId).pendingApproval().artifactVersion()}.
      *
      * @param stageId stage id
      * @return the accepted artifact
@@ -441,6 +453,16 @@ public final class Run {
     public int maxArtifactVersion(String stageId) {
         return artifacts.stream().filter(a -> a.stageId().equals(stageId)).mapToInt(Artifact::version).max()
                 .orElse(0);
+    }
+
+    /**
+     * Returns the highest artifact version ever assigned per stage, including versions of artifacts that were
+     * later removed from the history (denied by an exit gate).
+     *
+     * @return stage id to last assigned version (unmodifiable)
+     */
+    public Map<String, Integer> lastArtifactVersions() {
+        return Collections.unmodifiableMap(lastArtifactVersions);
     }
 
     /** @return all approvals, oldest first (unmodifiable) */
@@ -535,7 +557,10 @@ public final class Run {
     }
 
     /**
-     * Returns the run's current risk: the preliminary requirement risk merged with the accepted design risk.
+     * Returns the run's current risk: the preliminary requirement risk merged with the accepted design risk
+     * (both agent-reported) and with the engine's deterministic {@link RiskFloor} computed from the accepted
+     * design and impact analysis. The level is the highest of these; the floor's factors are prefixed
+     * {@value RiskFloor#FACTOR_PREFIX}, so an agent cannot lower the run's risk by under-reporting it.
      *
      * @return the risk assessment (LOW when nothing is accepted yet)
      */
@@ -549,7 +574,7 @@ public final class Run {
         if (design.isPresent() && design.get().risk() != null) {
             risk = risk.merge(design.get().risk());
         }
-        return risk;
+        return risk.merge(RiskFloor.assess(design.orElse(null), acceptedPayload(ImpactAnalysis.class).orElse(null)));
     }
 
     /**
@@ -691,6 +716,19 @@ public final class Run {
      */
     public boolean removeArtifact(String artifactId) {
         return artifacts.removeIf(a -> a.id().equals(artifactId));
+    }
+
+    /**
+     * Reserves the next artifact version of a stage. The counter is persisted in the snapshot and never goes
+     * back, so the version of an artifact removed from the history (denied by an exit gate) is never reused.
+     *
+     * @param stageId stage id
+     * @return the reserved version (1 for the first artifact of the stage)
+     */
+    public int nextArtifactVersion(String stageId) {
+        int next = Math.max(lastArtifactVersions.getOrDefault(stageId, 0), maxArtifactVersion(stageId)) + 1;
+        lastArtifactVersions.put(stageId, next);
+        return next;
     }
 
     /**

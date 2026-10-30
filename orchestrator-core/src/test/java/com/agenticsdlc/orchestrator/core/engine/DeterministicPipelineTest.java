@@ -118,7 +118,9 @@ class DeterministicPipelineTest {
             assertThat(c.name()).isEqualTo("LinkController");
             assertThat(c.nature()).isEqualTo(ImpactAnalysis.ChangeNature.EXTEND);
         });
-        DesignSpec design = atDesign.acceptedPayload(DesignSpec.class).orElseThrow();
+        assertThat(atDesign.acceptedPayload(DesignSpec.class)).as("not accepted before approval").isEmpty();
+        DesignSpec design = atDesign.artifact("design", atDesign.stage("design").pendingApproval().artifactVersion())
+                .orElseThrow().payloadAs(DesignSpec.class);
         assertThat(design.apiChanges()).extracting(a -> a.method() + " " + a.path())
                 .containsExactly("POST /api/v1/links/bulk");
         assertThat(design.dataModelChanges()).isEmpty();

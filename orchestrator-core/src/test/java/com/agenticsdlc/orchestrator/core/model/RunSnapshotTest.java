@@ -15,14 +15,18 @@ import com.agenticsdlc.orchestrator.core.agent.AgentRole;
 import com.agenticsdlc.orchestrator.core.agent.CompensationRequest;
 import com.agenticsdlc.orchestrator.core.agent.StageResult;
 import com.agenticsdlc.orchestrator.core.artifact.Artifact;
+import com.agenticsdlc.orchestrator.core.artifact.RiskLevel;
 import com.agenticsdlc.orchestrator.core.engine.OrchestrationEngine;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowDefinition;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowDefinitions;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowGraph;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
+import com.agenticsdlc.orchestrator.core.testsupport.Contexts;
 import com.agenticsdlc.orchestrator.core.testsupport.EngineHarness;
 import com.agenticsdlc.orchestrator.core.testsupport.FakeAgent;
 import com.agenticsdlc.orchestrator.core.testsupport.Payloads;
+
+import tools.jackson.databind.node.ObjectNode;
 
 class RunSnapshotTest {
 
@@ -114,6 +118,22 @@ class RunSnapshotTest {
                 WorkflowDefinitions.defaultSdlc().stages().subList(0, 3)));
         assertThatThrownBy(() -> Run.fromSnapshot(snapshot, smaller)).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("unknown stage");
+    }
+
+    @Test
+    void snapshotsWrittenBeforeTheVersionCounterStillReserveFreshVersions() {
+        Run run = Run.create("r", GRAPH, "s", "req", RunOptions.defaults(), Instant.parse("2026-01-01T00:00:00Z"));
+        run.addArtifact(Contexts.artifact(Payloads.design(RiskLevel.LOW)));
+        ObjectNode legacy = (ObjectNode) codec.readTree(codec.toJson(run.toSnapshot()));
+        assertThat(legacy.has("lastArtifactVersions")).isTrue();
+        legacy.remove("lastArtifactVersions");
+
+        Run restored = Run.fromSnapshot(codec.fromJson(legacy.toString(), RunSnapshot.class), GRAPH);
+        assertThat(restored.lastArtifactVersions()).isEmpty();
+        assertThat(restored.nextArtifactVersion("design")).isEqualTo(2);
+        assertThat(restored.nextArtifactVersion("design")).isEqualTo(3);
+        assertThat(restored.lastArtifactVersions()).containsEntry("design", 3);
+        assertThat(restored.copy().lastArtifactVersions()).containsEntry("design", 3);
     }
 
     @Test

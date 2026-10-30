@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 
-import com.agenticsdlc.orchestrator.core.artifact.ArtifactPayload;
+import com.agenticsdlc.orchestrator.core.artifact.Artifact;
 import com.agenticsdlc.orchestrator.core.artifact.RiskAssessment;
 import com.agenticsdlc.orchestrator.core.artifact.RiskLevel;
 import com.agenticsdlc.orchestrator.core.graph.ApprovalRequirement;
@@ -27,6 +27,12 @@ import com.agenticsdlc.orchestrator.core.policy.Verdict;
  * MEDIUM and exceeds the highest risk level already accepted by a human approval in the current plan
  * version (an approved design at risk HIGH covers later RISK_BASED gates at risk HIGH, so a human is asked
  * again only when the risk escalates or the plan changes). ALWAYS: approval regardless of autonomy.</p>
+ *
+ * <p>The run's risk includes the engine's deterministic {@link com.agenticsdlc.orchestrator.core.artifact.RiskFloor}
+ * (see {@link Run#currentRisk()}). Exit gates are evaluated <em>before</em> the candidate artifact is accepted, on a
+ * prospective copy of the run in which it is accepted: policy rules and the RISK_BASED requirement therefore see
+ * the risk the run would have once the artifact under review is accepted, and that is the risk level an exit
+ * approval records.</p>
  */
 final class GateEvaluator {
 
@@ -37,8 +43,10 @@ final class GateEvaluator {
      * @param findings policy findings
      * @param reasons reasons for requiring approval or denying (rule id prefixed)
      * @param notes informational notes (for example accepted risk)
+     * @param risk the run risk the gate was evaluated with (prospective for exit gates)
      */
-    record GateDecision(Verdict verdict, List<PolicyFinding> findings, List<String> reasons, List<String> notes) {
+    record GateDecision(Verdict verdict, List<PolicyFinding> findings, List<String> reasons, List<String> notes,
+                        RiskAssessment risk) {
 
         List<String> ruleIds() {
             return findings.stream().filter(f -> f.verdict() != Verdict.ALLOW).map(PolicyFinding::ruleId).toList();
@@ -64,13 +72,20 @@ final class GateEvaluator {
         return combine(run, policy, stage.gates().entryApproval(), "entry");
     }
 
-    GateDecision exit(Run run, StageDefinition stage, ArtifactPayload payload) {
-        PolicyDecision policy = policyEngine.evaluate(PolicyContext.exit(run, stage.id(), stage.role(), payload));
-        return combine(run, policy, stage.gates().exitApproval(), "exit");
+    /**
+     * Evaluates the exit gate of a candidate artifact that is in the run's history but not accepted yet.
+     */
+    GateDecision exit(Run run, StageDefinition stage, Artifact candidate) {
+        Run prospective = run.copy();
+        prospective.accept(stage.id(), candidate.version());
+        PolicyDecision policy = policyEngine.evaluate(PolicyContext.exit(prospective, stage.id(), stage.role(),
+                candidate.payload()));
+        return combine(prospective, policy, stage.gates().exitApproval(), "exit");
     }
 
     private GateDecision combine(Run run, PolicyDecision policy, ApprovalRequirement requirement, String gate) {
         Verdict verdict = policy.verdict();
+        RiskAssessment risk = run.currentRisk();
         List<String> reasons = new ArrayList<>();
         List<String> notes = new ArrayList<>();
         for (PolicyFinding finding : policy.findings()) {
@@ -86,7 +101,7 @@ final class GateEvaluator {
                 reasons.add(gate + " gate ALWAYS requires approval");
             }
             case RISK_BASED -> {
-                Optional<String> reason = riskBasedReason(run, notes);
+                Optional<String> reason = riskBasedReason(run, risk, notes);
                 if (reason.isPresent()) {
                     verdict = Verdict.max(verdict, Verdict.REQUIRE_APPROVAL);
                     reasons.add(gate + " gate RISK_BASED: " + reason.get());
@@ -96,12 +111,11 @@ final class GateEvaluator {
                 // no approval from the gate itself
             }
         }
-        return new GateDecision(verdict, policy.findings(), reasons, notes);
+        return new GateDecision(verdict, policy.findings(), reasons, notes, risk);
     }
 
-    private static Optional<String> riskBasedReason(Run run, List<String> notes) {
+    private static Optional<String> riskBasedReason(Run run, RiskAssessment risk, List<String> notes) {
         AutonomyLevel autonomy = run.options().autonomy();
-        RiskAssessment risk = run.currentRisk();
         if (autonomy == AutonomyLevel.FULL_AUTO) {
             notes.add("RISK_BASED gate skipped in FULL_AUTO autonomy");
             return Optional.empty();

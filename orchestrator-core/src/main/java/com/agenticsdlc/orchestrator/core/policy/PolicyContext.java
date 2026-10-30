@@ -15,29 +15,31 @@ import com.agenticsdlc.orchestrator.core.model.Run;
  * @param phase evaluation phase
  * @param stageId stage id, null at {@link GatePhase#RUN_START}
  * @param role stage role, null at {@link GatePhase#RUN_START}
- * @param runSnapshot read-only view of the run (rules must not mutate it)
+ * @param run a private copy of the run ({@link Run#copy()}, taken by the constructor) for this evaluation;
+ *            rules read it, and mutating it has no effect on the live run
  * @param candidatePayload the artifact payload under evaluation at {@link GatePhase#EXIT}, else null
  * @param autonomy autonomy level of the run
  * @param requirement the requirement under evaluation (the active requirement, or the new requirement of a
  *                    re-plan)
  */
-public record PolicyContext(GatePhase phase, @Nullable String stageId, @Nullable AgentRole role, Run runSnapshot,
+public record PolicyContext(GatePhase phase, @Nullable String stageId, @Nullable AgentRole role, Run run,
                             @Nullable Object candidatePayload, AutonomyLevel autonomy, String requirement) {
 
     /**
-     * Validates the context.
+     * Validates the context and replaces {@code run} with a private copy, so a rule can never mutate the live
+     * run aggregate.
      */
     public PolicyContext {
         Objects.requireNonNull(phase, "phase");
-        Objects.requireNonNull(runSnapshot, "runSnapshot");
+        run = Objects.requireNonNull(run, "run").copy();
         Objects.requireNonNull(autonomy, "autonomy");
         Objects.requireNonNull(requirement, "requirement");
     }
 
     /**
-     * Creates a run-start context.
+     * Creates a run-start context on a copy of the run.
      *
-     * @param run the run
+     * @param run the run (copied)
      * @param requirement the requirement to evaluate
      * @return the context
      */
@@ -46,9 +48,9 @@ public record PolicyContext(GatePhase phase, @Nullable String stageId, @Nullable
     }
 
     /**
-     * Creates an entry-gate context.
+     * Creates an entry-gate context on a copy of the run.
      *
-     * @param run the run
+     * @param run the run (copied)
      * @param stageId stage id
      * @param role stage role
      * @return the context
@@ -59,9 +61,10 @@ public record PolicyContext(GatePhase phase, @Nullable String stageId, @Nullable
     }
 
     /**
-     * Creates an exit-gate context.
+     * Creates an exit-gate context on a copy of the run.
      *
-     * @param run the run
+     * @param run the run (copied); the engine passes a prospective view in which the candidate artifact is
+     *            already accepted, so that rules see the risk the run would have once it is accepted
      * @param stageId stage id
      * @param role stage role
      * @param payload candidate payload

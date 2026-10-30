@@ -35,8 +35,8 @@ import com.agenticsdlc.orchestrator.core.artifact.RiskLevel;
 import com.agenticsdlc.orchestrator.core.artifact.Severity;
 import com.agenticsdlc.orchestrator.core.audit.AuditEventType;
 import com.agenticsdlc.orchestrator.core.metrics.MetricsRecorder;
+import com.agenticsdlc.orchestrator.core.model.Approval;
 import com.agenticsdlc.orchestrator.core.model.ApprovalKind;
-import com.agenticsdlc.orchestrator.core.model.ApprovalStatus;
 import com.agenticsdlc.orchestrator.core.model.AutonomyLevel;
 import com.agenticsdlc.orchestrator.core.model.CompensationStatus;
 import com.agenticsdlc.orchestrator.core.model.FaultKind;
@@ -286,23 +286,31 @@ class OrchestrationEngineGovernanceTest {
     }
 
     @Test
-    void reworkAtAnEntryGateRunsTheStageWithTheFeedback() {
+    void reworkAtAnEntryGateReRequestsTheEntryApprovalAndRunsTheStageWithTheFeedback() {
         FakeAgent decompose = FakeAgent.succeeding(AgentRole.PLANNING);
         harness.agent(decompose);
         OrchestrationEngine engine = harness.start();
         String id = engine.start(REQUIREMENT, "strict", RunOptions.defaults().withAutonomy(AutonomyLevel.STRICT)).id();
-        harness.awaitApproval(id, "decompose");
+        String first = harness.awaitApproval(id, "decompose").stage("decompose").pendingApproval().id();
 
-        engine.reject(id, "decompose", ALICE, "split the work by endpoint", RejectDisposition.REWORK);
+        Run reworked = engine.reject(id, "decompose", ALICE, "split the work by endpoint", RejectDisposition.REWORK);
+        assertThat(decompose.calls()).as("an entry rework must not start the stage").isZero();
+        assertThat(reworked.stage("decompose").status()).isEqualTo(StageStatus.AWAITING_APPROVAL);
+        Approval second = reworked.stage("decompose").pendingApproval();
+        assertThat(second.id()).isNotEqualTo(first);
+        assertThat(second.kind()).isEqualTo(ApprovalKind.ENTRY);
+        assertThat(second.ruleIds()).contains("GOV-002");
+        assertThat(reworked.stage("decompose").feedback()).singleElement().asString()
+                .contains("split the work by endpoint");
+
+        engine.approve(id, "decompose", ALICE, "ok with the split", second.id());
         Run run = harness.awaitStage(id, "decompose", StageStatus.SUCCEEDED);
         assertThat(decompose.calls()).isEqualTo(1);
         assertThat(decompose.contexts().getFirst().feedback()).singleElement().asString()
                 .contains("split the work by endpoint");
-        assertThat(run.approvals()).filteredOn(a -> a.stageId().equals("decompose")).singleElement()
-                .satisfies(a -> {
-                    assertThat(a.kind()).isEqualTo(ApprovalKind.ENTRY);
-                    assertThat(a.status()).isEqualTo(ApprovalStatus.REJECTED);
-                });
+        assertThat(run.approvals()).filteredOn(a -> a.stageId().equals("decompose"))
+                .extracting(a -> a.kind() + ":" + a.status())
+                .containsExactly("ENTRY:REJECTED", "ENTRY:APPROVED");
         assertThat(run.counters().feedbackLoops()).isEqualTo(1);
     }
 

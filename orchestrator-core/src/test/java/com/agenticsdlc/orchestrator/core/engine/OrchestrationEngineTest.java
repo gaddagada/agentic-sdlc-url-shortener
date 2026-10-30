@@ -97,7 +97,12 @@ class OrchestrationEngineTest {
             assertThat(a.reason()).contains("GOV-001").contains("MEDIUM");
         });
         assertThat(waiting.stage(IMPLEMENT).status()).isEqualTo(StageStatus.PENDING);
-        assertThat(waiting.acceptedArtifact(DESIGN).orElseThrow().provenance().derivedFrom())
+        Approval designApproval = waiting.stage(DESIGN).pendingApproval();
+        assertThat(waiting.acceptedArtifact(DESIGN)).as("the design is accepted only once approved").isEmpty();
+        assertThat(waiting.acceptedVersions()).doesNotContainKey(DESIGN);
+        Artifact underReview = waiting.artifact(DESIGN, designApproval.artifactVersion()).orElseThrow();
+        assertThat(designApproval.artifactHash()).isEqualTo(underReview.hash());
+        assertThat(underReview.provenance().derivedFrom())
                 .containsOnlyKeys(INTAKE, WorkflowDefinitions.DECOMPOSE, WorkflowDefinitions.IMPACT);
 
         engine.approve(id, DESIGN, ALICE, "looks good");
@@ -563,8 +568,11 @@ class OrchestrationEngineTest {
         Approval pending = again.stage(DESIGN).pendingApproval();
         assertThat(pending.planVersion()).isEqualTo(2);
         assertThat(intake.contexts().getLast().requirement()).endsWith("Support custom aliases.");
-        assertThat(again.acceptedArtifact(DESIGN).orElseThrow().version()).isEqualTo(2);
+        assertThat(pending.artifactVersion()).isEqualTo(2);
+        assertThat(again.acceptedArtifact(DESIGN).orElseThrow().version())
+                .as("the approved v1 stays accepted until v2 is approved").isEqualTo(1);
         engine.approve(id, DESIGN, ALICE, "approved v2");
+        assertThat(engine.get(id).acceptedVersions()).containsEntry(DESIGN, 2);
         Run done = completeRelease(engine, id);
         ReleaseReadiness record = done.acceptedArtifact(RELEASE).orElseThrow().payloadAs(ReleaseReadiness.class);
         assertThat(record.changeRecord().approvals()).extracting(ReleaseReadiness.ApprovalRecord::comment)

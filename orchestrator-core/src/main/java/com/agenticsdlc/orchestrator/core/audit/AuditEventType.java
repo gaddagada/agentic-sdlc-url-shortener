@@ -24,9 +24,12 @@ public enum AuditEventType {
     CLARIFICATION_PROVIDED,
     /** An agent attempt started. */
     STAGE_STARTED,
-    /** An agent produced an output (with rationale). */
+    /** An agent produced an output (with rationale, redacted when it contains a credential-like token). */
     AGENT_DECISION,
-    /** An artifact version was accepted. */
+    /**
+     * An artifact version was accepted: after its exit gate allowed it, or when its exit approval was granted
+     * (data {@code approvalId}); never while the approval is pending.
+     */
     ARTIFACT_ACCEPTED,
     /** A stage succeeded. */
     STAGE_SUCCEEDED,

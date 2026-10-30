@@ -74,6 +74,7 @@ import com.agenticsdlc.orchestrator.core.policy.rules.NoGoReleaseRule;
 import com.agenticsdlc.orchestrator.core.port.RunStore;
 import com.agenticsdlc.orchestrator.core.util.Clocks;
 import com.agenticsdlc.orchestrator.core.util.Ids;
+import com.agenticsdlc.orchestrator.core.util.SecretPatterns;
 import com.agenticsdlc.orchestrator.core.workspace.WorkspaceSandbox;
 
 /**
@@ -82,19 +83,32 @@ import com.agenticsdlc.orchestrator.core.workspace.WorkspaceSandbox;
  * <p>Executes a {@link WorkflowGraph} per run: stages whose predecessors succeeded pass an entry gate and
  * run on virtual threads (independent branches in parallel, joins wait for all predecessors); agent outputs
  * are validated, hashed, recorded with provenance (decision lineage) and pass an exit gate (policy rules,
- * gate approval requirement, autonomy). Retryable failures are retried with exponential backoff, exhausted
- * primary agents fall back to the deterministic agent, and unrecoverable failures roll back to the stage's
- * checkpoint (saga compensations in reverse order) and safe-stop the run. A failed verification feeds back to
- * implementation (bounded loop). Humans approve, reject, clarify, re-plan, stop and resume through the
- * commands below. Budgets bound agent calls, tokens, active time, feedback loops and re-plans.</p>
+ * gate approval requirement, autonomy) <em>before</em> they are accepted: an artifact that requires approval is
+ * accepted only when the approval is granted, and a denied artifact is removed from the history. Retryable
+ * failures are retried with exponential backoff, exhausted primary agents fall back to the deterministic agent,
+ * and unrecoverable failures roll back to the stage's checkpoint (saga compensations in reverse order) and
+ * safe-stop the run. A failed verification feeds back to implementation (bounded loop). Humans approve, reject,
+ * clarify, re-plan, stop and resume through the commands below. Budgets bound agent calls, tokens, active time,
+ * feedback loops and re-plans.</p>
  *
- * <p>Threading: every mutation of a run happens under its lock; agent attempts run off the lock and re-acquire
- * it on completion. After every mutation the run is persisted ({@link RunStore#save}) and the buffered audit
- * events are appended ({@link AuditSink#append}) while still holding the lock. {@link #get} and {@link #list}
- * return copies built under the lock.</p>
+ * <p>Budgets are checked when an attempt is submitted, against the counters at that moment. Agent calls are
+ * counted at submission, but tokens and active time are counted when an attempt finishes, and parallel branches
+ * are submitted independently: a run can therefore overshoot the token and active time budgets by what up to the
+ * number of concurrently running branches consume (for example both branches after {@code design} start while
+ * little token budget is left); the next submission then safe-stops the run with BUDGET_EXCEEDED.</p>
  *
- * <p>Commands throw {@link RunNotFoundException} for unknown runs, {@link IllegalStateException} when the run
- * or stage is in the wrong state, and {@link InvalidCommandException} for invalid input.</p>
+ * <p>Threading and persistence: every mutation of a run happens under its lock; agent attempts run off the lock
+ * and re-acquire it on completion. After every mutation the run and the buffered audit events are handed to
+ * {@link RunStore#commit} (by default {@code save} then {@link AuditSink#append}; a transactional store overrides
+ * it to persist both atomically) while still holding the lock. When the commit fails, the exception reaches the
+ * caller of the command; the in-memory run keeps the mutation, so it may be ahead of the store (and the audit log)
+ * until the next successful commit, which persists the full current state. A failed {@code start} unregisters
+ * the new run, so no run that was never persisted stays visible. {@link #get} and {@link #list} return copies built
+ * under the lock.</p>
+ *
+ * <p>Commands throw {@link RunNotFoundException} for unknown runs, {@link InvalidRunStateException} (an
+ * {@link IllegalStateException}) when the run or stage is in the wrong state, {@link InvalidCommandException}
+ * for invalid input, and a plain {@link IllegalStateException} when the engine is closed or shutting down.</p>
  */
 public final class OrchestrationEngine implements AutoCloseable {
 
@@ -102,6 +116,12 @@ public final class OrchestrationEngine implements AutoCloseable {
 
     /** Agent and provider id used for artifacts the engine itself produces (release finalization). */
     public static final String ENGINE_AGENT_ID = MetricsCalculator.ENGINE_PROVIDER;
+
+    /** Replacement for an agent rationale that contains a credential-like token (never audited verbatim). */
+    public static final String REDACTED_RATIONALE = "[rationale redacted: contained a credential-like token]";
+
+    /** How often a failed retry wake-up is itself retried before the stage fails. */
+    static final int MAX_WAKE_UP_RETRIES = 3;
 
     private final WorkflowGraph graph;
     private final AgentRegistry agents;
@@ -209,6 +229,9 @@ public final class OrchestrationEngine implements AutoCloseable {
      * @param requestedBy the actor on whose behalf the run is created
      * @return a snapshot copy of the run
      * @throws InvalidCommandException for a blank requirement, an unknown provider or faults for unknown stages
+     * @throws RuntimeException whatever the store or audit sink throws when the first commit fails; the new run is
+     *                          then unregistered (no ghost run remains in {@link #list()}) and in-flight work of
+     *                          the run is cancelled
      */
     public Run start(String requirement, String scenarioKey, RunOptions options, Actor requestedBy) {
         ensureOpen();
@@ -231,6 +254,25 @@ public final class OrchestrationEngine implements AutoCloseable {
         LOG.info("run created runId={} scenario={} autonomy={} provider={} workspace={}", run.id(), scenario,
                 options.autonomy(), providerLabel(options.providerId()), options.workspace());
         LOG.debug("run requirement runId={} requirement={}", run.id(), run.requirement());
+        try {
+            return createRun(run, scenario, options, requestedBy);
+        } catch (RuntimeException e) {
+            RunRegistry.RunHolder removed = registry.remove(run.id());
+            if (removed != null) {
+                removed.lock.lock();
+                try {
+                    removed.inFlight.values().forEach(f -> f.future().cancel(true));
+                    removed.inFlight.clear();
+                } finally {
+                    removed.lock.unlock();
+                }
+            }
+            LOG.error("run creation failed and the run was discarded runId={} error={}", run.id(), e.toString());
+            throw e;
+        }
+    }
+
+    private Run createRun(Run run, String scenario, RunOptions options, Actor requestedBy) {
         return mutate(run.id(), tx -> {
             tx.audit(AuditEventType.RUN_CREATED, null, requestedBy, "run created for scenario " + scenario,
                     RunMutation.data("scenario", scenario, "autonomy", options.autonomy(), "provider",
@@ -254,9 +296,8 @@ public final class OrchestrationEngine implements AutoCloseable {
     }
 
     /**
-     * Approves the pending gate of a stage. Entry approval: the stage starts (checkpoint, attempt). Exit
-     * approval: the stage SUCCEEDED and downstream stages are scheduled. Approving a NO_GO release
-     * ({@code CHG-003}) requires a waiver comment.
+     * Approves the pending gate of a stage without checking which approval the operator reviewed. Same as
+     * {@link #approve(String, String, Actor, String, String)} with a null {@code expectedApprovalId}.
      *
      * @param runId run id
      * @param stageId stage id
@@ -265,15 +306,42 @@ public final class OrchestrationEngine implements AutoCloseable {
      * @return a snapshot copy of the run
      */
     public Run approve(String runId, String stageId, Actor actor, @Nullable String comment) {
+        return approve(runId, stageId, actor, comment, null);
+    }
+
+    /**
+     * Approves the pending gate of a stage. Entry approval: the stage starts (checkpoint, attempt). Exit
+     * approval: the artifact under review is accepted now (ARTIFACT_ACCEPTED; downstream stages are invalidated
+     * when it differs from the previously accepted version), the stage SUCCEEDED and downstream stages are
+     * scheduled. Approving a NO_GO release ({@code CHG-003}) requires a waiver comment.
+     *
+     * @param runId run id
+     * @param stageId stage id
+     * @param actor a human actor
+     * @param comment optional comment (required as waiver for NO_GO releases)
+     * @param expectedApprovalId id of the approval the operator reviewed; when non-null it must be the stage's
+     *                           pending approval (binds the decision to what was reviewed)
+     * @return a snapshot copy of the run
+     * @throws InvalidRunStateException when the run is not active, the stage is not awaiting approval, or the
+     *                                  pending approval is not {@code expectedApprovalId}
+     */
+    public Run approve(String runId, String stageId, Actor actor, @Nullable String comment,
+                       @Nullable String expectedApprovalId) {
         requireHuman(actor, "approvals");
         return mutate(runId, tx -> {
             Run run = tx.run;
             requireActive(run);
             StageDefinition def = requireStage(stageId);
             StageExecution exec = run.stage(stageId);
-            Approval pending = requirePendingApproval(exec);
+            Approval pending = requirePendingApproval(exec, expectedApprovalId);
             if (pending.ruleIds().contains(NoGoReleaseRule.ID) && (comment == null || comment.isBlank())) {
                 throw new InvalidCommandException("approving a NO_GO release requires a waiver comment");
+            }
+            Artifact reviewed = null;
+            if (pending.kind() == ApprovalKind.EXIT && pending.artifactVersion() != null) {
+                reviewed = run.artifact(stageId, pending.artifactVersion()).orElseThrow(() ->
+                        new InvalidRunStateException("artifact " + stageId + "@v" + pending.artifactVersion()
+                                + " under review is no longer in the history"));
             }
             Approval approved = pending.approve(actor.id(), comment == null || comment.isBlank() ? null
                     : comment.strip(), tx.now);
@@ -284,20 +352,23 @@ public final class OrchestrationEngine implements AutoCloseable {
             tx.audit(AuditEventType.APPROVAL_GRANTED, stageId, actor, pending.kind() + " gate of " + stageId
                             + " approved by " + actor.id(),
                     RunMutation.data("approvalId", pending.id(), "kind", pending.kind(), "comment", comment,
-                            "decisionMs", decisionMs));
+                            "decisionMs", decisionMs, "artifactVersion", pending.artifactVersion(), "artifactHash",
+                            pending.artifactHash()));
             if (pending.kind() == ApprovalKind.ENTRY) {
                 startActivation(tx, def, exec);
             } else {
+                if (reviewed != null && !Objects.equals(run.acceptedVersions().get(stageId), reviewed.version())) {
+                    acceptArtifact(tx, def, reviewed, pending.id());
+                }
                 markSucceeded(tx, exec);
             }
         });
     }
 
     /**
-     * Rejects the pending gate of a stage. REWORK: the stage re-runs with the reason appended to its feedback
-     * (counts as a feedback loop; rejected when the feedback loop budget is exhausted) and, for exit gates,
-     * the artifact under review is no longer accepted. ABORT: the run is ABORTED (pending and in-flight work
-     * is cancelled and registered compensations are executed).
+     * Rejects the pending gate of a stage without checking which approval the operator reviewed. Same as
+     * {@link #reject(String, String, Actor, String, RejectDisposition, String)} with a null
+     * {@code expectedApprovalId}.
      *
      * @param runId run id
      * @param stageId stage id
@@ -307,6 +378,30 @@ public final class OrchestrationEngine implements AutoCloseable {
      * @return a snapshot copy of the run
      */
     public Run reject(String runId, String stageId, Actor actor, String reason, RejectDisposition disposition) {
+        return reject(runId, stageId, actor, reason, disposition, null);
+    }
+
+    /**
+     * Rejects the pending gate of a stage. REWORK counts as a feedback loop (rejected when the feedback loop
+     * budget is exhausted) and appends the reason to the stage's feedback: for an exit gate the stage re-runs
+     * (the artifact under review was never accepted, so nothing needs restoring); for an entry gate the stage
+     * returns to PENDING/STALE without running, so its entry gate is evaluated again and approval is requested
+     * again before it runs with the feedback. ABORT: the run is ABORTED (pending and in-flight work is cancelled
+     * and registered compensations are executed).
+     *
+     * @param runId run id
+     * @param stageId stage id
+     * @param actor a human actor
+     * @param reason rejection reason (not blank)
+     * @param disposition REWORK or ABORT
+     * @param expectedApprovalId id of the approval the operator reviewed; when non-null it must be the stage's
+     *                           pending approval
+     * @return a snapshot copy of the run
+     * @throws InvalidRunStateException when the run is not active, the stage is not awaiting approval, or the
+     *                                  pending approval is not {@code expectedApprovalId}
+     */
+    public Run reject(String runId, String stageId, Actor actor, String reason, RejectDisposition disposition,
+                      @Nullable String expectedApprovalId) {
         requireHuman(actor, "rejections");
         if (reason == null || reason.isBlank()) {
             throw new InvalidCommandException("a rejection reason is required");
@@ -317,7 +412,7 @@ public final class OrchestrationEngine implements AutoCloseable {
             requireActive(run);
             StageDefinition def = requireStage(stageId);
             StageExecution exec = run.stage(stageId);
-            Approval pending = requirePendingApproval(exec);
+            Approval pending = requirePendingApproval(exec, expectedApprovalId);
             if (disposition == RejectDisposition.REWORK
                     && run.counters().feedbackLoops() >= run.budget().maxFeedbackLoops()) {
                 throw new InvalidCommandException("feedback loop budget exhausted (" + run.budget().maxFeedbackLoops()
@@ -341,9 +436,10 @@ public final class OrchestrationEngine implements AutoCloseable {
                     RunMutation.data("source", "human review", "loop", run.counters().feedbackLoops(), "max",
                             run.budget().maxFeedbackLoops(), "feedback", reason.strip()));
             if (pending.kind() == ApprovalKind.ENTRY) {
-                startActivation(tx, def, exec);
+                // Do not start the stage: back to PENDING/STALE so the entry gate is evaluated again (by the
+                // pump at the end of this mutation) and approval is requested again for the reworked entry.
+                control.resetToReady(tx, exec, "entry rework requested by " + actor.id(), actor);
             } else {
-                run.restoreAccepted(stageId, pending.previousAcceptedVersion());
                 exec.setPendingApproval(null);
                 exec.setAttempts(0);
                 exec.setActiveAgent(null);
@@ -360,6 +456,7 @@ public final class OrchestrationEngine implements AutoCloseable {
      * @param actor a human actor
      * @param answers answers by question id
      * @return a snapshot copy of the run
+     * @throws InvalidRunStateException when the run is not active or nothing awaits clarification
      */
     public Run clarify(String runId, Actor actor, Map<String, String> answers) {
         requireHuman(actor, "clarifications");
@@ -370,10 +467,10 @@ public final class OrchestrationEngine implements AutoCloseable {
             StageExecution exec = run.stages().stream()
                     .filter(s -> s.status() == StageStatus.AWAITING_CLARIFICATION).findFirst()
                     .map(s -> run.stage(s.stageId()))
-                    .orElseThrow(() -> new IllegalStateException("no stage is awaiting clarification"));
+                    .orElseThrow(() -> new InvalidRunStateException("no stage is awaiting clarification"));
             Clarification clarification = run.clarification();
             if (clarification == null || clarification.answered()) {
-                throw new IllegalStateException("there are no open clarification questions");
+                throw new InvalidRunStateException("there are no open clarification questions");
             }
             Set<String> questionIds = clarification.questions().stream().map(ClarificationQuestion::id)
                     .collect(Collectors.toCollection(java.util.LinkedHashSet::new));
@@ -409,6 +506,7 @@ public final class OrchestrationEngine implements AutoCloseable {
      * @param actor a human actor
      * @param changedRequirement the new requirement (not blank)
      * @return a snapshot copy of the run
+     * @throws InvalidRunStateException when the run is COMPLETED or ABORTED
      */
     public Run replan(String runId, Actor actor, String changedRequirement) {
         requireHuman(actor, "re-planning");
@@ -419,7 +517,7 @@ public final class OrchestrationEngine implements AutoCloseable {
         return mutate(runId, tx -> {
             Run run = tx.run;
             if (run.status().isTerminal()) {
-                throw new IllegalStateException("cannot re-plan a " + run.status() + " run");
+                throw new InvalidRunStateException("cannot re-plan a " + run.status() + " run");
             }
             if (run.counters().replans() >= run.budget().maxReplans()) {
                 throw new InvalidCommandException("re-plan budget exhausted (" + run.budget().maxReplans() + ")");
@@ -456,13 +554,14 @@ public final class OrchestrationEngine implements AutoCloseable {
      * @param actor a human actor
      * @param reason optional reason
      * @return a snapshot copy of the run
+     * @throws InvalidRunStateException when the run is not RUNNING or WAITING_HUMAN
      */
     public Run stop(String runId, Actor actor, String reason) {
         requireHuman(actor, "stopping a run");
         String detail = reason == null || reason.isBlank() ? "stopped by " + actor.id() : reason.strip();
         return mutate(runId, tx -> {
             if (!tx.run.status().isActive()) {
-                throw new IllegalStateException("only RUNNING or WAITING_HUMAN runs can be stopped (status "
+                throw new InvalidRunStateException("only RUNNING or WAITING_HUMAN runs can be stopped (status "
                         + tx.run.status() + ")");
             }
             control.safeStop(tx, HaltReason.OPERATOR_STOP, detail, actor);
@@ -476,16 +575,18 @@ public final class OrchestrationEngine implements AutoCloseable {
      * @param runId run id
      * @param actor a human actor
      * @return a snapshot copy of the run
+     * @throws InvalidRunStateException when the run is not SAFE_STOPPED or was stopped by a policy denial
      */
     public Run resume(String runId, Actor actor) {
         requireHuman(actor, "resuming a run");
         return mutate(runId, tx -> {
             Run run = tx.run;
             if (run.status() != RunStatus.SAFE_STOPPED) {
-                throw new IllegalStateException("only SAFE_STOPPED runs can be resumed (status " + run.status() + ")");
+                throw new InvalidRunStateException("only SAFE_STOPPED runs can be resumed (status " + run.status()
+                        + ")");
             }
             if (run.haltReason() == HaltReason.POLICY_DENIED) {
-                throw new IllegalStateException("a policy denial cannot be resumed; re-plan with a changed "
+                throw new InvalidRunStateException("a policy denial cannot be resumed; re-plan with a changed "
                         + "requirement");
             }
             List<String> reset = new ArrayList<>();
@@ -654,8 +755,7 @@ public final class OrchestrationEngine implements AutoCloseable {
             body.accept(tx);
             pump(tx);
             tx.run.touch(tx.now);
-            runStore.save(tx.run);
-            auditSink.append(tx.events());
+            runStore.commit(tx.run, tx.events(), auditSink);
             copy = tx.run.copy();
         } finally {
             holder.lock.unlock();
@@ -710,7 +810,7 @@ public final class OrchestrationEngine implements AutoCloseable {
                             rollbackService.rollback(tx, def.id(), "entry gate denied: " + gate.reasonText(),
                                     HaltReason.POLICY_DENIED);
                         }
-                        case REQUIRE_APPROVAL -> requestApproval(tx, exec, ApprovalKind.ENTRY, gate, null, null);
+                        case REQUIRE_APPROVAL -> requestApproval(tx, exec, ApprovalKind.ENTRY, gate, null, null, null);
                         case ALLOW -> startActivation(tx, def, exec);
                     }
                 }
@@ -908,51 +1008,78 @@ public final class OrchestrationEngine implements AutoCloseable {
                 trace != null ? trace.outputTokens() : 0L, outcome.latencyMs(), exec.attempts(), run.planVersion());
         Artifact previous = run.acceptedArtifact(def.id()).orElse(null);
         Artifact artifact = new Artifact(Ids.newId(), run.id(), def.id(), payload.kind(),
-                run.maxArtifactVersion(def.id()) + 1, run.planVersion(), codec.hash(payload), payload, provenance,
+                run.nextArtifactVersion(def.id()), run.planVersion(), codec.hash(payload), payload, provenance,
                 tx.now);
         run.addArtifact(artifact);
-        tx.audit(AuditEventType.AGENT_DECISION, def.id(), Actor.agent(agentId), abbreviate(success.rationale(), 500),
+        tx.audit(AuditEventType.AGENT_DECISION, def.id(), Actor.agent(agentId), auditableRationale(success.rationale()),
                 RunMutation.data("artifactId", artifact.id(), "version", artifact.version(), "kind", artifact.kind(),
-                        "hash", artifact.hash(), "latencyMs", outcome.latencyMs()));
+                        "hash", artifact.hash(), "latencyMs", outcome.latencyMs(), "compensations",
+                        success.compensations().size()));
         exec.setLastError(null);
+        // The agent's side effects (for example a sandbox materialization) already happened, whatever the gate
+        // decides: register their compensations now so that a denial or a later failure rolls them back.
+        for (CompensationRequest request : success.compensations()) {
+            run.addCompensation(new Compensation(Ids.newId(), def.id(), request.action(), request.target(),
+                    request.description(), CompensationStatus.REGISTERED, tx.now, null, null));
+        }
 
+        // The exit gate runs before acceptance (on a prospective copy in which the artifact is accepted), for every
+        // artifact including failed verification reports.
+        GateEvaluator.GateDecision gate = gates.exit(run, def, artifact);
+        recordFindings(tx, def.id(), GatePhase.EXIT, gate.findings());
+        auditGate(tx, def.id(), GatePhase.EXIT, gate);
+        if (gate.verdict() == Verdict.DENY) {
+            // A denied artifact (for example one that embeds a credential) must never be persisted or shown: drop
+            // it from the history (it was never accepted; its version number is not reused); the audit log keeps
+            // the reference, hash and rule ids as evidence.
+            run.removeArtifact(artifact.id());
+            tx.audit(AuditEventType.POLICY_DENIED, def.id(), Actor.system(), "artifact " + artifact.reference()
+                            + " denied and removed from history: " + gate.reasonText(),
+                    RunMutation.data("phase", GatePhase.EXIT, "rules", gate.ruleIds(), "artifactId",
+                            artifact.id(), "hash", artifact.hash(), "removed", true));
+            failStage(tx, exec, "exit gate denied: " + gate.reasonText(), HaltReason.POLICY_DENIED);
+            return;
+        }
         if (payload instanceof VerificationReport report && !report.passed()) {
             handleVerificationFailure(tx, def, exec, report, artifact);
             return;
         }
-        run.accept(def.id(), artifact.version());
-        for (CompensationRequest request : success.compensations()) {
-            Compensation compensation = new Compensation(Ids.newId(), def.id(), request.action(), request.target(),
-                    request.description(), CompensationStatus.REGISTERED, tx.now, null, null);
-            run.addCompensation(compensation);
+        if (gate.verdict() == Verdict.REQUIRE_APPROVAL) {
+            // Not accepted yet: the previously accepted version (if any) stays accepted until the approval.
+            requestApproval(tx, exec, ApprovalKind.EXIT, gate, artifact.version(),
+                    previous == null ? null : previous.version(), artifact.hash());
+            return;
         }
-        tx.audit(AuditEventType.ARTIFACT_ACCEPTED, def.id(), Actor.system(), artifact.reference() + " accepted",
+        acceptArtifact(tx, def, artifact, null);
+        markSucceeded(tx, exec);
+    }
+
+    /**
+     * Accepts an artifact of the history for its stage (after an ALLOW exit gate or an approved exit gate): audits
+     * ARTIFACT_ACCEPTED and, when it differs from the previously accepted version, invalidates the downstream
+     * stages.
+     */
+    private void acceptArtifact(RunMutation tx, StageDefinition def, Artifact artifact, @Nullable String approvalId) {
+        Run run = tx.run;
+        Artifact previous = run.acceptedArtifact(def.id()).orElse(null);
+        run.accept(def.id(), artifact.version());
+        tx.audit(AuditEventType.ARTIFACT_ACCEPTED, def.id(), Actor.system(), artifact.reference() + " accepted"
+                        + (approvalId == null ? "" : " after approval"),
                 RunMutation.data("artifactId", artifact.id(), "version", artifact.version(), "hash", artifact.hash(),
-                        "derivedFrom", provenance.derivedFrom(), "compensations", success.compensations().size()));
+                        "derivedFrom", artifact.provenance().derivedFrom(), "approvalId", approvalId,
+                        "previousVersion", previous == null ? null : previous.version()));
         if (previous != null && !previous.hash().equals(artifact.hash())) {
             replanService.invalidateDownstream(tx, def.id(), false, "upstream artifact " + previous.reference()
                     + " was superseded by " + artifact.reference(), Actor.system());
         }
-        GateEvaluator.GateDecision gate = gates.exit(run, def, payload);
-        recordFindings(tx, def.id(), GatePhase.EXIT, gate.findings());
-        auditGate(tx, def.id(), GatePhase.EXIT, gate);
-        switch (gate.verdict()) {
-            case DENY -> {
-                // A denied artifact (for example one that embeds a credential) must never be persisted or shown:
-                // drop it from the history and restore the previously accepted version; the audit log keeps the
-                // reference, hash and rule ids as evidence.
-                run.removeArtifact(artifact.id());
-                run.restoreAccepted(def.id(), previous == null ? null : previous.version());
-                tx.audit(AuditEventType.POLICY_DENIED, def.id(), Actor.system(), "artifact " + artifact.reference()
-                        + " denied and removed from history: " + gate.reasonText(),
-                        RunMutation.data("phase", GatePhase.EXIT, "rules", gate.ruleIds(), "artifactId",
-                                artifact.id(), "hash", artifact.hash(), "removed", true));
-                failStage(tx, exec, "exit gate denied: " + gate.reasonText(), HaltReason.POLICY_DENIED);
-            }
-            case REQUIRE_APPROVAL -> requestApproval(tx, exec, ApprovalKind.EXIT, gate, artifact.version(),
-                    previous == null ? null : previous.version());
-            case ALLOW -> markSucceeded(tx, exec);
+    }
+
+    /** Returns the rationale to audit: abbreviated, and redacted when it contains a credential-like token. */
+    private static String auditableRationale(@Nullable String rationale) {
+        if (rationale == null) {
+            return "";
         }
+        return SecretPatterns.containsSecret(rationale) ? REDACTED_RATIONALE : abbreviate(rationale, 500);
     }
 
     /**
@@ -999,7 +1126,7 @@ public final class OrchestrationEngine implements AutoCloseable {
         exec.setStatus(StageStatus.AWAITING_CLARIFICATION);
         run.setClarification(new Clarification(exec.stageId(), request.questions(), Map.of(), tx.now, null, null));
         tx.audit(AuditEventType.AGENT_DECISION, exec.stageId(), Actor.agent(agentId),
-                abbreviate(request.rationale(), 500), RunMutation.data("needsClarification", true));
+                auditableRationale(request.rationale()), RunMutation.data("needsClarification", true));
         tx.audit(AuditEventType.CLARIFICATION_REQUESTED, exec.stageId(), Actor.system(),
                 request.questions().size() + " clarification questions asked",
                 RunMutation.data("questionIds", request.questions().stream().map(ClarificationQuestion::id).toList()));
@@ -1068,12 +1195,17 @@ public final class OrchestrationEngine implements AutoCloseable {
                 tx.run.acceptedVersions().get(exec.stageId())));
     }
 
+    /**
+     * Requests a human approval. The recorded risk level is the risk the gate was evaluated with (for an exit gate
+     * the risk the run will have once the artifact under review is accepted).
+     */
     private void requestApproval(RunMutation tx, StageExecution exec, ApprovalKind kind,
                                  GateEvaluator.GateDecision gate, @Nullable Integer artifactVersion,
-                                 @Nullable Integer previousAcceptedVersion) {
+                                 @Nullable Integer previousAcceptedVersion, @Nullable String artifactHash) {
         Run run = tx.run;
         Approval approval = Approval.request(exec.stageId(), kind, gate.reasonText(), gate.ruleIds(),
-                run.currentRisk().level(), run.planVersion(), artifactVersion, previousAcceptedVersion, tx.now);
+                gate.risk().level(), run.planVersion(), artifactVersion, previousAcceptedVersion, artifactHash,
+                tx.now);
         run.addApproval(approval);
         exec.setPendingApproval(approval);
         exec.setStatus(StageStatus.AWAITING_APPROVAL);
@@ -1081,7 +1213,8 @@ public final class OrchestrationEngine implements AutoCloseable {
         tx.audit(AuditEventType.APPROVAL_REQUESTED, exec.stageId(), Actor.system(), kind + " approval requested for "
                         + exec.stageId() + ": " + gate.reasonText(),
                 RunMutation.data("approvalId", approval.id(), "kind", kind, "reason", gate.reasonText(), "ruleIds",
-                        gate.ruleIds(), "riskLevel", approval.riskLevel(), "artifactVersion", artifactVersion));
+                        gate.ruleIds(), "riskLevel", approval.riskLevel(), "artifactVersion", artifactVersion,
+                        "artifactHash", artifactHash, "previousAcceptedVersion", previousAcceptedVersion));
     }
 
     private void abortRun(RunMutation tx, Actor actor, String detail) {
@@ -1126,7 +1259,8 @@ public final class OrchestrationEngine implements AutoCloseable {
                         .filter(a -> a.status() == ApprovalStatus.APPROVED && a.planVersion() == run.planVersion())
                         .filter(a -> a.decidedBy() != null && a.decidedAt() != null)
                         .map(a -> new ReleaseReadiness.ApprovalRecord(a.stageId(), a.decidedBy(),
-                                a.decidedAt().toString(), a.comment() == null ? "" : a.comment()))
+                                a.decidedAt().toString(), a.comment() == null ? "" : a.comment(),
+                                a.artifactHash() == null ? "" : a.artifactHash()))
                         .toList();
                 List<String> releaseApprovers = records.stream().filter(r -> r.stageId().equals(def.id()))
                         .map(ReleaseReadiness.ApprovalRecord::approver).distinct().toList();
@@ -1143,7 +1277,7 @@ public final class OrchestrationEngine implements AutoCloseable {
                 Provenance provenance = new Provenance(derivedFrom, def.role(), ENGINE_AGENT_ID, ENGINE_AGENT_ID, null,
                         null, 0L, 0L, 0L, 0, run.planVersion());
                 Artifact artifact = new Artifact(Ids.newId(), run.id(), def.id(), finalized.kind(),
-                        run.maxArtifactVersion(def.id()) + 1, run.planVersion(), codec.hash(finalized), finalized,
+                        run.nextArtifactVersion(def.id()), run.planVersion(), codec.hash(finalized), finalized,
                         provenance, tx.now);
                 run.addArtifact(artifact);
                 run.accept(def.id(), artifact.version());
@@ -1167,7 +1301,9 @@ public final class OrchestrationEngine implements AutoCloseable {
 
     /**
      * Checks the agent call, token and active time budgets before a submission; on breach audits
-     * BUDGET_EXCEEDED and safe-stops the run with BUDGET_EXCEEDED.
+     * BUDGET_EXCEEDED and safe-stops the run with BUDGET_EXCEEDED. The check uses the counters at submission
+     * time: tokens and time of attempts of parallel branches that are still running are counted only when they
+     * finish, so a run may overshoot those budgets by what up to the number of concurrent branches consume.
      */
     private boolean budgetExceeded(RunMutation tx) {
         Run run = tx.run;
@@ -1196,8 +1332,17 @@ public final class OrchestrationEngine implements AutoCloseable {
     }
 
     private void scheduleRetry(String runId, String stageId, long token, Duration delay) {
+        scheduleWakeUp(runId, stageId, token, delay, 0);
+    }
+
+    /**
+     * Arms the wake-up of a scheduled retry. The single scheduler thread only hands the wake-up to the stage
+     * executor, so run mutations (and their store I/O) never run on, or block, the scheduler thread.
+     */
+    private void scheduleWakeUp(String runId, String stageId, long token, Duration delay, int failedWakeUps) {
         try {
-            retryScheduler.schedule(() -> onRetryDue(runId, stageId, token), delay.toMillis(), TimeUnit.MILLISECONDS);
+            retryScheduler.schedule(() -> handOffWakeUp(runId, stageId, token, delay, failedWakeUps),
+                    delay.toMillis(), TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException e) {
             if (!closed) {
                 throw new IllegalStateException("retry scheduler rejected the retry", e);
@@ -1205,24 +1350,76 @@ public final class OrchestrationEngine implements AutoCloseable {
         }
     }
 
-    private void onRetryDue(String runId, String stageId, long token) {
+    private void handOffWakeUp(String runId, String stageId, long token, Duration delay, int failedWakeUps) {
+        if (closed) {
+            return;
+        }
+        try {
+            executor.execute(() -> onRetryDue(runId, stageId, token, delay, failedWakeUps));
+        } catch (RejectedExecutionException e) {
+            if (!closed) {
+                onWakeUpFailed(runId, stageId, token, delay, failedWakeUps, e);
+            }
+        }
+    }
+
+    private void onRetryDue(String runId, String stageId, long token, Duration delay, int failedWakeUps) {
         if (closed) {
             return;
         }
         try {
             mutate(runId, tx -> {
                 StageExecution exec = tx.run.stage(stageId);
-                if (exec.status() != StageStatus.RETRY_SCHEDULED || exec.token() != token
-                        || !tx.run.status().isActive()) {
+                if (!isWakeUpTarget(tx.run, exec, token)) {
                     return;
                 }
                 submitAttempt(tx, graph.stage(stageId), exec);
             });
         } catch (RuntimeException e) {
             if (!closed) {
-                LOG.error("retry wake-up failed runId={} stageId={}", runId, stageId, e);
+                onWakeUpFailed(runId, stageId, token, delay, failedWakeUps, e);
             }
         }
+    }
+
+    /**
+     * A failed wake-up is retried with the same delay up to {@link #MAX_WAKE_UP_RETRIES} times (each retry is a
+     * no-op when the stage is no longer waiting for this retry); after that the stage fails with
+     * AGENT_FAILURE_EXHAUSTED (rollback, safe-stop) instead of staying RETRY_SCHEDULED forever.
+     */
+    private void onWakeUpFailed(String runId, String stageId, long token, Duration delay, int failedWakeUps,
+                                RuntimeException error) {
+        if (failedWakeUps < MAX_WAKE_UP_RETRIES) {
+            LOG.warn("retry wake-up failed runId={} stageId={} failure={}/{} error={}; retrying in {} ms", runId,
+                    stageId, failedWakeUps + 1, MAX_WAKE_UP_RETRIES + 1, error.toString(), delay.toMillis());
+            try {
+                scheduleWakeUp(runId, stageId, token, delay, failedWakeUps + 1);
+                return;
+            } catch (RuntimeException e) {
+                LOG.error("could not re-arm the retry wake-up runId={} stageId={}", runId, stageId, e);
+            }
+        }
+        LOG.error("retry wake-up failed {} times; failing the stage runId={} stageId={}", failedWakeUps + 1, runId,
+                stageId, error);
+        try {
+            mutate(runId, tx -> {
+                StageExecution exec = tx.run.stage(stageId);
+                if (!isWakeUpTarget(tx.run, exec, token)) {
+                    return;
+                }
+                failStage(tx, exec, "retry wake-up failed " + (failedWakeUps + 1) + " times: " + error,
+                        HaltReason.AGENT_FAILURE_EXHAUSTED);
+            });
+        } catch (RuntimeException e) {
+            if (!closed) {
+                LOG.error("could not fail the stage after failed retry wake-ups runId={} stageId={}", runId, stageId,
+                        e);
+            }
+        }
+    }
+
+    private static boolean isWakeUpTarget(Run run, StageExecution exec, long token) {
+        return exec.status() == StageStatus.RETRY_SCHEDULED && exec.token() == token && run.status().isActive();
     }
 
     // =========================================================================================== helpers
@@ -1253,19 +1450,23 @@ public final class OrchestrationEngine implements AutoCloseable {
         return graph.stage(stageId);
     }
 
-    private static Approval requirePendingApproval(StageExecution exec) {
+    private static Approval requirePendingApproval(StageExecution exec, @Nullable String expectedApprovalId) {
         Approval pending = exec.pendingApproval();
         if (exec.status() != StageStatus.AWAITING_APPROVAL || pending == null
                 || pending.status() != ApprovalStatus.PENDING) {
-            throw new IllegalStateException("stage " + exec.stageId() + " is not awaiting approval (status "
+            throw new InvalidRunStateException("stage " + exec.stageId() + " is not awaiting approval (status "
                     + exec.status() + ")");
+        }
+        if (expectedApprovalId != null && !expectedApprovalId.equals(pending.id())) {
+            throw new InvalidRunStateException("approval " + expectedApprovalId + " is no longer pending; the stage "
+                    + "now awaits approval " + pending.id());
         }
         return pending;
     }
 
     private static void requireActive(Run run) {
         if (!run.status().isActive()) {
-            throw new IllegalStateException("run is " + run.status()
+            throw new InvalidRunStateException("run is " + run.status()
                     + (run.status() == RunStatus.SAFE_STOPPED ? "; resume or re-plan first" : ""));
         }
     }

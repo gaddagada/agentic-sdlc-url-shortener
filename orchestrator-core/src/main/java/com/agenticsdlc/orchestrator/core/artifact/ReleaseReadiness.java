@@ -91,14 +91,16 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
     }
 
     /**
-     * A recorded human approval.
+     * A recorded human approval (engine-authored; approvals an agent puts here are discarded).
      *
      * @param stageId stage approved
      * @param approver operator id
      * @param decidedAt ISO-8601 timestamp
      * @param comment approval comment (may be empty)
+     * @param artifactHash hash of the artifact the operator approved (exit gates), empty for entry gates
      */
-    public record ApprovalRecord(String stageId, String approver, String decidedAt, String comment) {
+    public record ApprovalRecord(String stageId, String approver, String decidedAt, String comment,
+                                 String artifactHash) {
         /**
          * Normalizes text.
          */
@@ -107,6 +109,19 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
             approver = Immutables.text(approver);
             decidedAt = Immutables.text(decidedAt);
             comment = Immutables.text(comment);
+            artifactHash = Immutables.text(artifactHash);
+        }
+
+        /**
+         * Creates a record without an artifact hash (entry gates).
+         *
+         * @param stageId stage approved
+         * @param approver operator id
+         * @param decidedAt ISO-8601 timestamp
+         * @param comment approval comment (may be empty)
+         */
+        public ApprovalRecord(String stageId, String approver, String decidedAt, String comment) {
+            this(stageId, approver, decidedAt, comment, "");
         }
     }
 
@@ -158,9 +173,9 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
                     .field("Rollback plan", changeRecord.rollbackPlan())
                     .field("Policy verdict", changeRecord.policyVerdict())
                     .field("Artifacts", Markdown.join(changeRecord.artifactIds()));
-            md.table(List.of("Stage", "Approver", "Decided at", "Comment"),
+            md.table(List.of("Stage", "Approver", "Decided at", "Comment", "Artifact hash"),
                     changeRecord.approvals().stream().map(a -> List.of(a.stageId(), a.approver(), a.decidedAt(),
-                            a.comment())).toList());
+                            a.comment(), a.artifactHash().isEmpty() ? "-" : a.artifactHash())).toList());
         }
         md.heading(3, "Release notes").raw(releaseNotes.strip() + "\n");
         return md.render();

@@ -46,6 +46,9 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  * @param firstFailureStageId stage of the first failed attempt
  * @param recoveredAt time the first failed stage later succeeded
  * @param auditSeq last audit sequence number used
+ * @param lastArtifactVersions highest artifact version ever assigned per stage, including versions of artifacts
+ *                             later removed from the history (denied by an exit gate), so version numbers are
+ *                             never reused; absent in snapshots written before it existed
  */
 public record RunSnapshot(
         String id,
@@ -78,7 +81,8 @@ public record RunSnapshot(
         @Nullable Instant firstFailureAt,
         @Nullable String firstFailureStageId,
         @Nullable Instant recoveredAt,
-        long auditSeq) {
+        long auditSeq,
+        Map<String, Integer> lastArtifactVersions) {
 
     /**
      * Normalizes collections.
@@ -93,6 +97,7 @@ public record RunSnapshot(
         humanWaitIntervals = Immutables.list(humanWaitIntervals);
         policyFindings = Immutables.list(policyFindings);
         injectedFaults = Immutables.map(injectedFaults);
+        lastArtifactVersions = Immutables.map(lastArtifactVersions);
         if (counters == null) {
             counters = RunCounters.ZERO;
         }
