@@ -53,6 +53,24 @@ class ImpactedSourcesTest {
     }
 
     @Test
+    void credentialLikeTokensNeverLeaveTheWorkspaceInSourceContext(@TempDir Path dir) throws Exception {
+        Path ws = SyntheticWorkspace.create(dir.resolve("ws"));
+        String config = "url-shortener/src/main/resources/application-local.yml";
+        String key = "sk-ant-api03-" + "k".repeat(30);
+        Files.writeString(ws.resolve(config), "server:\n  port: 8080\nspring:\n  datasource:\n"
+                + "    password: Sup3rSecret!\nllm:\n  api-key: " + key + "\n");
+
+        Result result = ImpactedSources.read(ws, List.of(new Request(config, Priority.MODIFY),
+                new Request(VALIDATOR, Priority.EXTEND)), 10_000, 100_000);
+
+        assertThat(result.sources().get(config)).doesNotContain("Sup3rSecret!").doesNotContain(key)
+                .contains("  port: 8080\n").contains("[redacted]");
+        assertThat(result.sources().get(VALIDATOR)).isEqualTo(Files.readString(ws.resolve(VALIDATOR)));
+        assertThat(result.notes()).containsExactly(config + ": credential-like tokens redacted (shown as [redacted]); "
+                + "do not use redacted lines as diff context");
+    }
+
+    @Test
     void servesModifyTargetsFirstAndAddsRegressionRisksOnlyWhenTheyFit(@TempDir Path dir) throws Exception {
         Path ws = SyntheticWorkspace.create(dir.resolve("ws"));
         int controller = Files.readString(ws.resolve(CONTROLLER)).length();

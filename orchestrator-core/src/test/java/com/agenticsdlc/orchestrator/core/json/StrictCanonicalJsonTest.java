@@ -92,6 +92,23 @@ class StrictCanonicalJsonTest {
     }
 
     @Test
+    void aValueTheMapperWritesAsNullIsNullAndUnicodeIsNotNormalized() {
+        Map<String, Object> value = new LinkedHashMap<>();
+        value.put("absent", java.util.Optional.empty());
+        value.put("present", java.util.Optional.of("x"));
+        Object roundTripped = codec.fromJson(codec.toJson(value), Object.class);
+
+        assertThat(codec.strictCanonicalJson(value)).isEqualTo(codec.strictCanonicalJson(roundTripped))
+                .contains("null").doesNotContain("Optional");
+
+        String composed = "caf" + (char) 0xE9;
+        String decomposed = "cafe" + (char) 0x301;
+        assertThat(java.text.Normalizer.normalize(decomposed, java.text.Normalizer.Form.NFC)).isEqualTo(composed);
+        assertThat(codec.strictCanonicalJson(composed)).as("documented: no Unicode normalization")
+                .isNotEqualTo(codec.strictCanonicalJson(decomposed));
+    }
+
+    @Test
     void invalidObjectsAreRejected() {
         Map<Object, Object> nullKey = new HashMap<>();
         nullKey.put(null, 1);

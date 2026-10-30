@@ -21,11 +21,15 @@ import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.agenticsdlc.orchestrator.core.util.SecretPatterns;
+
 /**
  * {@link BuildRunner} based on {@link ProcessBuilder}. Only Maven commands are accepted ({@code ./mvnw},
  * {@code mvnw} or {@code mvn} followed by plain arguments; shell metacharacters are rejected). The wrapper
  * is resolved inside the sandbox ({@code mvnw.cmd} on Windows) and the process always runs with the sandbox
- * as working directory. Output is captured (last 50 lines) and surefire summary lines are parsed.
+ * as working directory. Output is captured (last 50 lines) and surefire summary lines are parsed; credential-like
+ * tokens in captured lines are redacted ({@link SecretPatterns#redact}), because the lines end up in verification
+ * reports (scanned by the secret-leak policy rule) and in prompts.
  *
  * <p>Callers pass the engine-configured command ({@code EngineConfig.buildCommand}, default
  * {@code ./mvnw -B -ntp -q verify}); the {@code buildCommand} an agent writes into a change set is informational
@@ -91,8 +95,9 @@ public final class ProcessBuildRunner implements BuildRunner {
         Thread reader = Thread.ofVirtual().name("sdlc-build-output").start(() -> {
             try (BufferedReader in = new BufferedReader(new InputStreamReader(process.getInputStream(),
                     StandardCharsets.UTF_8))) {
-                String line;
-                while ((line = in.readLine()) != null) {
+                String raw;
+                while ((raw = in.readLine()) != null) {
+                    String line = SecretPatterns.redact(raw);
                     synchronized (tail) {
                         tail.addLast(line);
                         if (tail.size() > TAIL_LINES) {

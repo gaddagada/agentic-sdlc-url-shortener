@@ -72,6 +72,14 @@ class ChangeRecordSignerTest {
                 unsigned.riskLevel(), unsigned.rollbackPlan(), unsigned.approvals().subList(0, 1),
                 unsigned.artifactIds(), unsigned.policyVerdict());
         assertThat(ChangeRecordSigner.canonicalPayload(changed)).as("an approval removed").isNotEqualTo(payload);
+        ReleaseReadiness.ChangeRecord reordered = new ReleaseReadiness.ChangeRecord(unsigned.summary(),
+                unsigned.riskLevel(), unsigned.rollbackPlan(), unsigned.approvals().reversed(),
+                unsigned.artifactIds(), unsigned.policyVerdict());
+        assertThat(ChangeRecordSigner.canonicalPayload(reordered)).as("the approvals' decision order is covered")
+                .isNotEqualTo(payload);
+        JsonCodec codec = JsonCodec.standard();
+        assertThat(ChangeRecordSigner.canonicalPayload(codec.fromJson(codec.toJson(signed),
+                ReleaseReadiness.ChangeRecord.class))).as("stable across a JSON round trip").isEqualTo(payload);
     }
 
     @Test

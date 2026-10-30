@@ -99,6 +99,47 @@ class DependencyInventoryTest {
     }
 
     @Test
+    void versionPropertiesResolveThroughThePropertiesChainAndUnresolvableOnesAreUnknown(@TempDir Path root)
+            throws IOException {
+        write(root, "pom.xml", """
+                <project>
+                  <parent>
+                    <groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId>
+                    <version>4.1.2</version>
+                  </parent>
+                  <groupId>com.acme</groupId><artifactId>parent</artifactId><version>1.0</version>
+                  <packaging>pom</packaging>
+                  <properties><base.version>3.2</base.version><lib.version>${base.version}.1</lib.version></properties>
+                </project>
+                """);
+        write(root, "app/pom.xml", """
+                <project>
+                  <parent><groupId>com.acme</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+                  <artifactId>app</artifactId>
+                  <dependencies>
+                    <dependency><groupId>com.acme</groupId><artifactId>lib</artifactId><version>${lib.version}</version></dependency>
+                    <dependency><groupId>tools.jackson.core</groupId><artifactId>jackson-databind</artifactId>
+                      <version>${jackson.version}</version></dependency>
+                    <dependency><groupId>com.acme</groupId><artifactId>ranged</artifactId>
+                      <version>[${base.version},${missing.max})</version></dependency>
+                  </dependencies>
+                </project>
+                """);
+
+        DependencyInventory inventory = DependencyInventory.read(root);
+
+        assertThat(find(inventory, "app/pom.xml", "lib").version()).as("nested property of the parent").isEqualTo(
+                "3.2.1");
+        assertThat(find(inventory, "app/pom.xml", "jackson-databind").version())
+                .as("defined by the external Spring Boot parent").isEqualTo(DependencyRecord.UNKNOWN);
+        assertThat(find(inventory, "app/pom.xml", "ranged").version()).isEqualTo(DependencyRecord.UNKNOWN);
+        assertThat(inventory.dependencies()).noneMatch(d -> d.version().contains("${"));
+        assertThat(inventory.flags()).noneMatch(f -> f.coordinate().contains("${"))
+                .filteredOn(f -> f.kind() == FlagKind.VERSION_RANGE).singleElement()
+                .satisfies(f -> assertThat(f.message()).contains("[3.2,${missing.max})"));
+    }
+
+    @Test
     void inventoriesAMultiModuleTreeAndFlagsHygieneProblems(@TempDir Path root) throws IOException {
         copyRepositoryPoms(root);
         write(root, "legacy/pom.xml", LEGACY_POM);

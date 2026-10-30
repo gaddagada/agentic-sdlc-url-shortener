@@ -31,6 +31,8 @@ class UrlValidatorTest {
         "https://sub.domain.example.co.uk:8443/a/b",
         "https://93.184.216.34/",
         "https://[2606:2800:220:1:248:1893:25c8:1946]/",
+        "https://[2002:5db8:d822::1]/",
+        "https://[64:ff9b::5db8:d822]/",
         "http://localhost.example.com/",
         "https://example.com/" + "a",
         "  https://example.com/surrounded-by-whitespace  "
@@ -80,6 +82,27 @@ class UrlValidatorTest {
         assertThatThrownBy(() -> validator.validate(url))
                 .isInstanceOf(UrlRejectedException.class)
                 .hasMessageContaining(reason);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "http://[fe80::1%25eth0]/",
+        "http://[fe80::1%25en0]:8080/admin",
+        "http://[fe80::1%251]/",
+        "http://[::1%25lo]/",
+        "http://[::ffff:0:127.0.0.1]/",
+        "http://[::ffff:0:a00:1]/",
+        "http://[2002:7f00:1::]/",
+        "http://[2002:a9fe:a9fe::1]/",
+        "http://[64:ff9b:1::a00:1]/",
+        "http://[64:ff9b:1::808:808]/"
+    })
+    void rejectsIpv6LiteralsWithAZoneIdOrAnEmbeddedNonPublicAddress(String url) {
+        // A zone ID (RFC 6874) made the literal unparsable, so the URL passed as a public host name; IPv4-translated,
+        // 6to4 and local-use NAT64 addresses reach the embedded (or a local) IPv4 network.
+        assertThatThrownBy(() -> validator.validate(url))
+                .isInstanceOf(UrlRejectedException.class)
+                .hasMessageContaining("non-public");
     }
 
     @Test

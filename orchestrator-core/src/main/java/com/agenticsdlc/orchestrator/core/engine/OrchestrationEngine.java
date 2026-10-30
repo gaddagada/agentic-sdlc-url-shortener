@@ -122,6 +122,10 @@ import com.agenticsdlc.orchestrator.core.workspace.WorkspaceSandbox;
  * run's snapshot and is resynchronized with {@link AuditSink#lastEvent} when a run is loaded from the store or a
  * commit fails, so the chain continues across restarts, nodes and failed commits without gaps.</p>
  *
+ * <p>Failure texts: agent and provider error messages may echo credentials or whole request and response bodies, so
+ * the engine records them (stage last error, RETRY_SCHEDULED, FALLBACK_ENGAGED and STAGE_FAILED audit events, logs,
+ * circuit snapshots) only with credential-like tokens redacted and at most 1000 characters.</p>
+ *
  * <p>Signed change records: when the run completes, the release change record is finalized with the approvals and
  * signed by {@link EngineConfig#changeRecordSigner()} (unsigned by default); the ARTIFACT_ACCEPTED event of the
  * finalized record names the signature algorithm and key id.</p>
@@ -157,6 +161,9 @@ public final class OrchestrationEngine implements AutoCloseable {
 
     /** How often a failed retry wake-up is itself retried before the stage fails. */
     static final int MAX_WAKE_UP_RETRIES = 3;
+
+    /** Maximum length of a failure text recorded in the run, the audit trail and circuit snapshots. */
+    static final int MAX_FAILURE_TEXT = 1000;
 
     private final WorkflowGraph graph;
     private final AgentRegistry agents;
@@ -838,9 +845,23 @@ public final class OrchestrationEngine implements AutoCloseable {
      * is SAFE_STOPPED with {@link HaltReason#INTERRUPTED_BY_RESTART} (audited RUN_INTERRUPTED and SAFE_STOP). Runs
      * leased by a node are skipped (another node is executing them); runs waiting for a human, stopped or terminal
      * are left in the store and loaded on demand. Call once at startup; it is safe to call again later (for example
-     * periodically, to recover runs of a node that died once its lease expired).
+     * periodically, to recover runs of a node that died once its lease expired). Same as
+     * {@link #recoverInterruptedCount()} without the count.
      */
     public void recoverInterrupted() {
+        recoverInterruptedCount();
+    }
+
+    /**
+     * Recovers runs interrupted by a restart exactly like {@link #recoverInterrupted()} and returns how many were
+     * recovered. The summary is logged at INFO when runs were recovered and at DEBUG otherwise, so that periodic
+     * maintenance passes that find nothing to do stay quiet (runs skipped because a node executes them are logged at
+     * DEBUG for the same reason).
+     *
+     * @return the number of runs that were safe-stopped with {@link HaltReason#INTERRUPTED_BY_RESTART} by this call
+     * @throws IllegalStateException when the engine is closed
+     */
+    public int recoverInterruptedCount() {
         ensureOpen();
         int recovered = 0;
         for (Run loaded : runStore.loadAll()) {
@@ -849,7 +870,7 @@ public final class OrchestrationEngine implements AutoCloseable {
             }
             Optional<String> owner = leases.holderOf(loaded.id());
             if (owner.isPresent()) {
-                LOG.info("run not recovered: it is executing on node {} runId={}", owner.get(), loaded.id());
+                LOG.debug("run not recovered: it is executing on node {} runId={}", owner.get(), loaded.id());
                 continue;
             }
             resyncAuditChain(loaded);
@@ -865,12 +886,14 @@ public final class OrchestrationEngine implements AutoCloseable {
             if (live) {
                 continue;
             }
+            boolean[] interrupted = {false};
             try {
                 mutate(loaded.id(), tx -> {
                     Run run = tx.run;
                     if (run.status() != RunStatus.RUNNING || !tx.holder.inFlight.isEmpty()) {
                         return;
                     }
+                    interrupted[0] = true;
                     List<String> reset = new ArrayList<>();
                     for (StageExecution exec : run.stages()) {
                         if (exec.status() == StageStatus.RUNNING) {
@@ -888,12 +911,19 @@ public final class OrchestrationEngine implements AutoCloseable {
                             "run safe-stopped: INTERRUPTED_BY_RESTART",
                             RunMutation.data("haltReason", HaltReason.INTERRUPTED_BY_RESTART, "resetStages", reset));
                 });
-                recovered++;
+                if (interrupted[0]) {
+                    recovered++;
+                }
             } catch (RunLeasedElsewhereException e) {
                 LOG.info("run not recovered: node {} acquired it meanwhile runId={}", e.holder(), loaded.id());
             }
         }
-        LOG.info("recovery finished interruptedRuns={} node={}", recovered, nodeId);
+        if (recovered == 0) {
+            LOG.debug("recovery finished interruptedRuns=0 node={}", nodeId);
+        } else {
+            LOG.info("recovery finished interruptedRuns={} node={}", recovered, nodeId);
+        }
+        return recovered;
     }
 
     /**
@@ -1377,7 +1407,7 @@ public final class OrchestrationEngine implements AutoCloseable {
                 case StageResult.Success s -> circuits.recordSuccess(providerId);
                 case StageResult.NeedsClarification c -> circuits.recordSuccess(providerId);
                 case StageResult.Failure f when ProviderCircuits.counts(f.failure().kind()) ->
-                        circuits.recordFailure(providerId, f.failure().describe(), now());
+                        circuits.recordFailure(providerId, safeFailureText(f.failure().describe()), now());
                 case StageResult.Failure f -> {
                     circuits.recordInconclusive(providerId);
                     yield ProviderCircuits.Transition.NONE;
@@ -1428,7 +1458,8 @@ public final class OrchestrationEngine implements AutoCloseable {
                     return;
                 }
                 tx.holder.inFlight.remove(stageId);
-                failStage(tx, exec, "internal engine error: " + error, HaltReason.AGENT_FAILURE_EXHAUSTED);
+                failStage(tx, exec, safeFailureText("internal engine error: " + error),
+                        HaltReason.AGENT_FAILURE_EXHAUSTED);
             });
         } catch (RuntimeException e) {
             LOG.error("could not safe-stop run after internal error runId={}", runId, e);
@@ -1667,7 +1698,10 @@ public final class OrchestrationEngine implements AutoCloseable {
      */
     private void handleFailure(RunMutation tx, StageDefinition def, StageExecution exec, StageFailure failure) {
         Run run = tx.run;
-        exec.setLastError(failure.describe());
+        // agent and provider messages may carry credentials or large payloads: never persist or audit them verbatim
+        String described = safeFailureText(failure.describe());
+        String error = failure.getMessage() == null ? null : safeFailureText(failure.getMessage());
+        exec.setLastError(described);
         run.markFailure(tx.now, def.id());
         if (failure.retryable() && exec.attempts() < def.retryPolicy().maxAttempts()) {
             Duration backoff = def.retryPolicy().backoff(exec.attempts(), config.maxBackoff(), config.backoffScale());
@@ -1678,8 +1712,8 @@ public final class OrchestrationEngine implements AutoCloseable {
             run.updateCounters(RunCounters::plusRetry);
             safeMetric(() -> metrics.retry(def.id()));
             tx.audit(AuditEventType.RETRY_SCHEDULED, def.id(), Actor.system(), "attempt " + exec.attempts()
-                            + " failed (" + failure.describe() + "); retry in " + backoff.toMillis() + " ms",
-                    RunMutation.data("attempt", exec.attempts(), "kind", failure.kind(), "error", failure.getMessage(),
+                            + " failed (" + described + "); retry in " + backoff.toMillis() + " ms",
+                    RunMutation.data("attempt", exec.attempts(), "kind", failure.kind(), "error", error,
                             "backoffMs", backoff.toMillis(), "nextAttemptAt", exec.nextAttemptAt()));
             scheduleRetry(run.id(), def.id(), token, backoff);
             return;
@@ -1692,14 +1726,14 @@ public final class OrchestrationEngine implements AutoCloseable {
             run.updateCounters(RunCounters::plusFallback);
             safeMetric(() -> metrics.fallback(def.id()));
             tx.audit(AuditEventType.FALLBACK_ENGAGED, def.id(), Actor.system(), "primary agent " + from
-                            + " exhausted (" + failure.describe() + "); deterministic fallback engaged",
+                            + " exhausted (" + described + "); deterministic fallback engaged",
                     RunMutation.data("from", from, "to", AgentRegistry.FALLBACK_AGENT_ID, "kind", failure.kind(),
-                            "error", failure.getMessage()));
+                            "error", error));
             submitAttempt(tx, def, exec);
             return;
         }
         failStage(tx, exec, (failure.retryable() ? "attempts exhausted: " : "non-retryable failure: ")
-                + failure.describe(), HaltReason.AGENT_FAILURE_EXHAUSTED);
+                + described, HaltReason.AGENT_FAILURE_EXHAUSTED);
     }
 
     private void failStage(RunMutation tx, StageExecution exec, String error, HaltReason haltReason) {
@@ -1957,7 +1991,8 @@ public final class OrchestrationEngine implements AutoCloseable {
                 if (!isWakeUpTarget(tx.run, exec, token)) {
                     return;
                 }
-                failStage(tx, exec, "retry wake-up failed " + (failedWakeUps + 1) + " times: " + error,
+                failStage(tx, exec, safeFailureText("retry wake-up failed " + (failedWakeUps + 1) + " times: "
+                                + error),
                         HaltReason.AGENT_FAILURE_EXHAUSTED);
             });
         } catch (RuntimeException e) {
@@ -2061,6 +2096,15 @@ public final class OrchestrationEngine implements AutoCloseable {
 
     private static String abbreviate(String text, int max) {
         return text.length() <= max ? text : text.substring(0, max - 3) + "...";
+    }
+
+    /**
+     * Returns a failure text that is safe to persist in the run (last error), to audit, to log and to show in circuit
+     * snapshots: credential-like tokens redacted ({@link SecretPatterns#redact}) and at most
+     * {@value #MAX_FAILURE_TEXT} characters (a provider error may echo a request or response body).
+     */
+    static String safeFailureText(String text) {
+        return abbreviate(SecretPatterns.redact(text), MAX_FAILURE_TEXT);
     }
 
     private static void safeMetric(Runnable call) {

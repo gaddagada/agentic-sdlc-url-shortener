@@ -42,6 +42,11 @@ import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
  * ({@code *Application}) types never are. One-hop dependents and dependencies of directly impacted types,
  * and types matching only regression keywords, are reported as REGRESSION_RISK with confidence multiplied
  * by 0.6.</p>
+ *
+ * <p>Migrations: when an entity is directly impacted, the latest existing migration and the proposed next version
+ * are taken from the migrations of the modules that own the directly impacted entities; when those modules have
+ * none, from the analysed modules (or from every module when the requirement names none). A migration belongs to the
+ * module of its first path segment, like a type.</p>
  */
 public final class ImpactAnalyzer {
 
@@ -263,6 +268,7 @@ public final class ImpactAnalyzer {
         Keywords keywords = keywords(spec);
         List<IndexedType> allProduction = index.types().stream().filter(t -> !t.test()).toList();
         Set<String> modules = targetModules(allProduction, keywords);
+        boolean modulesNamed = allProduction.stream().anyMatch(t -> !modules.contains(t.module()));
         List<IndexedType> production = allProduction.stream().filter(t -> modules.contains(t.module())).toList();
         Set<String> candidates = new TreeSet<>();
         production.forEach(t -> candidates.add(t.simpleName()));
@@ -375,10 +381,11 @@ public final class ImpactAnalyzer {
         }
         List<String> migrations = new ArrayList<>();
         if (!directEntities.isEmpty()) {
-            if (!index.migrations().isEmpty()) {
-                migrations.add(index.migrations().getLast());
+            List<String> scoped = scopedMigrations(index, directEntities, modules, modulesNamed);
+            if (!scoped.isEmpty()) {
+                migrations.add(scoped.getLast());
             }
-            migrations.add("proposed: V" + nextMigrationVersion(index) + "__" + slug(keywords) + ".sql");
+            migrations.add("proposed: V" + nextMigrationVersion(scoped) + "__" + slug(keywords) + ".sql");
         }
         List<DataFlow> dataFlows = dataFlows(index, directControllers);
         List<String> riskFactors = riskFactors(index, direct);
@@ -473,9 +480,34 @@ public final class ImpactAnalyzer {
         return score;
     }
 
-    private static int nextMigrationVersion(CodebaseIndex index) {
+    /**
+     * Returns the migrations (oldest first) relevant to a schema change of the given entities: those of the entities'
+     * modules; when these have none, those of the analysed modules, or all of them when no module was named.
+     */
+    private static List<String> scopedMigrations(CodebaseIndex index, List<IndexedType> entities, Set<String> modules,
+                                                 boolean modulesNamed) {
+        Set<String> entityModules = new TreeSet<>();
+        entities.forEach(e -> entityModules.add(e.module()));
+        List<String> byEntity = migrationsOf(index, entityModules);
+        if (!byEntity.isEmpty()) {
+            return byEntity;
+        }
+        return modulesNamed ? migrationsOf(index, modules) : index.migrations();
+    }
+
+    private static List<String> migrationsOf(CodebaseIndex index, Set<String> modules) {
+        return index.migrations().stream().filter(m -> modules.contains(moduleOf(m))).toList();
+    }
+
+    /** Module of a workspace-relative path: its first segment (as for {@link IndexedType#module()}). */
+    private static String moduleOf(String path) {
+        int slash = path.indexOf('/');
+        return slash < 0 ? "" : path.substring(0, slash);
+    }
+
+    private static int nextMigrationVersion(List<String> migrations) {
         int max = 0;
-        for (String migration : index.migrations()) {
+        for (String migration : migrations) {
             List<Integer> version = CodebaseIndexer.flywayVersion(migration);
             if (!version.isEmpty()) {
                 max = Math.max(max, version.getFirst());

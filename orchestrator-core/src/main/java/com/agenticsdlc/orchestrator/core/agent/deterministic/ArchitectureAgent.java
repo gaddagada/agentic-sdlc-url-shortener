@@ -39,6 +39,11 @@ import com.agenticsdlc.orchestrator.core.artifact.RiskLevel;
  * handling, alternatives (exactly one chosen), decisions and the design risk
  * ({@code max(preliminary, HIGH for breaking or incompatible changes, MEDIUM for any API or data change)}).
  * Behaviour that the requirement asks to preserve ("unchanged", "keep working") does not produce changes.
+ *
+ * <p>Endpoints the requirement names explicitly ({@code METHOD /path}, for example
+ * {@code GET /api/v1/analytics/campaigns/{campaign}}, in the statement or a functional requirement) become added
+ * API changes ahead of the keyword-derived ones (which they replace for the same method and path); an explicitly
+ * named endpoint that already exists in the codebase is not reported as added.</p>
  */
 public final class ArchitectureAgent implements StageAgent {
 
@@ -48,6 +53,12 @@ public final class ArchitectureAgent implements StageAgent {
     private static final List<String> PRESERVE = List.of("unchanged", "keep working", "keeps working",
             "continue to work", "backward compatible", "must not change", "must not break");
     private static final Pattern UP_TO = Pattern.compile("up to (\\d+)");
+    /** An explicit endpoint mention: an upper-case HTTP method followed by an absolute path. */
+    private static final Pattern EXPLICIT_ENDPOINT = Pattern.compile(
+            "(?<![A-Za-z0-9_])(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\\s+(/[A-Za-z0-9._~%{}:/\\-]*)");
+    private static final Pattern PATH_VARIABLE = Pattern.compile("\\{([^}/]+)}");
+    /** Summary prefix of the API changes for endpoints the requirement names explicitly. */
+    static final String EXPLICIT_ENDPOINT_SUMMARY = "Added endpoint named by the requirement: ";
 
     /**
      * Creates the agent.
@@ -87,7 +98,7 @@ public final class ArchitectureAgent implements StageAgent {
         String changeText = changeText(spec);
         List<String> tokens = Text.tokens(changeText);
         boolean existing = impact.existingCodebase();
-        List<ApiChange> apiChanges = apiChanges(changeText, tokens, impact);
+        List<ApiChange> apiChanges = apiChanges(changeText, tokens, impact, explicitEndpoints(spec));
 
         Map<String, Component> components = new LinkedHashMap<>();
         List<String> deferred = new ArrayList<>();
@@ -104,7 +115,8 @@ public final class ArchitectureAgent implements StageAgent {
         }
         boolean hasController = components.values().stream().anyMatch(c -> "CONTROLLER".equals(c.type()));
         if (!apiChanges.isEmpty() && !hasController) {
-            String name = controllerFor(apiChanges.getFirst().path());
+            String path = apiChanges.getFirst().path();
+            String name = existingController(impact, path).orElse(controllerFor(path));
             boolean known = impact.components().stream().anyMatch(c -> c.name().equals(name));
             components.put(name, new Component(name, "Exposes the new endpoints", "CONTROLLER", !known));
         }
@@ -143,13 +155,61 @@ public final class ArchitectureAgent implements StageAgent {
         return text.toString().strip();
     }
 
-    private static List<ApiChange> apiChanges(String text, List<String> tokens, ImpactAnalysis impact) {
+    /**
+     * Returns the endpoints the requirement names explicitly ({@code METHOD /path}) in the sentences of the
+     * statement and the functional requirements that do not only ask to preserve behaviour, as added API changes in
+     * order of first mention (one per method and path).
+     *
+     * @param spec requirement specification
+     * @return the added API changes
+     */
+    static List<ApiChange> explicitEndpoints(RequirementSpec spec) {
+        List<String> texts = new ArrayList<>(Text.sentences(spec.normalizedStatement()));
+        spec.functional().forEach(r -> texts.add(r.text()));
+        Map<String, ApiChange> found = new LinkedHashMap<>();
+        for (String text : texts) {
+            String lower = text.toLowerCase(Locale.ROOT);
+            if (PRESERVE.stream().anyMatch(lower::contains)) {
+                continue;
+            }
+            Matcher m = EXPLICIT_ENDPOINT.matcher(text);
+            while (m.find()) {
+                String method = m.group(1);
+                String path = m.group(2).replaceAll("[.,:;]+$", "");
+                if (path.length() > 1 && path.endsWith("/")) {
+                    path = path.substring(0, path.length() - 1);
+                }
+                String key = method + " " + path;
+                if (path.isEmpty() || found.containsKey(key)) {
+                    continue;
+                }
+                boolean body = method.equals("POST") || method.equals("PUT") || method.equals("PATCH");
+                List<String> errors = new ArrayList<>();
+                if (body) {
+                    errors.add("400 validation error");
+                }
+                Matcher variable = PATH_VARIABLE.matcher(path);
+                if (variable.find()) {
+                    errors.add("404 unknown " + variable.group(1));
+                }
+                found.put(key, new ApiChange(method, path, EXPLICIT_ENDPOINT_SUMMARY + Text.shorten(text, 200),
+                        body ? "request body as specified by the requirement" : "none",
+                        "response as specified by the requirement", errors, false));
+            }
+        }
+        return List.copyOf(found.values());
+    }
+
+    private static List<ApiChange> apiChanges(String text, List<String> tokens, ImpactAnalysis impact,
+                                              List<ApiChange> explicit) {
         boolean existing = impact.existingCodebase();
         Set<String> existingEndpoints = new LinkedHashSet<>();
         impact.endpoints().forEach(e -> existingEndpoints.add(e.method() + " " + e.path()));
         String lower = text.toLowerCase(Locale.ROOT);
         boolean links = Text.anyToken(tokens, List.of("link", "links", "url", "urls", "shorten*", "alias*"));
-        List<ApiChange> changes = new ArrayList<>();
+        List<ApiChange> changes = new ArrayList<>(explicit);
+        Set<String> named = new LinkedHashSet<>();
+        explicit.forEach(e -> named.add(e.method() + " " + e.path()));
         if (Text.anyToken(tokens, List.of("bulk", "batch"))) {
             Matcher m = UP_TO.matcher(lower);
             String max = m.find() ? m.group(1) : "100";
@@ -187,6 +247,10 @@ public final class ArchitectureAgent implements StageAgent {
         if (links && Text.anyToken(tokens, List.of("metadata", "lookup", "get", "view"))) {
             changes.add(new ApiChange("GET", "/api/v1/links/{code}", "Link metadata", "none", "LinkResponse",
                     List.of("404 unknown code"), false));
+        }
+        if (!named.isEmpty()) {
+            // an endpoint named explicitly replaces a keyword-derived proposal for the same method and path
+            changes.removeIf(c -> !explicit.contains(c) && named.contains(c.method() + " " + c.path()));
         }
         if (!existing) {
             return changes;
@@ -276,6 +340,31 @@ public final class ArchitectureAgent implements StageAgent {
             case FILTER -> "request filtering such as rate limiting (" + name + ")";
             case null, default -> "supporting logic (" + name + ")";
         };
+    }
+
+    /**
+     * Returns the controller of the impact analysis (whatever its change nature) that serves the resource of a path:
+     * the first resource segment as is or in singular form ({@code /api/v1/analytics/...} is served by an existing
+     * {@code AnalyticsController}, {@code /api/v1/links/...} by a {@code LinkController}).
+     */
+    private static java.util.Optional<String> existingController(ImpactAnalysis impact, String path) {
+        String segment = resourceSegment(path);
+        if (segment == null) {
+            return java.util.Optional.empty();
+        }
+        Set<String> candidates = Set.of(Text.capitalize(segment) + "Controller",
+                Text.capitalize(Text.singular(segment)) + "Controller");
+        return impact.components().stream().filter(c -> c.type() == ComponentType.CONTROLLER)
+                .map(ImpactedComponent::name).filter(candidates::contains).findFirst();
+    }
+
+    private static @org.jspecify.annotations.Nullable String resourceSegment(String path) {
+        for (String segment : path.split("/")) {
+            if (!segment.isBlank() && !segment.equals("api") && !segment.matches("v\\d+") && !segment.startsWith("{")) {
+                return segment;
+            }
+        }
+        return null;
     }
 
     static String controllerFor(String path) {

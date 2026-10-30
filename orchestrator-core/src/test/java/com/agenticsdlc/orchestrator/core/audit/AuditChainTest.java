@@ -220,6 +220,13 @@ class AuditChainTest {
         List<AuditEvent> mixed = new ArrayList<>(chain(2));
         mixed.add(unsigned(3, "legacy tail", Map.of()));
         assertThat(AuditChain.verify(mixed).summary()).contains("unsigned").contains("seq 3");
+        ChainVerification stripped = AuditChain.verify(mixed);
+        assertThat(stripped.length()).isEqualTo(2);
+        assertThat(stripped.brokenAtSeq()).isEqualTo(3L);
+        assertThat(stripped.summary()).as("not excused as legacy after signed events")
+                .startsWith("chain broken at seq 3: unsigned event (no hash) after 2 signed events")
+                .doesNotContain("written before hash chaining was enabled");
+        assertThat(AuditChain.verify(List.of(chain(1).getFirst())).valid()).as("a single event").isTrue();
     }
 
     @Test

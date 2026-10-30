@@ -1,7 +1,6 @@
 package com.agenticsdlc.shortener.config;
 
 import java.io.IOException;
-import java.net.URI;
 
 import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
@@ -96,7 +95,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
         ProblemDetail problem = ProblemMapper.rateLimited(
                 "Too many link creation requests from this client; retry after " + retryAfterSeconds + " seconds.");
         // The normalized path, not the raw URI: it is what was rate limited and never reflects path parameters.
-        problem.setInstance(URI.create(RequestPaths.normalizedPath(request)));
+        problem.setInstance(RequestPaths.problemInstance(request));
         response.setStatus(problem.getStatus());
         response.setHeader(HttpHeaders.RETRY_AFTER, Long.toString(retryAfterSeconds));
         response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);

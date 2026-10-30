@@ -68,6 +68,16 @@ class RateLimitFilterTest {
                 .contains("\"status\":429");
     }
 
+    @Test
+    void aRateLimitedDecodedPathWithCharactersIllegalInAUriStillGetsThe429() throws Exception {
+        post("/api/v1/links");
+
+        MockHttpServletResponse limited = post("/api/v1/links/a b%c");
+
+        assertThat(limited.getStatus()).isEqualTo(429);
+        assertThat(limited.getContentAsString()).contains("\"instance\":\"/api/v1/links/a%20b%25c\"");
+    }
+
     private MockHttpServletResponse post(String path) throws Exception {
         MockHttpServletRequest request = new MockHttpServletRequest("POST", path);
         request.setServletPath(path);

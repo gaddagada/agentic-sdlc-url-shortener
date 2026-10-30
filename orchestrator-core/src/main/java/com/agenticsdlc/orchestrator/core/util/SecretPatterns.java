@@ -40,7 +40,24 @@ public final class SecretPatterns {
             "AWS access key id", "Anthropic API key", "GitHub token", "password assignment", "private key block",
             "Slack token", "JSON web token", "credential assignment");
 
+    /** Replacement of a credential-like token in {@link #redact(String)}. */
+    public static final String REDACTED = "[redacted]";
+
     private SecretPatterns() {
+    }
+
+    /**
+     * Replaces every credential-like token of {@code text} with {@value #REDACTED}.
+     *
+     * @param text text to redact
+     * @return the text without credential-like tokens (the same text when it has none)
+     */
+    public static String redact(String text) {
+        String redacted = text;
+        for (Pattern pattern : PATTERNS) {
+            redacted = pattern.matcher(redacted).replaceAll(REDACTED);
+        }
+        return redacted;
     }
 
     /**

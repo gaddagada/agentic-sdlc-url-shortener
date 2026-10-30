@@ -25,7 +25,8 @@ import com.agenticsdlc.orchestrator.core.agent.llm.LlmUsage;
  *   <li>otherwise the entry with the longest model <em>prefix</em> of the model name that ends at a name boundary
  *       (the next character of the model name is not a letter or digit), so an entry for {@code claude-opus-5}
  *       prices {@code claude-opus-5-5} and {@code claude-opus-5-20261001}, but an entry for {@code gpt-4} does not
- *       price {@code gpt-4o};</li>
+ *       price {@code gpt-4o}; a prefix that itself ends with a separator ({@code claude-opus-}) ends at a boundary
+ *       by definition;</li>
  *   <li>otherwise the provider default ({@link Builder#providerDefault});</li>
  *   <li>otherwise the call is unpriced ({@link #costMicroUsd} returns empty).</li>
  * </ol>
@@ -123,7 +124,8 @@ public final class LlmPriceBook {
             String best = null;
             for (String prefix : byModel.keySet()) {
                 if (name.length() > prefix.length() && name.startsWith(prefix)
-                        && !Character.isLetterOrDigit(name.charAt(prefix.length()))
+                        && (!Character.isLetterOrDigit(name.charAt(prefix.length()))
+                        || !Character.isLetterOrDigit(prefix.charAt(prefix.length() - 1)))
                         && (best == null || prefix.length() > best.length())) {
                     best = prefix;
                 }

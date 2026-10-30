@@ -13,8 +13,10 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  * @param version the declared version with properties resolved where possible; {@value #MANAGED} when no version is
  *                declared and it is managed (dependencies always, as Maven requires; plugins when a POM of the
  *                workspace manages them), {@value #UNKNOWN} for a plugin without a version whose parent POM lies
- *                outside the workspace (it may or may not manage it), {@value #NONE} for a plugin that nothing in
- *                the workspace manages and whose parents are all in the workspace
+ *                outside the workspace (it may or may not manage it) and for a declared version whose property
+ *                expression ({@code ${...}}) the workspace cannot resolve (for example a property of an external
+ *                parent or BOM, or one set on the command line), {@value #NONE} for a plugin that nothing in the
+ *                workspace manages and whose parents are all in the workspace
  * @param scope dependency scope ({@code compile} when not declared, {@code import}, {@code test}, ...), or
  *              {@code build} for plugins
  * @param kind dependency or plugin

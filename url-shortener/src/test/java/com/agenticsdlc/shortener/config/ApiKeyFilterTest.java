@@ -93,6 +93,22 @@ class ApiKeyFilterTest {
     }
 
     @Test
+    void aDecodedPathWithCharactersIllegalInAUriStillGetsThe401() throws Exception {
+        // The container decodes /api/v1/links/a%20b%25c%7B to "/api/v1/links/a b%c{"; the problem instance must be
+        // re-encoded instead of failing the request with a 500.
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/v1/links/a%20b%25c%7B");
+        request.setServletPath("/api/v1/links/a b%c{");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        MockFilterChain chain = new MockFilterChain();
+
+        filter.doFilter(request, response, chain);
+
+        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(response.getContentAsString()).contains("\"instance\":\"/api/v1/links/a%20b%25c%7B\"");
+        assertThat(chain.getRequest()).isNull();
+    }
+
+    @Test
     void comparesTheWholeKey() {
         assertThat(filter.matches(KEY)).isTrue();
         assertThat(filter.matches(KEY.substring(0, KEY.length() - 1))).isFalse();

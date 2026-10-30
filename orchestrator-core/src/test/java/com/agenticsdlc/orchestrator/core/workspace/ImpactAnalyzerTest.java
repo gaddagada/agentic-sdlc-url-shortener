@@ -95,6 +95,53 @@ class ImpactAnalyzerTest {
         assertThat(analysis.riskFactors()).anySatisfy(r -> assertThat(r).startsWith("schema change"));
     }
 
+    /** Adds a second module with its own entity and a longer migration history than the shortener's. */
+    private static CodebaseIndex withSecondMigratingModule(Path dir) throws Exception {
+        SyntheticWorkspace.create(dir);
+        Path entity = dir.resolve("orchestrator-app/src/main/java/com/example/app/RunEntity.java");
+        Files.createDirectories(entity.getParent());
+        Files.writeString(entity, """
+                package com.example.app;
+
+                import jakarta.persistence.Entity;
+                import jakarta.persistence.Table;
+
+                @Entity
+                @Table(name = "runs")
+                public class RunEntity {
+                    private String status;
+                }
+                """);
+        Path migrations = dir.resolve("orchestrator-app/src/main/resources/db/migration");
+        Files.createDirectories(migrations);
+        for (String name : List.of("V1__runs.sql", "V2__audit.sql", "V7__run_leases.sql")) {
+            Files.writeString(migrations.resolve(name), "create table t (id bigint);\n");
+        }
+        return new CodebaseIndexer().index(dir);
+    }
+
+    @Test
+    void migrationsAreScopedToTheModuleOfTheImpactedEntities(@TempDir Path dir) throws Exception {
+        CodebaseIndex twoModules = withSecondMigratingModule(dir);
+        assertThat(twoModules.migrations()).as("the index orders migrations across modules by version")
+                .endsWith("orchestrator-app/src/main/resources/db/migration/V7__run_leases.sql");
+
+        ImpactAnalysis named = analyzer.analyze(twoModules, spec("Store a title column for every link in the "
+                + "existing URL shortener and expose it in the link API with at most 200 characters."));
+        assertThat(named.summary()).contains("analysed modules: url-shortener");
+        assertThat(named.migrations()).hasSize(2).first()
+                .isEqualTo("url-shortener/src/main/resources/db/migration/V2__click_events.sql");
+        assertThat(named.migrations().get(1)).startsWith("proposed: V3__");
+
+        ImpactAnalysis unnamed = analyzer.analyze(twoModules, spec("Store a title column for every link and expose "
+                + "it in the link API with at most 200 characters."));
+        assertThat(unnamed.summary()).contains("orchestrator-app").contains("url-shortener");
+        assertThat(component(unnamed, "Link").nature()).isIn(ChangeNature.MODIFY, ChangeNature.EXTEND);
+        assertThat(unnamed.migrations()).as("the impacted entity's module decides, not the whole repository")
+                .hasSize(2).first().isEqualTo("url-shortener/src/main/resources/db/migration/V2__click_events.sql");
+        assertThat(unnamed.migrations().get(1)).startsWith("proposed: V3__");
+    }
+
     @Test
     void oneHopDependenciesAreRegressionRisksWithReducedConfidence() {
         ImpactAnalysis analysis = analyzer.analyze(index, spec("Extend the redirect of the existing URL shortener to "

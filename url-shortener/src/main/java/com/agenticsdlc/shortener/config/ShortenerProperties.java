@@ -100,6 +100,12 @@ public record ShortenerProperties(
                 throw new IllegalArgumentException("shortener.analytics.retention must be positive");
             }
         }
+
+        /** Never prints the HMAC key ({@code ipSalt}). */
+        @Override
+        public String toString() {
+            return "Analytics[ipSalt=<redacted>, retention=" + retention + ", recorder=" + recorder + "]";
+        }
     }
 
     /**

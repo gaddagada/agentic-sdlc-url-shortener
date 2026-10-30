@@ -42,7 +42,10 @@ import tools.jackson.databind.json.JsonMapper;
  *       levels; matched case-insensitively), unknown condition types, conditions nested deeper than
  *       {@value #MAX_CONDITION_DEPTH} levels;</li>
  *   <li>content: rule ids that do not match {@link DeclarativeRule#ID_PATTERN}, duplicate rule ids, rule ids of
- *       built-in rules, invalid regexes, invalid globs (blank, backslashes, absolute, {@code ..} segments), empty
+ *       built-in rules, invalid regexes, regexes longer than 1000 characters or with a
+ *       nested quantifier such as {@code (a+)+} (catastrophic backtracking; at evaluation every regex search also
+ *       has a time budget, see {@link DeclarativePolicyRule}), invalid globs (blank, backslashes, absolute,
+ *       {@code ..} segments), empty
  *       regex/glob/condition lists, negative size limits, blank messages, stages on RUN_START rules,
  *       {@code payloadMatches} outside EXIT rules (only exit gates have a candidate payload), WARN rules with a
  *       severity other than LOW;</li>
@@ -308,10 +311,19 @@ public final class PolicyPackLoader {
             try {
                 Pattern.compile(regex);
             } catch (PatternSyntaxException e) {
-                problems.add(path + "[" + i + "]: invalid regex '" + regex + "': " + e.getDescription()
+                problems.add(path + "[" + i + "]: invalid regex '" + abbreviate(regex) + "': " + e.getDescription()
                         + (e.getIndex() >= 0 ? " near index " + e.getIndex() : ""));
+                continue;
+            }
+            String unsafe = RegexGuard.problem(regex);
+            if (unsafe != null) {
+                problems.add(path + "[" + i + "]: unsafe regex '" + abbreviate(regex) + "': " + unsafe);
             }
         }
+    }
+
+    private static String abbreviate(String text) {
+        return text.length() <= 120 ? text : text.substring(0, 117) + "...";
     }
 
     private static void globs(List<String> globs, String path, List<String> problems) {

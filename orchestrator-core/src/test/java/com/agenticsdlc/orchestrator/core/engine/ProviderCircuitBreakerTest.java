@@ -46,6 +46,7 @@ class ProviderCircuitBreakerTest {
     static final class FlakyLlmAgent implements StageAgent {
         final AtomicInteger calls = new AtomicInteger();
         volatile FailureKind failure = FailureKind.TRANSIENT;
+        volatile String message = "provider " + PROVIDER + " error: overloaded";
 
         @Override
         public AgentRole role() {
@@ -62,7 +63,7 @@ class ProviderCircuitBreakerTest {
             calls.incrementAndGet();
             FailureKind kind = failure;
             if (kind != null) {
-                throw new StageFailure(kind, "provider " + PROVIDER + " error: overloaded");
+                throw new StageFailure(kind, message);
             }
             return StageResult.success(Payloads.testPlan(), "designed by the provider");
         }
@@ -168,6 +169,29 @@ class ProviderCircuitBreakerTest {
         assertThat(flaky.calls.get()).isEqualTo(7);
         Map<String, ProviderCircuit> view = harness.engine().providerCircuits();
         assertThatThrownBy(() -> view.put("x", circuit())).isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    void failureTextsAreRedactedAndBoundedBeforeTheyReachTheRunTheAuditTrailAndTheCircuit() {
+        harness.config(b -> b.clock(clock)).start();
+        String key = "sk-ant-api03-" + "Q".repeat(40);
+        flaky.message = "provider " + PROVIDER + " error: 401 invalid x-api-key " + key + "; request body: "
+                + "{\"prompt\": \"" + "p".repeat(20_000) + "\"}";
+
+        String id = run("redacted");
+
+        List<AuditEvent> failures = harness.events(id).stream().filter(e -> TEST_DESIGN.equals(e.stageId())
+                && (e.type() == AuditEventType.RETRY_SCHEDULED || e.type() == AuditEventType.FALLBACK_ENGAGED))
+                .toList();
+        assertThat(failures).hasSize(3);
+        assertThat(failures).allSatisfy(e -> {
+            assertThat(e.message()).doesNotContain(key).contains("[redacted]");
+            assertThat(String.valueOf(e.data().get("error"))).doesNotContain(key).startsWith("provider fake-llm error")
+                    .hasSizeLessThanOrEqualTo(OrchestrationEngine.MAX_FAILURE_TEXT);
+        });
+        assertThat(circuit().lastFailure()).doesNotContain(key).contains("[redacted]");
+        assertThat(harness.events(id)).noneMatch(e -> e.message().contains(key)
+                || String.valueOf(e.data()).contains(key));
     }
 
     @Test

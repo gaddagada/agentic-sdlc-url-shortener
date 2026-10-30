@@ -3,11 +3,13 @@ package com.agenticsdlc.shortener.service;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -38,7 +40,9 @@ import tools.jackson.databind.ObjectMapper;
  *   <li><b>complete</b>: store the response status and JSON body.</li>
  * </ol>
  * Records are replayable for {@value #RETENTION_HOURS} hours. A pending record older than one minute is treated as
- * abandoned (crashed request) and may be taken over. Expired records are purged hourly.
+ * abandoned (crashed request) and may be taken over. Completion and release act only on the request's own reservation
+ * (identified by its creation instant), so a request that was taken over can neither overwrite the response of the
+ * request that took over nor release its reservation. Expired records are purged hourly.
  */
 @Service
 public class IdempotencyService {
@@ -96,20 +100,21 @@ public class IdempotencyService {
      */
     public <T> IdempotentResult<T> execute(String key, String fingerprint, int status, Class<T> bodyType,
                                            Supplier<T> action) {
-        Optional<IdempotencyRecord> stored = reserve(key, fingerprint);
-        if (stored.isPresent()) {
-            IdempotencyRecord record = stored.get();
+        Reservation reservation = reserve(key, fingerprint);
+        IdempotencyRecord record = reservation.replay();
+        if (record != null) {
             log.debug("idempotent replay status={}", record.getStatus());
             return new IdempotentResult<>(objectMapper.readValue(record.getBody(), bodyType), record.getStatus(), true);
         }
+        Instant reservedAt = Objects.requireNonNull(reservation.reservedAt());
         T body;
         try {
             body = action.get();
         } catch (RuntimeException failure) {
-            release(key, failure);
+            release(key, reservedAt, failure);
             throw failure;
         }
-        complete(key, status, body);
+        complete(key, reservedAt, status, body);
         return new IdempotentResult<>(body, status, false);
     }
 
@@ -122,7 +127,7 @@ public class IdempotencyService {
         }
     }
 
-    private Optional<IdempotencyRecord> reserve(String key, String fingerprint) {
+    private Reservation reserve(String key, String fingerprint) {
         try {
             return reserveOnce(key, fingerprint);
         } catch (DataIntegrityViolationException concurrentReservation) {
@@ -131,11 +136,11 @@ public class IdempotencyService {
         }
     }
 
-    private Optional<IdempotencyRecord> reserveOnce(String key, String fingerprint) {
+    private Reservation reserveOnce(String key, String fingerprint) {
         return Objects.requireNonNull(transactions.execute(tx -> reserveInTransaction(key, fingerprint)));
     }
 
-    private Optional<IdempotencyRecord> reserveInTransaction(String key, String fingerprint) {
+    private Reservation reserveInTransaction(String key, String fingerprint) {
         Instant now = clock.instant();
         Optional<IdempotencyRecord> existing = records.findById(key);
         if (existing.isPresent()) {
@@ -147,12 +152,14 @@ public class IdempotencyService {
                 if (record.isPending()) {
                     throw new IdempotencyInProgressException();
                 }
-                return Optional.of(record);
+                return new Reservation(record, null);
             }
             records.deleteByKey(key);
         }
-        records.saveAndFlush(IdempotencyRecord.pending(key, fingerprint, now));
-        return Optional.empty();
+        // Millisecond precision survives the TIMESTAMP round trip exactly, so the reservation can be matched later.
+        Instant reservedAt = now.truncatedTo(ChronoUnit.MILLIS);
+        records.saveAndFlush(IdempotencyRecord.pending(key, fingerprint, reservedAt));
+        return new Reservation(null, reservedAt);
     }
 
     private static boolean isLive(IdempotencyRecord record, Instant now) {
@@ -161,20 +168,31 @@ public class IdempotencyService {
         return !expired && !abandoned;
     }
 
-    private void complete(String key, int status, Object body) {
-        int updated = records.complete(key, status, objectMapper.writeValueAsString(body),
-                IdempotencyRecord.PENDING_STATUS);
+    private void complete(String key, Instant reservedAt, int status, Object body) {
+        int updated = records.completeReservation(key, status, objectMapper.writeValueAsString(body),
+                IdempotencyRecord.PENDING_STATUS, reservedAt);
         if (updated == 0) {
-            log.warn("idempotency reservation was no longer pending at completion; the response is not replayable");
+            log.warn("idempotency reservation was no longer pending at completion (taken over after {} or purged); "
+                    + "the response is not replayable", PENDING_TIMEOUT);
         }
     }
 
-    private void release(String key, RuntimeException cause) {
+    private void release(String key, Instant reservedAt, RuntimeException cause) {
         try {
-            records.deletePending(key, IdempotencyRecord.PENDING_STATUS);
+            records.deleteReservation(key, IdempotencyRecord.PENDING_STATUS, reservedAt);
         } catch (RuntimeException releaseFailure) {
             cause.addSuppressed(releaseFailure);
             log.warn("could not release idempotency reservation; it expires after {}", PENDING_TIMEOUT);
         }
+    }
+
+    /**
+     * Outcome of a reservation attempt: either a completed record to replay, or the creation instant of this request's
+     * new pending reservation.
+     *
+     * @param replay     the completed record to replay, or null
+     * @param reservedAt creation instant of the new reservation (as stored), or null when replaying
+     */
+    private record Reservation(@Nullable IdempotencyRecord replay, @Nullable Instant reservedAt) {
     }
 }

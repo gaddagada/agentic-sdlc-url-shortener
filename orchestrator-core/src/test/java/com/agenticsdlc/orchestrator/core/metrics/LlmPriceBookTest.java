@@ -40,6 +40,16 @@ class LlmPriceBookTest {
     }
 
     @Test
+    void aPrefixEndingWithASeparatorMatchesTheModelsThatContinueIt() {
+        LlmPriceBook separated = LlmPriceBook.builder().price("anthropic", "claude-opus-", OPUS)
+                .price("anthropic", "claude-opus-5.", OPUS_55).build();
+        assertThat(separated.lookup("anthropic", "claude-opus-4-1")).contains(OPUS);
+        assertThat(separated.lookup("anthropic", "claude-opus-5.5")).as("longest prefix").contains(OPUS_55);
+        assertThat(separated.lookup("anthropic", "claude-opusx")).isEmpty();
+        assertThat(separated.lookup("anthropic", "claude-opus")).isEmpty();
+    }
+
+    @Test
     void computesCostInMicroDollarsWithCacheTokensAsPartsOfTheInput() {
         // uncached input 1000 * 5 + output 200 * 25 + cache read 3000 * 0.5 + cache write 1000 * 6.25
         LlmUsage usage = new LlmUsage(5_000, 200, 3_000, 1_000);

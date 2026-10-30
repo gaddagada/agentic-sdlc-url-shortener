@@ -69,7 +69,9 @@ public interface ChangeRecordSigner {
     /**
      * Returns the payload a change record signature covers: the strict canonical JSON
      * ({@link JsonCodec#strictCanonicalJson(Object)}) of the record without its {@code signature} member. The
-     * signature's own {@code signedAt} is therefore not covered.
+     * signature's own {@code signedAt} is therefore not covered. Object members are sorted, but list order is part of
+     * the payload: the approvals (recorded in the order they were decided) and the artifact ids must keep their order,
+     * and reordering them invalidates the signature. Strings are covered exactly, without Unicode normalization.
      *
      * @param record the change record (signed or not; its signature is ignored)
      * @return canonical JSON text

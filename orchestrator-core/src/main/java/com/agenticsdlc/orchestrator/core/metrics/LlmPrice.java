@@ -59,6 +59,8 @@ public record LlmPrice(double inputPerMillionUsd, double outputPerMillionUsd, do
      *
      * @param usage the usage (cache counts are parts of {@code inputTokens})
      * @return the cost in micro-dollars
+     * @throws ArithmeticException when the cost exceeds {@link Long#MAX_VALUE} micro-dollars (the engine then
+     *                             records the call as unpriced)
      */
     public long costMicroUsd(LlmUsage usage) {
         BigDecimal total = cost(usage.uncachedInputTokens(), inputPerMillionUsd)

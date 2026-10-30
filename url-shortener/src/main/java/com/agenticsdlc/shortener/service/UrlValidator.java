@@ -38,7 +38,10 @@ import com.agenticsdlc.shortener.service.exception.UrlRejectedException;
  *
  * <p>IP literals are parsed without DNS. Dotted quads are checked both as decimal and with POSIX
  * {@code inet_aton} semantics (octal/hex parts such as {@code 0177.0.0.1}), and a host is blocked if either reading is
- * non-public.
+ * non-public. A bracketed IPv6 literal is judged without its zone ID ({@code [fe80::1%25eth0]} is link-local), and a
+ * bracketed host that is not an IP literal is rejected. IPv6 addresses that embed an IPv4 address (IPv4-mapped,
+ * IPv4-compatible, IPv4-translated {@code ::ffff:0:0/96}, NAT64 {@code 64:ff9b::/96}, 6to4 {@code 2002::/16}) are
+ * judged by the embedded address; the local-use NAT64 prefix {@code 64:ff9b:1::/48} is always non-public.
  *
  * <p><b>Resolve-time check (optional, {@code shortener.resolve-targets=true}).</b> By default host names are not
  * resolved: a public-looking name that resolves to a private address is not detected (the shortener never fetches
@@ -148,6 +151,10 @@ public class UrlValidator {
             throw new UrlRejectedException("Target host '" + rawHost + "' is a local or internal host name.");
         }
         List<InetAddress> literalReadings = ipLiteralReadings(host);
+        if (literalReadings.isEmpty() && host.startsWith("[")) {
+            // A bracketed host can only be an IP literal; one that cannot be parsed cannot be judged (fail closed).
+            throw new UrlRejectedException("Target host '" + rawHost + "' is not a supported IP address literal.");
+        }
         for (InetAddress address : literalReadings) {
             if (isNonPublic(address)) {
                 throw new UrlRejectedException(
@@ -195,7 +202,10 @@ public class UrlValidator {
     private static List<InetAddress> ipLiteralReadings(String host) {
         List<InetAddress> readings = new ArrayList<>(2);
         if (host.startsWith("[") && host.endsWith("]")) {
-            addIfLiteral(readings, host.substring(1, host.length() - 1), false);
+            String literal = host.substring(1, host.length() - 1);
+            // RFC 6874 zone ID ("%25eth0" in a URI): the address without it decides (fe80::1%25eth0 is link-local).
+            int zone = literal.indexOf('%');
+            addIfLiteral(readings, zone < 0 ? literal : literal.substring(0, zone), false);
             return readings;
         }
         addIfLiteral(readings, host, false);
@@ -239,18 +249,32 @@ public class UrlValidator {
         if ((b[0] & 0xfe) == 0xfc) {
             return true;                                    // fc00::/7 unique local
         }
+        boolean nat64Prefix = (b[0] & 0xff) == 0x00 && (b[1] & 0xff) == 0x64 && (b[2] & 0xff) == 0xff
+                && (b[3] & 0xff) == 0x9b;
+        if (nat64Prefix && b[4] == 0 && b[5] == 1) {
+            return true;                                    // 64:ff9b:1::/48 local-use NAT64 (RFC 8215)
+        }
+        if ((b[0] & 0xff) == 0x20 && (b[1] & 0xff) == 0x02) {
+            return isNonPublicIpv4(b, 2);                   // 2002::/16 6to4, IPv4 in bits 16..47
+        }
         boolean ipv4Compatible = allZero(b, 0, 12);         // ::a.b.c.d (deprecated)
-        boolean nat64 = (b[0] & 0xff) == 0x00 && (b[1] & 0xff) == 0x64 && (b[2] & 0xff) == 0xff
-                && (b[3] & 0xff) == 0x9b && allZero(b, 4, 12); // 64:ff9b::/96
-        if (ipv4Compatible || nat64) {
-            byte[] embedded = {b[12], b[13], b[14], b[15]};
-            try {
-                return isNonPublic(InetAddress.getByAddress(embedded));
-            } catch (UnknownHostException impossible) {
-                return true; // unreachable for a 4-byte array; fail closed
-            }
+        boolean nat64 = nat64Prefix && allZero(b, 4, 12);   // 64:ff9b::/96
+        boolean ipv4Translated = allZero(b, 0, 8) && (b[8] & 0xff) == 0xff && (b[9] & 0xff) == 0xff
+                && b[10] == 0 && b[11] == 0;                 // ::ffff:0:a.b.c.d (SIIT, RFC 2765)
+        if (ipv4Compatible || nat64 || ipv4Translated) {
+            return isNonPublicIpv4(b, 12);
         }
         return false;
+    }
+
+    /** Whether the IPv4 address in {@code b[from..from+3]} is non-public. */
+    private static boolean isNonPublicIpv4(byte[] b, int from) {
+        byte[] embedded = {b[from], b[from + 1], b[from + 2], b[from + 3]};
+        try {
+            return isNonPublic(InetAddress.getByAddress(embedded));
+        } catch (UnknownHostException impossible) {
+            return true; // unreachable for a 4-byte array; fail closed
+        }
     }
 
     private static boolean allZero(byte[] bytes, int from, int to) {

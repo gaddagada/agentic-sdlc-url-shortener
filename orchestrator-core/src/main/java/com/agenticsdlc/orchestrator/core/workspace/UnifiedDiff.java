@@ -15,7 +15,8 @@ import org.jspecify.annotations.Nullable;
  * <p>Parsing ({@link #parse(String)}) reads optional {@code ---}/{@code +++} file headers and {@code @@} hunks.
  * It is tolerant of what language models typically get wrong: preamble lines ({@code diff --git}, {@code index},
  * prose) are ignored, hunk counts are hints only (the hunk body decides; blank lines that only separate hunks are
- * dropped), a hunk header without line numbers ({@code @@ @@}) is located by its content, a context line without
+ * dropped), a hunk header without line numbers ({@code @@ @@}) is located by its content (it must match exactly one
+ * place after the previous hunk: exactly, else whitespace-insensitively), a context line without
  * its leading space is read as context, and trailing code fences are ignored.</p>
  *
  * <p>Application ({@link #apply(String, String)}) locates every hunk in order, never before the end of the
@@ -489,7 +490,9 @@ public record UnifiedDiff(@Nullable String oldPath, @Nullable String newPath, Li
     /**
      * Locates the old lines: exact at the target, whitespace-insensitive at the target, nearest exact then nearest
      * whitespace-insensitive within the search window, then a unique exact match anywhere after the cursor (for a
-     * hunk without line numbers: the first match after the cursor). Returns -1 when not found.
+     * hunk without line numbers: the unique exact match after the cursor, else the unique whitespace-insensitive one;
+     * an ambiguous hunk without line numbers is never applied at a guessed place). Returns -1 when not found or
+     * ambiguous.
      */
     private static int locate(List<String> source, List<String> expected, int target, int cursor,
                               boolean positionKnown) {
@@ -502,10 +505,17 @@ public record UnifiedDiff(@Nullable String oldPath, @Nullable String newPath, Li
         }
         if (!positionKnown) {
             for (boolean loose : new boolean[] {false, true}) {
+                int found = -1;
                 for (int pos = cursor; pos <= last; pos++) {
                     if (matchesAt(source, expected, pos, loose)) {
-                        return pos;
+                        if (found >= 0) {
+                            return -1; // ambiguous: the hunk carries no position to choose between the matches
+                        }
+                        found = pos;
                     }
+                }
+                if (found >= 0) {
+                    return found;
                 }
             }
             return -1;

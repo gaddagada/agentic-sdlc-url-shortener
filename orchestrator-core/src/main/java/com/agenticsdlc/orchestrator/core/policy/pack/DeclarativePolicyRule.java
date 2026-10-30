@@ -25,6 +25,10 @@ import com.agenticsdlc.orchestrator.core.policy.rules.Globs;
  * is compiled once (regexes and globs), and a match yields a finding with the rule's id, severity, the effect's
  * verdict and the message prefixed with the pack name and version. See {@link Condition} for what each condition
  * inspects.
+ *
+ * <p>Every regex search has a time budget of one second: a search that exceeds it (catastrophic backtracking)
+ * throws, and the {@link com.agenticsdlc.orchestrator.core.policy.PolicyEngine} fails closed with a DENY finding for
+ * the rule instead of stalling the gate.</p>
  */
 public final class DeclarativePolicyRule implements PolicyRule {
 
@@ -122,7 +126,7 @@ public final class DeclarativePolicyRule implements PolicyRule {
     }
 
     private static boolean find(List<Pattern> patterns, String text) {
-        return patterns.stream().anyMatch(p -> p.matcher(text).find());
+        return patterns.stream().anyMatch(p -> RegexGuard.find(p, text));
     }
 
     /**

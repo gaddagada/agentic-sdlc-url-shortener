@@ -68,6 +68,8 @@ class ApiKeyServletContainerTest {
         GET    | /api/v1/%6cinks/abcd1234
         GET    | /api/v1/links/abcd1234/analytics;jsessionid=1
         DELETE | /%61pi/v1/links/abcd1234
+        GET    | /api/v1/links/a%20b
+        GET    | /api/v1/links/100%25
         """)
     void everySpellingOfTheManagementApiNeedsTheKey(String method, String rawPath) throws Exception {
         HttpResponse<String> withoutKey = send(method, rawPath, method.equals("POST") ? BODY : null, null);

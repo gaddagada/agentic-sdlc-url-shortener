@@ -151,6 +151,25 @@ class UnifiedDiffTest {
     }
 
     @Test
+    void aHunkWithoutLineNumbersWhoseContextMatchesTwiceIsRejectedInsteadOfPatchingTheFirstPlace() {
+        String source = "class A {\n    void a() {\n        run();\n    }\n\n    void b() {\n        run();\n    }\n}\n";
+        UnifiedDiff ambiguous = UnifiedDiff.parse("@@ @@\n         run();\n+        log();\n     }\n");
+
+        assertThatThrownBy(() -> ambiguous.apply(source, "A.java")).isInstanceOfSatisfying(PatchException.class,
+                e -> {
+                    assertThat(e.hunk()).isEqualTo(1);
+                    assertThat(e.getMessage()).contains("match at line 3 but also elsewhere")
+                            .contains("make the context unique");
+                });
+        assertThat(UnifiedDiff.parse("@@ @@\n     void b() {\n         run();\n+        log();\n").apply(source, "A.java"))
+                .as("unique context still applies").isEqualTo(source.replace("    void b() {\n        run();\n",
+                        "    void b() {\n        run();\n        log();\n"));
+        assertThat(UnifiedDiff.parse("@@ -6,3 +6,4 @@\n     void b() {\n         run();\n+        log();\n     }\n")
+                .apply(source, "A.java")).as("a numbered hunk picks the declared place")
+                .contains("    void b() {\n        run();\n        log();\n");
+    }
+
+    @Test
     void aHunkThatDoesNotMatchFailsWithThePreciseLineAndTheNearestMismatch() {
         String wrong = diff(2, 12).replace("         urlValidator.validate(url);\n",
                 "         private final LinkLookup lookup;\n");

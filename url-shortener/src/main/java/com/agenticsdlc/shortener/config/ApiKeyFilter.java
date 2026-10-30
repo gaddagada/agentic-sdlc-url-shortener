@@ -1,7 +1,6 @@
 package com.agenticsdlc.shortener.config;
 
 import java.io.IOException;
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -84,7 +83,7 @@ public class ApiKeyFilter extends OncePerRequestFilter {
         log.debug("rejected unauthenticated request method={} path={}", request.getMethod(),
                 RequestPaths.normalizedPath(request));
         ProblemDetail problem = ProblemMapper.unauthorized();
-        problem.setInstance(URI.create(RequestPaths.normalizedPath(request)));
+        problem.setInstance(RequestPaths.problemInstance(request));
         response.setStatus(problem.getStatus());
         response.setHeader(HttpHeaders.WWW_AUTHENTICATE, WWW_AUTHENTICATE_VALUE);
         response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);

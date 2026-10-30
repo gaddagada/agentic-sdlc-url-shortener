@@ -81,7 +81,8 @@ class LlmTimeoutScaleTest {
 
     @Test
     void aSlowLlmAgentSucceedsWithinTheScaledTimeout() {
-        harness.config(b -> b.llmTimeoutScale(5.0)).start();
+        // 200 ms x 10 = 2 s for 500 ms of work: a wide margin, so a slow CI machine does not time the agent out
+        harness.config(b -> b.llmTimeoutScale(10.0)).start();
         String id = start();
 
         Run atRelease = harness.awaitApproval(id, WorkflowDefinitions.RELEASE_READINESS);
@@ -91,7 +92,7 @@ class LlmTimeoutScaleTest {
                 || e.type() == AuditEventType.FALLBACK_ENGAGED);
         assertThat(started(id, IMPLEMENT)).singleElement().satisfies(e -> {
             assertThat(e.data()).containsEntry("agent", "fake-llm:slow-model");
-            assertThat(((Number) e.data().get("timeoutMs")).longValue()).isEqualTo(1_000L);
+            assertThat(((Number) e.data().get("timeoutMs")).longValue()).isEqualTo(2_000L);
         });
         assertThat(started(id, WorkflowDefinitions.INTAKE)).singleElement().satisfies(e -> {
             assertThat(e.data()).containsEntry("agent", AgentRegistry.DETERMINISTIC);

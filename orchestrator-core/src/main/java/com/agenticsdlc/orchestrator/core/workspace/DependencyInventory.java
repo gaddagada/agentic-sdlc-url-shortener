@@ -54,7 +54,9 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  * POM that cannot be parsed that way is reported with an {@link FlagKind#UNPARSEABLE_POM} flag.</p>
  *
  * <p>Versions: properties ({@code ${...}}) are resolved from the module, its parents in the workspace and the
- * {@code project.*} built-ins; unresolved expressions are kept verbatim. Flags (severity): {@code system} scope and
+ * {@code project.*} built-ins; a declared version that still contains an unresolved expression (a property of an
+ * external parent or BOM, or one set on the command line) is recorded as {@value DependencyRecord#UNKNOWN} rather
+ * than as the raw expression. Flags (severity): {@code system} scope and
  * {@code LATEST}/{@code RELEASE} versions HIGH; version ranges and SNAPSHOT versions of artifacts that are not modules
  * of the workspace MEDIUM; duplicate declarations within one section of a module and plugins without a version that
  * nothing in the workspace manages LOW. A plugin without a version whose parent POM lies outside the workspace (for
@@ -325,11 +327,14 @@ public record DependencyInventory(List<PomModule> modules, List<DependencyRecord
                     ancestors), pom.parentCoordinate()));
             Map<String, Integer> seen = new HashMap<>();
             for (Declaration d : pom.declarations()) {
-                String version = versionOf(d, pom, ancestors, externalParent);
+                String declared = versionOf(d, pom, ancestors, externalParent);
+                // an expression the workspace cannot resolve is not a version: record it as unknown, but still
+                // flag what is visible of it (a range stays a range)
+                String version = declared.contains("${") ? DependencyRecord.UNKNOWN : declared;
                 DependencyRecord record = new DependencyRecord(pom.path(), d.groupId(), d.artifactId(), version,
                         d.scope(), d.kind(), d.section());
                 records.add(record);
-                flag(record, d, byKey, flags);
+                flag(record, declared, d, byKey, flags);
                 String key = d.section() + "|" + d.kind() + "|" + d.groupId() + ":" + d.artifactId() + ":"
                         + d.type() + ":" + d.classifier();
                 if (seen.merge(key, 1, Integer::sum) == 2) {
@@ -342,9 +347,8 @@ public record DependencyInventory(List<PomModule> modules, List<DependencyRecord
         return new DependencyInventory(modules, records, flags, notes);
     }
 
-    private static void flag(DependencyRecord record, Declaration d, Map<String, ParsedPom> modules,
+    private static void flag(DependencyRecord record, String version, Declaration d, Map<String, ParsedPom> modules,
                              List<DependencyFlag> flags) {
-        String version = record.version();
         String what = (d.kind() == DependencyRecord.Kind.PLUGIN ? "plugin " : "dependency ") + d.groupId() + ":"
                 + d.artifactId();
         if ("system".equalsIgnoreCase(d.scope())) {

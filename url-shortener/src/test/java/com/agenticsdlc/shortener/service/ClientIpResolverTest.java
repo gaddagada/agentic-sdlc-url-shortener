@@ -27,8 +27,13 @@ class ClientIpResolverTest {
         '6.6.6.6, 203.0.113.9'               | 203.0.113.9
         '6.6.6.6,203.0.113.9 , '             | 203.0.113.9
         2001:db8::1                          | 2001:db8::1
+        203.0.113.9:51234                    | 203.0.113.9
+        '6.6.6.6:1, 203.0.113.9:443'         | 203.0.113.9
+        '[2001:db8::1]:51234'                | 2001:db8::1
+        '[2001:db8::1]'                      | 2001:db8::1
         """)
     void usesRightMostForwardedEntryWhenTrusted(String forwardedFor, String expected) {
+        // Proxies that append the client's source port must not give every new connection its own rate-limit bucket.
         // The right-most hop is appended by the trusted proxy; left entries are client-controlled.
         assertThat(trusted.resolve(REMOTE, forwardedFor)).isEqualTo(expected);
     }

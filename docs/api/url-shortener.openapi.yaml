@@ -9,8 +9,12 @@ info:
       problem `type` URI (`https://agenticsdlc.dev/problems/<slug>`), not on `title` or `detail`.
     * Timestamps are ISO-8601 in UTC.
     * Link creation is rate limited per client IP with a token bucket (default 20 burst, 20/minute), one token per
-      created link: `POST /api/v1/links` costs 1 token, `POST /api/v1/links/bulk` costs one token per item. Buckets
-      live in memory per node by default, or in Redis shared by all nodes (`shortener.rate-limit.backend=redis`).
+      requested link: `POST /api/v1/links` costs 1 token per request, charged before the request is read, so a
+      request that is then rejected (400, 409, 422) or answered from an idempotent replay costs a token as well;
+      `POST /api/v1/links/bulk` costs one token per item, charged only once the request as a whole is valid (see the
+      operation). Buckets live in memory per node by default, or in Redis shared by all nodes
+      (`shortener.rate-limit.backend=redis`). Behind a trusted proxy (`shortener.trust-forwarded-headers=true`) the
+      client IP is the right-most `X-Forwarded-For` entry, without a port the proxy may have appended.
     * Authentication is optional. When `shortener.security.api-key` is set, every request under `/api/v1/links`
       (create, bulk, metadata, analytics, deactivate) must send it in the `X-Api-Key` header, otherwise it gets
       `401` (`unauthorized`). Redirects (`GET /{code}`), actuator and the API docs stay public. Without a key the API

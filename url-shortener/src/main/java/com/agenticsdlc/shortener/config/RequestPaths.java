@@ -1,6 +1,11 @@
 package com.agenticsdlc.shortener.config;
 
+import java.net.URI;
+import java.net.URISyntaxException;
+
 import jakarta.servlet.http.HttpServletRequest;
+
+import org.jspecify.annotations.Nullable;
 
 /**
  * Path decisions of the servlet filters ({@link RateLimitFilter}, {@link ApiKeyFilter}).
@@ -42,5 +47,21 @@ final class RequestPaths {
             }
         }
         return normalized.toString();
+    }
+
+    /**
+     * Returns the normalized path as the {@code instance} of a Problem Details body written by a filter. The path is
+     * decoded, so it may contain characters that are illegal in a URI (a space, {@code %}, braces, ...); they are
+     * percent-encoded again here instead of failing the request ({@link URI#create} would throw).
+     *
+     * @param request current request
+     * @return the instance URI, or {@code null} in the unlikely case that the path cannot be represented
+     */
+    static @Nullable URI problemInstance(HttpServletRequest request) {
+        try {
+            return new URI(null, null, normalizedPath(request), null);
+        } catch (URISyntaxException unrepresentable) {
+            return null;
+        }
     }
 }

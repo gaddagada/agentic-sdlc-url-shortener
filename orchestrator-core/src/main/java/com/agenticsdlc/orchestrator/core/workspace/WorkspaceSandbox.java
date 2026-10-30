@@ -177,9 +177,11 @@ public final class WorkspaceSandbox {
      * </ul>
      *
      * <p>The whole change set is checked, and every diff is applied in memory, before anything is written: a CREATE
-     * of an existing file, a path outside the {@link #ALLOWED_ROOTS} or outside the sandbox, and a diff that does
-     * not apply (with the hunk, the expected line and the nearest mismatch) reject it with a
-     * {@link ChangeSetRejectedException} listing every problem.</p>
+     * of an existing file, a path outside the {@link #ALLOWED_ROOTS} or outside the sandbox, two changes that name
+     * the same file (also when spelled differently, such as {@code a//b} and {@code a/./b}: each diff would be
+     * applied to the original file and only the last one would survive), a path that is an existing directory or
+     * lies below an existing file, and a diff that does not apply (with the hunk, the expected line and the nearest
+     * mismatch) reject it with a {@link ChangeSetRejectedException} listing every problem.</p>
      *
      * @param changeSet the change set
      * @return the written or deleted paths (relative; {@code <file>.skeleton} for skeleton modifications)
@@ -224,6 +226,7 @@ public final class WorkspaceSandbox {
     private Map<String, String> check(ChangeSet changeSet) {
         List<String> problems = new ArrayList<>();
         Map<String, String> patched = new HashMap<>();
+        Map<Path, String> targets = new HashMap<>();
         for (ChangeSet.FileChange change : changeSet.changes()) {
             if (!isAllowedPath(change.path())) {
                 problems.add(change.path() + " is outside the allowed roots (" + String.join(", ", ALLOWED_ROOTS)
@@ -235,6 +238,17 @@ public final class WorkspaceSandbox {
                 file = resolveInside(change.path());
             } catch (IllegalArgumentException e) {
                 problems.add(change.path() + " escapes the sandbox");
+                continue;
+            }
+            String previous = targets.putIfAbsent(file, change.path());
+            if (previous != null) {
+                problems.add(change.path() + " names the same file as " + previous + "; give every file exactly one "
+                        + "change (merge the hunks into one diff)");
+                continue;
+            }
+            String shape = shapeProblem(file);
+            if (shape != null) {
+                problems.add(change.path() + " " + shape);
                 continue;
             }
             if (change.operation() == ChangeSet.Operation.CREATE && Files.exists(file)) {
@@ -254,6 +268,23 @@ public final class WorkspaceSandbox {
             throw new ChangeSetRejectedException(problems);
         }
         return patched;
+    }
+
+    /**
+     * Returns why a path cannot be written or deleted as a file (an existing directory, or a path below an existing
+     * file), or null.
+     */
+    private String shapeProblem(Path file) {
+        if (Files.isDirectory(file)) {
+            return "is a directory; a change must name a file";
+        }
+        for (Path parent = file.getParent(); parent != null && parent.startsWith(path) && !parent.equals(path);
+                parent = parent.getParent()) {
+            if (Files.exists(parent) && !Files.isDirectory(parent)) {
+                return "lies below the existing file " + path.relativize(parent).toString().replace('\\', '/');
+            }
+        }
+        return null;
     }
 
     /** Applies the DIFF of a change in memory; returns the problem, or null when it applied. */

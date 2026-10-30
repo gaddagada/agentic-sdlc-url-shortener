@@ -27,6 +27,10 @@ import com.agenticsdlc.orchestrator.core.util.Hashes;
  *   <li>{@code prevHash} ({@link #GENESIS} when absent).</li>
  * </ul>
  *
+ * <p>Strings are hashed exactly as written: no Unicode normalization is applied (see
+ * {@link JsonCodec#strictCanonicalJson(Object)}), so an audit store must not normalize messages or data (NFC/NFD), or
+ * verification reports the affected events as modified.</p>
+ *
  * <p>Changing any field of an event changes its hash; removing, inserting or reordering events breaks the
  * {@code prevHash} links or the sequence. The chain is not keyed: it proves integrity relative to a trusted head
  * hash (for example one exported or anchored elsewhere), not authorship.</p>
@@ -103,8 +107,10 @@ public final class AuditChain {
      * whose hash is {@code anchorHash} (use {@code 0} and {@link #GENESIS} for the complete chain). Detected
      * problems, reported at the first event where they occur:
      * <ul>
-     *   <li>an unsigned event (no {@code prevHash} or {@code hash}, written before hash chaining existed): the
-     *       chain is reported as unsigned;</li>
+     *   <li>an unsigned event (no {@code prevHash} or {@code hash}): at the start of the examined events (written
+     *       before hash chaining existed) the chain is reported as unsigned; after signed events it is reported as a
+     *       chain break, because a legacy writer cannot follow signed events and stripping the chain fields is how
+     *       an event would be modified without detection;</li>
      *   <li>an event of another run;</li>
      *   <li>a sequence gap, duplicate or reordering ({@code seq} is not the previous one plus 1);</li>
      *   <li>a broken link ({@code prevHash} is not the previous event's {@code hash}): an event was removed,
@@ -129,9 +135,13 @@ public final class AuditChain {
         long verified = 0;
         for (AuditEvent event : events) {
             if (!event.signed()) {
-                return ChainVerification.broken(verified, event.seq(), null, null, "chain is unsigned: event seq "
-                        + event.seq() + " has no " + (event.hash() == null ? "hash" : "prevHash")
-                        + " (written before hash chaining was enabled)");
+                String missing = event.hash() == null ? "hash" : "prevHash";
+                return ChainVerification.broken(verified, event.seq(), null, null, verified == 0
+                        ? "chain is unsigned: event seq " + event.seq() + " has no " + missing
+                        + " (written before hash chaining was enabled)"
+                        : "chain broken at seq " + event.seq() + ": unsigned event (no " + missing + ") after "
+                        + verified + " signed events (chain fields stripped, or written by a node without hash "
+                        + "chaining)");
             }
             if (!runId.equals(event.runId())) {
                 return ChainVerification.broken(verified, event.seq(), null, null, "event seq " + event.seq()

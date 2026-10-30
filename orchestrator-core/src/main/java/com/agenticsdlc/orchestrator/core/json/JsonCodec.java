@@ -183,7 +183,13 @@ public final class JsonCodec {
      *   <li>no insignificant whitespace;</li>
      *   <li>strings: quotation mark and backslash are escaped, control characters below U+0020 use the short escapes
      *       (backspace, form feed, line feed, carriage return, tab) or a lowercase six-character unicode escape;
-     *       every other character is written as is (the caller encodes the text as UTF-8);</li>
+     *       every other character is written as is (the caller encodes the text as UTF-8). <strong>No Unicode
+     *       normalization is applied:</strong> canonically equivalent strings with different code points (a
+     *       precomposed e with acute accent, U+00E9, and {@code e} followed by the combining acute accent U+0301:
+     *       NFC versus NFD) produce
+     *       different canonical JSON and therefore different hashes, so stores must keep strings exactly as written
+     *       (a store or transport that normalizes Unicode breaks audit hashes and signatures); a lone surrogate is
+     *       encoded as {@code ?} by UTF-8 and is therefore indistinguishable from a question mark in a hash;</li>
      *   <li>numbers are written in a normalized decimal form whatever their Java type: integral values without a
      *       fraction or exponent ({@code 2}, {@code 2L}, {@code 2.0} and {@code 2E0} all become {@code 2}), other
      *       values as a plain decimal without trailing zeros ({@code 0.5}); a {@code float} uses its shortest
@@ -192,7 +198,8 @@ public final class JsonCodec {
      *   <li>booleans and nulls as literals; lists, sets and arrays as arrays in iteration order; enums by name;</li>
      *   <li>any other value (records, instants, JSON trees, ...) is first converted to a plain tree with this codec's
      *       mapper, so it is written exactly as it reads back after a JSON round trip (for example an
-     *       {@link java.time.Instant} becomes its ISO-8601 string).</li>
+     *       {@link java.time.Instant} becomes its ISO-8601 string, and a value the mapper writes as JSON null, such as
+     *       an empty {@link java.util.Optional}, becomes {@code null}).</li>
      * </ul>
      *
      * @param value the value (may be null)
@@ -223,7 +230,9 @@ public final class JsonCodec {
             case Object[] items -> writeCanonicalArray(Arrays.asList(items), out, depth);
             default -> {
                 Object plain = mapper.convertValue(value, Object.class);
-                if (plain == null || plain.getClass() == value.getClass()) {
+                if (plain == null) {
+                    out.append("null"); // the mapper writes it as JSON null, which is what reads back
+                } else if (plain.getClass() == value.getClass()) {
                     writeCanonicalString(String.valueOf(value), out);
                 } else {
                     writeCanonical(plain, out, depth + 1);

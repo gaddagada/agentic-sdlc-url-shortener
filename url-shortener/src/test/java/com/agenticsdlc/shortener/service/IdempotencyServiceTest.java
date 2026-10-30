@@ -10,6 +10,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -175,6 +176,70 @@ class IdempotencyServiceTest {
         assertThat(first.get(10, TimeUnit.SECONDS).replayed()).isFalse();
         assertThat(idempotency.execute(key, "fp-1", 201, Payload.class, this::newPayload).replayed()).isTrue();
         assertThat(executions).hasValue(1);
+    }
+
+    @Test
+    void aRequestThatWasTakenOverDoesNotCompleteTheReservationOfTheRequestThatTookOver() throws Exception {
+        CountDownLatch secondStarted = new CountDownLatch(1);
+        CountDownLatch releaseSecond = new CountDownLatch(1);
+        AtomicReference<CompletableFuture<IdempotentResult<Payload>>> second = new AtomicReference<>();
+
+        // The first request stalls past the pending timeout; a retry takes the key over and is still running when
+        // the first request finally completes.
+        IdempotentResult<Payload> first = idempotency.execute(key, "fp-1", 201, Payload.class, () -> {
+            clock.advance(Duration.ofMinutes(2));
+            second.set(CompletableFuture.supplyAsync(() ->
+                    idempotency.execute(key, "fp-1", 201, Payload.class, () -> {
+                        secondStarted.countDown();
+                        await(releaseSecond);
+                        return new Payload("second", 2);
+                    })));
+            await(secondStarted);
+            return new Payload("first", 1);
+        });
+
+        assertThat(first.body()).isEqualTo(new Payload("first", 1));
+        assertThat(records.findById(key).orElseThrow().isPending()).as("the retry's reservation is untouched")
+                .isTrue();
+        assertThatThrownBy(() -> idempotency.execute(key, "fp-1", 201, Payload.class, this::newPayload))
+                .isInstanceOf(IdempotencyInProgressException.class);
+
+        releaseSecond.countDown();
+        assertThat(second.get().get(10, TimeUnit.SECONDS).body()).isEqualTo(new Payload("second", 2));
+        IdempotentResult<Payload> replay = idempotency.execute(key, "fp-1", 201, Payload.class, this::newPayload);
+        assertThat(replay.replayed()).isTrue();
+        assertThat(replay.body()).as("replays what the request holding the reservation answered")
+                .isEqualTo(new Payload("second", 2));
+        assertThat(executions).hasValue(0);
+    }
+
+    @Test
+    void aFailingRequestThatWasTakenOverDoesNotReleaseTheReservationOfTheRequestThatTookOver() throws Exception {
+        CountDownLatch secondStarted = new CountDownLatch(1);
+        CountDownLatch releaseSecond = new CountDownLatch(1);
+        AtomicReference<CompletableFuture<IdempotentResult<Payload>>> second = new AtomicReference<>();
+
+        assertThatThrownBy(() -> idempotency.execute(key, "fp-1", 201, Payload.class, () -> {
+            clock.advance(Duration.ofMinutes(2));
+            second.set(CompletableFuture.supplyAsync(() ->
+                    idempotency.execute(key, "fp-1", 201, Payload.class, () -> {
+                        secondStarted.countDown();
+                        await(releaseSecond);
+                        return new Payload("second", 2);
+                    })));
+            await(secondStarted);
+            throw new IllegalStateException("first request failed late");
+        })).hasMessage("first request failed late");
+
+        assertThat(records.findById(key)).as("the retry's reservation is not released").isPresent();
+        assertThatThrownBy(() -> idempotency.execute(key, "fp-1", 201, Payload.class, this::newPayload))
+                .isInstanceOf(IdempotencyInProgressException.class);
+
+        releaseSecond.countDown();
+        assertThat(second.get().get(10, TimeUnit.SECONDS).replayed()).isFalse();
+        assertThat(idempotency.execute(key, "fp-1", 201, Payload.class, this::newPayload).body())
+                .isEqualTo(new Payload("second", 2));
+        assertThat(executions).hasValue(0);
     }
 
     @Test

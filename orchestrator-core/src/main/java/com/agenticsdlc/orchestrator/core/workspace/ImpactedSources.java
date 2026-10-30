@@ -22,6 +22,7 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 
 import com.agenticsdlc.orchestrator.core.util.RepoPaths;
+import com.agenticsdlc.orchestrator.core.util.SecretPatterns;
 
 /**
  * Reads the source of the files a change touches, so that agents write diffs against the real text instead of
@@ -32,6 +33,8 @@ import com.agenticsdlc.orchestrator.core.util.RepoPaths;
  *       symbolic links) outside the workspace root, secret-bearing files ({@link WorkspaceSandbox#isSecretFile})
  *       and files under {@link WorkspaceSandbox#SKIPPED_DIRECTORIES} are refused;</li>
  *   <li>binary files (a NUL byte, or not valid UTF-8) are skipped;</li>
+ *   <li>credential-like tokens ({@link SecretPatterns}) are replaced with {@value SecretPatterns#REDACTED} before
+ *       the source leaves the workspace (it is sent to the LLM provider), with a note naming the file;</li>
  *   <li>each file is capped at {@code perFileChars} and all files together at {@code totalChars}; a cut file ends
  *       with a {@value #TRUNCATED_MARKER} marker line;</li>
  *   <li>requests are served by priority ({@link Priority#MODIFY} targets first, then {@link Priority#EXTEND}, then
@@ -39,8 +42,8 @@ import com.agenticsdlc.orchestrator.core.util.RepoPaths;
  *       when it fits completely into the remaining budget.</li>
  * </ul>
  *
- * <p>Every file that is not included in full gets a note ("truncated", "not found", "refused", "skipped",
- * "omitted"), so prompts can say what is missing.</p>
+ * <p>Every file that is not included in full or verbatim gets a note ("truncated", "not found", "refused",
+ * "skipped", "omitted", "redacted"), so prompts can say what is missing.</p>
  */
 public final class ImpactedSources {
 
@@ -187,6 +190,12 @@ public final class ImpactedSources {
             if (text == null) {
                 notes.add(path + ": skipped (binary or not UTF-8 text)");
                 continue;
+            }
+            String redacted = SecretPatterns.redact(text.content());
+            if (!redacted.equals(text.content())) {
+                text = new Text(redacted, text.complete(), text.sizeBytes());
+                notes.add(path + ": credential-like tokens redacted (shown as " + SecretPatterns.REDACTED
+                        + "); do not use redacted lines as diff context");
             }
             int allowed = Math.min(perFileChars, remaining);
             if (text.content().length() <= allowed) {

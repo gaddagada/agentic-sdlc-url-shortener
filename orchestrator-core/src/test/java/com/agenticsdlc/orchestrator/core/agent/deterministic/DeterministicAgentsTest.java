@@ -85,6 +85,25 @@ class DeterministicAgentsTest {
     }
 
     @Test
+    void anExplicitlyNamedEndpointIsPlannedAndVerifiedThroughTheWholeDeterministicPipeline(@TempDir Path dir)
+            throws Exception {
+        CodebaseIndex index = new CodebaseIndexer().index(SyntheticWorkspace.create(dir));
+        String campaign = "Add GET /api/v1/analytics/campaigns/{campaign} to the existing URL shortener: it returns "
+                + "the total clicks of all links carrying the campaign label.";
+        Map<AgentRole, String> json = runPipeline(campaign, RunOptions.defaults().withWorkspace(WorkspaceMode.REPO),
+                index);
+
+        DesignSpec design = codec.fromJson(json.get(AgentRole.ARCHITECTURE), DesignSpec.class);
+        assertThat(design.apiChanges()).extracting(a -> a.method() + " " + a.path())
+                .contains("GET /api/v1/analytics/campaigns/{campaign}");
+        ChangeSet changeSet = codec.fromJson(json.get(AgentRole.IMPLEMENTATION), ChangeSet.class);
+        assertThat(changeSet.changes()).anySatisfy(c -> assertThat(c.content())
+                .contains("/api/v1/analytics/campaigns/{campaign}"));
+        VerificationReport report = codec.fromJson(json.get(AgentRole.VERIFICATION), VerificationReport.class);
+        assertThat(report.passed()).as(report.toString()).isTrue();
+    }
+
+    @Test
     void implementationGeneratesDdlTestsAndSkeletonsAndRegistersASandboxCompensation(@TempDir Path dir)
             throws Exception {
         Path workspace = SyntheticWorkspace.create(dir.resolve("ws"));

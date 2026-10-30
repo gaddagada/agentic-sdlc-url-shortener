@@ -214,6 +214,38 @@ class WorkspaceSandboxTest {
     }
 
     @Test
+    void twoChangesOfTheSameFileAndDirectoryShapedPathsAreRejectedBeforeAnythingIsWritten(@TempDir Path dir)
+            throws Exception {
+        Path workspace = SyntheticWorkspace.create(dir.resolve("ws"));
+        WorkspaceSandbox sandbox = WorkspaceSandbox.create(workspace, dir.resolve("sandboxes"), "r1");
+        String created = "url-shortener/src/main/java/com/agenticsdlc/shortener/api/BulkLinkController.java";
+        String respelled = LINK_SERVICE.replace("/service/", "//service/./");
+        String second = linkServiceDiff("     private final UrlValidator urlValidator;")
+                .replace("java.time.Clock clock = java.time.Clock.systemUTC()", "int limit = 100");
+        ChangeSet changes = new ChangeSet("HEAD", List.of(
+                new FileChange(created, Operation.CREATE, "java", "new", ContentKind.FULL, "class Bulk {}", List.of()),
+                new FileChange(LINK_SERVICE, Operation.MODIFY, "java", "clock", ContentKind.DIFF,
+                        linkServiceDiff("     private final UrlValidator urlValidator;"), List.of()),
+                new FileChange(respelled, Operation.MODIFY, "java", "limit", ContentKind.DIFF, second, List.of()),
+                new FileChange("url-shortener/src/main/java", Operation.DELETE, "java", "rm", ContentKind.NONE, "",
+                        List.of()),
+                new FileChange(LINK_SERVICE + "/Nested.java", Operation.CREATE, "java", "nested",
+                        ContentKind.FULL, "class Nested {}", List.of())), "./mvnw verify", List.of(), "revert",
+                List.of());
+
+        assertThatThrownBy(() -> sandbox.apply(changes)).isInstanceOfSatisfying(ChangeSetRejectedException.class,
+                e -> assertThat(e.problems()).containsExactly(
+                        respelled + " names the same file as " + LINK_SERVICE + "; give every file exactly one change "
+                                + "(merge the hunks into one diff)",
+                        "url-shortener/src/main/java is a directory; a change must name a file",
+                        LINK_SERVICE + "/Nested.java lies below the existing file " + LINK_SERVICE));
+        assertThat(sandbox.path().resolve(created)).as("all or nothing").doesNotExist();
+        assertThat(Files.readString(sandbox.path().resolve(LINK_SERVICE)))
+                .isEqualTo(Files.readString(workspace.resolve(LINK_SERVICE)));
+        assertThat(sandbox.path().resolve("url-shortener/src/main/java")).isDirectory();
+    }
+
+    @Test
     void aDiffThatDoesNotApplyRejectsTheChangeSetWithHunkDiagnosticsAndWritesNothing(@TempDir Path dir)
             throws Exception {
         Path workspace = SyntheticWorkspace.create(dir.resolve("ws"));

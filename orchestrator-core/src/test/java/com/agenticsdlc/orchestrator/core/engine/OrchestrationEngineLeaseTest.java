@@ -168,28 +168,36 @@ class OrchestrationEngineLeaseTest {
     }
 
     @Test
-    void aLongAttemptKeepsItsLeaseThroughHeartbeats() throws InterruptedException {
-        Duration shortTtl = Duration.ofMillis(600);
-        InMemoryRunLeaseProvider shared = new InMemoryRunLeaseProvider();
-        try (EngineHarness realA = node("node-a", Clock.systemUTC(), shared, shortTtl)) {
+    void aLongAttemptKeepsItsLeaseThroughHeartbeats() {
+        // Lease expiry is judged with the shared mutable clock, so the test does not depend on how promptly the
+        // heartbeat threads are scheduled: the clock jumps past the lease's expiry, and the next heartbeat of the
+        // running attempt (every ttl / 3 of real time) must renew it.
+        Duration shortTtl = Duration.ofMillis(300);
+        try (EngineHarness realA = node("node-a", clock, leases, shortTtl)) {
             CountDownLatch slow = new CountDownLatch(1);
             realA.agent(blockingImplementation(slow));
             OrchestrationEngine a = realA.start();
-            try (EngineHarness realB = node("node-b", Clock.systemUTC(), shared, shortTtl)) {
+            try (EngineHarness realB = node("node-b", clock, leases, shortTtl)) {
                 OrchestrationEngine b = realB.start();
                 String id = a.start(REQUIREMENT, "heartbeat", RunOptions.defaults()
                         .withAutonomy(AutonomyLevel.FULL_AUTO)).id();
                 realA.awaitStage(id, IMPLEMENT, StageStatus.RUNNING);
                 try {
-                    Thread.sleep(shortTtl.multipliedBy(3).toMillis());
-                    assertThat(shared.holderOf(id)).as("renewed by the attempt's heartbeat").contains("node-a");
+                    for (int lapse = 0; lapse < 3; lapse++) {
+                        // every lease granted or renewed before the jump expires before the new "now"
+                        clock.advance(shortTtl.multipliedBy(2));
+                        Instant jumped = clock.instant();
+                        await().atMost(10, TimeUnit.SECONDS).pollInterval(Duration.ofMillis(10)).until(() ->
+                                leases.current(id).map(l -> l.expiresAt().isAfter(jumped)).orElse(false));
+                        assertThat(leases.holderOf(id)).as("renewed by the attempt's heartbeat").contains("node-a");
+                    }
                     assertThatThrownBy(() -> b.stop(id, ALICE, "from b"))
                             .isInstanceOf(RunLeasedElsewhereException.class);
                 } finally {
                     slow.countDown();
                 }
                 realA.awaitApproval(id, RELEASE);
-                assertThat(shared.holderOf(id)).isEmpty();
+                assertThat(leases.holderOf(id)).isEmpty();
             }
         }
     }
@@ -218,6 +226,60 @@ class OrchestrationEngineLeaseTest {
         nodeB.awaitApproval(id, RELEASE);
         ChainVerification chain = AuditChain.verify(events(id));
         assertThat(chain.valid()).as(chain.summary()).isTrue();
+    }
+
+    @Test
+    void recoveryCountsTheRecoveredRunsAndLogsAtInfoOnlyWhenItRecoveredSome() {
+        ch.qos.logback.classic.Logger logger = (ch.qos.logback.classic.Logger) org.slf4j.LoggerFactory
+                .getLogger(OrchestrationEngine.class);
+        ch.qos.logback.classic.Level previous = logger.getLevel();
+        ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender =
+                new ch.qos.logback.core.read.ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        logger.setLevel(ch.qos.logback.classic.Level.DEBUG);
+        CountDownLatch slow = new CountDownLatch(1);
+        try {
+            nodeA.agent(blockingImplementation(slow));
+            OrchestrationEngine a = nodeA.start();
+            OrchestrationEngine b = nodeB.start();
+            String id = a.start(REQUIREMENT, "count", RunOptions.defaults().withAutonomy(AutonomyLevel.FULL_AUTO)).id();
+            nodeA.awaitStage(id, IMPLEMENT, StageStatus.RUNNING);
+
+            appender.list.clear();
+            assertThat(b.recoverInterruptedCount()).as("node a executes the run").isZero();
+            assertThat(recoveryLines(appender, ch.qos.logback.classic.Level.INFO)).isEmpty();
+            assertThat(recoveryLines(appender, ch.qos.logback.classic.Level.DEBUG))
+                    .containsExactly("recovery finished interruptedRuns=0 node=node-b");
+            assertThat(appender.list).filteredOn(e -> e.getFormattedMessage().startsWith("run not recovered"))
+                    .singleElement().satisfies(e -> assertThat(e.getLevel())
+                            .isEqualTo(ch.qos.logback.classic.Level.DEBUG));
+
+            a.close();
+            appender.list.clear();
+            assertThat(b.recoverInterruptedCount()).isEqualTo(1);
+            assertThat(recoveryLines(appender, ch.qos.logback.classic.Level.INFO))
+                    .containsExactly("recovery finished interruptedRuns=1 node=node-b");
+            assertThat(b.get(id).haltReason()).isEqualTo(HaltReason.INTERRUPTED_BY_RESTART);
+
+            appender.list.clear();
+            b.recoverInterrupted();
+            assertThat(b.recoverInterruptedCount()).as("nothing left to recover").isZero();
+            assertThat(recoveryLines(appender, ch.qos.logback.classic.Level.INFO)).isEmpty();
+            assertThat(audit.ofType(id, AuditEventType.RUN_INTERRUPTED)).hasSize(1);
+        } finally {
+            slow.countDown();
+            logger.detachAppender(appender);
+            logger.setLevel(previous);
+        }
+    }
+
+    private static List<String> recoveryLines(
+            ch.qos.logback.core.read.ListAppender<ch.qos.logback.classic.spi.ILoggingEvent> appender,
+            ch.qos.logback.classic.Level level) {
+        return appender.list.stream().filter(e -> e.getLevel() == level)
+                .map(ch.qos.logback.classic.spi.ILoggingEvent::getFormattedMessage)
+                .filter(m -> m.startsWith("recovery finished")).toList();
     }
 
     @Test
