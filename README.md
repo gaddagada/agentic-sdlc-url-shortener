@@ -9,7 +9,7 @@ A control plane that takes a software requirement through a governed, ten-stage 
   <a href="https://github.com/gaddagada/agentic-sdlc-url-shortener/actions/workflows/ci.yml"><img src="https://github.com/gaddagada/agentic-sdlc-url-shortener/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/Java-25-007396?logo=openjdk&logoColor=white" alt="Java 25">
   <img src="https://img.shields.io/badge/Spring%20Boot-4.1.2-6DB33F?logo=springboot&logoColor=white" alt="Spring Boot 4.1.2">
-  <img src="https://img.shields.io/badge/tests-677-brightgreen" alt="677 tests">
+  <img src="https://img.shields.io/badge/tests-768-brightgreen" alt="768 tests">
 </p>
 
 **What this is**
@@ -69,7 +69,7 @@ would not roll back, or write outside their per-run sandbox; a sandbox build run
 metacharacters and without credential-like environment variables. The release gate cannot be configured away: it
 is required by the `ALWAYS` exit gate, by rule CHG-002 and, in `FULL_AUTO`, by GOV-003.
 
-**Budgets bound autonomy:** 40 agent calls, 200 000 LLM tokens, 2 h of active time, 2 feedback loops and
+**Budgets bound autonomy:** 40 agent calls, 600 000 LLM tokens, 2 h of active time, 2 feedback loops and
 3 re-plans per run by default. A breach safe-stops the run; only an explicit human resume grants one more default
 allowance, and the audit log records it.
 
@@ -88,7 +88,7 @@ the wrapper downloads Maven 3.9.16. Optional: Docker (PostgreSQL profile, contai
 ```bash
 git clone https://github.com/gaddagada/agentic-sdlc-url-shortener.git
 cd agentic-sdlc-url-shortener
-./mvnw -B verify          # builds all three modules and runs all 677 tests (Windows: mvnw.cmd -B verify)
+./mvnw -B verify          # builds all three modules and runs all 768 tests (Windows: mvnw.cmd -B verify)
 ```
 
 Start both applications from the repository root, in two terminals. The orchestrator finds the `url-shortener`
@@ -188,7 +188,7 @@ excerpts, audit sequences and a Claude-backed run: [docs/SCENARIOS.md](docs/SCEN
 |---|---|---|
 | SEC-001 ProhibitedIntent | requirement asks to disable, remove, bypass or weaken a control ("skip tests", "turn off validation", ...) | DENY |
 | SEC-002 SecretLeak | an artifact contains a credential (AWS, Anthropic, GitHub, Slack, JWT, PEM private key, literal password or generic credential assignment) | DENY |
-| SEC-003 ProtectedPath | a change set touches `**/security/**`, `**/application-prod*.yml`, `.github/**` or `**/pom.xml` | approval |
+| SEC-003 ProtectedPath | a change set touches `**/security/**`, `**/application-prod*.yml`, `.github/**`, `**/pom.xml`, the Maven wrapper (`mvnw*`, `.mvn/**`), the control-plane modules (`orchestrator-*/**`), Dockerfiles or compose files | approval |
 | CMP-001 PiiHandling | a design declares personal data without protection or retention | approval |
 | CMP-002 PiiProhibited | requirement asks to store raw IP addresses or clear-text e-mail, or personal data "without hashing" | DENY |
 | CHG-001 ChangeSize | a change set has more than 25 files or 1500 lines | approval |
@@ -222,7 +222,7 @@ same roles, produce the same typed artifacts and pass the same validation and ga
 | Provider | Model | Needs | How it is called |
 |---|---|---|---|
 | `deterministic` (default) | rule-based | nothing | in-process, pure functions of the stage context |
-| `anthropic` | `claude-opus-5-5` | `ANTHROPIC_API_KEY` in the orchestrator's environment | Anthropic Java SDK 3.3.0, Messages API with JSON structured outputs (the payload's JSON schema, enums included); up to 16 000 output tokens, 180 s timeout; SDK retries off, the engine owns retries |
+| `anthropic` | `claude-opus-5-5` | `ANTHROPIC_API_KEY` in the orchestrator's environment | Anthropic Java SDK 3.3.0, Messages API with JSON structured outputs (the payload's JSON schema, enums included); streamed responses of up to 32 000 output tokens, 300 s request timeout, stage timeouts multiplied by 3 for LLM attempts; SDK retries off, the engine owns retries |
 | `ollama` | `qwen2.5-coder:7b` | Ollama at `http://localhost:11434` (`ollama pull qwen2.5-coder:7b`) | `POST /api/chat` with the JSON schema as `format`, temperature 0, 16 384-token context, 240 s timeout |
 
 - **Selecting a provider:** the **Provider** field of the console, `"provider"` in `POST /api/v1/runs`,
@@ -234,7 +234,7 @@ same roles, produce the same typed artifacts and pass the same validation and ga
   Provenance then shows `fallback:deterministic`; usage, model and prompt hash are recorded for every LLM attempt.
 - **Observed:** a live Claude-backed brownfield run produced a specification with 9 functional and 6 non-functional
   requirements and 4 open product questions, a 16-task plan, a code-grounded impact analysis and a design with four
-  evaluated alternatives, and was then safe-stopped by the token budget (220 615 of 200 000 tokens). Ollama on a CPU took about 100 s for one intake
+  evaluated alternatives, and was then safe-stopped by the token budget (220 615 of the then-default 200 000 tokens; the default is now 600 000 and prompts summarize non-adjacent upstream artifacts). Ollama on a CPU took about 100 s for one intake
   call and can hit stage timeouts, after which the deterministic fallback takes over. See
   [docs/SCENARIOS.md](docs/SCENARIOS.md#the-same-scenario-with-an-llm-provider).
 
@@ -340,8 +340,8 @@ agentic-sdlc-url-shortener/
 | Module | Tests | Highlights |
 |---|---|---|
 | `url-shortener` | 278 | parameterized SSRF validator cases, MockMvc and JPA slices, end-to-end integration (create, redirect, click, analytics, 410, idempotency, 429), rate-limit bypass attempts over a real servlet container, OpenAPI contract, ArchUnit layering |
-| `orchestrator-core` | 287 | engine behaviour with fake agents: latch-proven parallel branches, retries, fallback, rollback with compensations, re-plan, budgets, restart recovery, store failures; every policy rule; risk floor; deterministic agents; snapshot round trip |
-| `orchestrator-app` | 112 | REST slices, scenarios end to end through MockMvc, JPA store round trip and corrupt-row tolerance, Anthropic and Ollama clients against stubs; 1 live Anthropic test, skipped unless `ANTHROPIC_API_KEY` is set |
+| `orchestrator-core` | 336 | engine behaviour with fake agents: latch-proven parallel branches, retries, fallback, rollback with compensations, re-plan, budgets, restart recovery, store failures; every policy rule; risk floor; deterministic agents; snapshot round trip |
+| `orchestrator-app` | 154 | REST slices, scenarios end to end through MockMvc, approval binding after a re-plan, API-key bypass attempts over a real servlet container, atomic commit rollback, JPA store round trip and corrupt-row tolerance, Anthropic and Ollama clients against stubs; 2 skipped by default: the live Anthropic test (needs `ANTHROPIC_API_KEY`) and the opt-in OpenAPI regeneration |
 
 `./mvnw -B verify` runs everything and writes JaCoCo reports to `<module>/target/site/jacoco/index.html`. CI runs
 the same build on Java 25 and builds both container images. Details: [docs/TESTING.md](docs/TESTING.md).
@@ -355,7 +355,7 @@ the same build on Java 25 and builds both container images. Details: [docs/TESTI
 | Operator identity is a header (`X-Operator-Id`); the API key filter is optional; the shortener API has no authentication | OIDC identity, role-based approvals, four-eyes rule; gateway authentication for the shortener |
 | Policy rules and ambiguity scoring are keyword heuristics | dedicated classifiers and scanners next to the deterministic rules |
 | No DNS-time SSRF check; in-memory per-node rate limiter | egress policy or resolve-time check; shared limiter |
-| A failed `RunStore.save` leaves the in-memory run ahead of the store | transactional outbox or single unit of work |
+| A failed `RunStore.commit` leaves the in-memory run ahead of the store | transactional outbox or single unit of work |
 | Console polls; Ollama on a CPU is slow and may hit stage timeouts (then falls back) | server-sent events; GPU-backed or hosted model |
 
 The full list with residual risks is in [docs/RISKS_AND_TRADEOFFS.md](docs/RISKS_AND_TRADEOFFS.md#6-known-limitations).

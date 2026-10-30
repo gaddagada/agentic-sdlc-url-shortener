@@ -15,10 +15,10 @@ for web and persistence, and integration tests over the running application.
 | Module | Tests | Unit | Slice and component | End-to-end and contract | Architecture |
 |---|---|---|---|---|---|
 | `url-shortener` | 278 | validator, codes, user agents, IP resolution and anonymization, rate limiter, services | `@WebMvcTest` controllers, `@DataJpaTest` repositories with Flyway, filters, async executor | `@SpringBootTest` integration over MockMvc and over a real servlet container; OpenAPI contract | ArchUnit layering |
-| `orchestrator-core` | 287 | policy rules, secret patterns, graph validation, JSON codec, metrics, deterministic agents, workspace | engine with fake agents and an in-memory store and audit sink | full pipeline with the real deterministic agents | ArchUnit boundaries |
-| `orchestrator-app` | 112 | provider catalog, structured-output schema, metrics recorder, API key filter | `@WebMvcTest` controller, `@DataJpaTest` stores, `@RestClientTest` Ollama client, Anthropic client with a stubbed sender | scenarios through `@SpringBootTest` and MockMvc; OpenAPI contract; 1 live Anthropic test | ArchUnit layering |
+| `orchestrator-core` | 336 | policy rules, secret patterns, graph validation, JSON codec, metrics, deterministic agents, workspace | engine with fake agents and an in-memory store and audit sink | full pipeline with the real deterministic agents | ArchUnit boundaries |
+| `orchestrator-app` | 154 | provider catalog, structured-output schema, metrics recorder, API key filter | `@WebMvcTest` controller, `@DataJpaTest` stores, `@RestClientTest` Ollama client, Anthropic client with a stubbed sender | scenarios through `@SpringBootTest` and MockMvc; OpenAPI contract; 1 live Anthropic test | ArchUnit layering |
 
-Totals are from the latest Surefire reports of each module (677 tests, all passing; the live Anthropic test is
+Totals are from the latest Surefire reports of each module (768 tests, all passing; the live Anthropic test is
 skipped unless `ANTHROPIC_API_KEY` is set).
 
 **Principles**

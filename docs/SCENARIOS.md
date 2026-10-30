@@ -460,9 +460,12 @@ keeping it risk-based rather than optional.
 became an INVALID_OUTPUT retry with the validation message in the next prompt; the intake and impact errors were
 corrected on the next attempt, while the test plan repeated its error twice before the budget stopped the run.
 The token budget bounded the cost of a run that would otherwise have kept retrying, and safe-stopped it without
-discarding accepted work. Two engineering conclusions follow. First, 200 000 tokens is too small for an
-Opus-class model on this pipeline; LLM runs need a budget override (`budget.maxLlmTokens` on `POST /runs`). Second,
-a complete change set does not fit in 16 000 output tokens; implementation should be split per task. This run
+discarding accepted work. Two engineering changes followed. First, 200 000 tokens was too small for an
+Opus-class model on this pipeline: the default budget is now 600 000 and every prompt carries full JSON only for the
+stage's direct predecessors (other upstream artifacts are summarized), with `budget.maxLlmTokens` on `POST /runs`
+still available as an override. Second, a complete change set did not fit in 16 000 output tokens: the Anthropic
+adapter now streams up to 32 000 tokens, stage timeouts are tripled for LLM attempts, and the implementation prompt
+asks for diffs of changed hunks rather than whole files. This run
 executed on a build that predates the enum-typed artifact fields: the current code sends `enum` constraints in the
 structured-output schema and parses enum values case-insensitively, which targets the first two failures above
 (category and component type). It has not been re-run on that build at the time of writing.

@@ -151,8 +151,8 @@ The run is an aggregate persisted as a JSON snapshot next to two append-only tab
 | `audit_events` | one row per engine event: `seq`, `ts`, stage, type, actor type and id, message, `data_json` | unique `(run_id, seq)`, index on `run_id` |
 | `artifacts` | every persisted artifact version: kind, version, plan version, SHA-256 hash, payload and provenance JSON | unique `(run_id, stage_id, version)`, index on `run_id` |
 
-`JpaRunStore.save` upserts the run row and inserts only artifacts not yet stored; `JpaAuditSink.append` inserts the
-mutation's events as a batch. Artifacts denied at an exit gate are removed from the aggregate before saving, so they
+`JpaRunStore.commit` upserts the run row, inserts only artifacts not yet stored and appends the mutation's audit
+events, all in one transaction (`RunStore.commit`), so a failed audit insert rolls back the snapshot update. Artifacts denied at an exit gate are removed from the aggregate before saving, so they
 never reach the `artifacts` table. The API projects the aggregate into `RunView` (status, stages, pending actions,
 budget usage, counters, timing, risk, policy findings), `GraphView`, `LineageView` (artifact versions as nodes,
 `derivedFrom` as edges) and `AuditEventView`.

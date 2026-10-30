@@ -62,13 +62,18 @@ public record OrchestratorProperties(
      * @param verifyBuildEnabled whether verification runs the real build inside the sandbox
      * @param backoffScale multiplier applied to retry backoffs (0 makes retries immediate, used by tests)
      * @param sandboxRoot directory for sandboxes
+     * @param llmTimeoutScale multiplier applied to stage timeouts when an LLM provider (not the deterministic
+     *                        agent) executes the attempt; streamed long outputs need more than the base timeout
+     * @param buildCommand the only command the sandbox build runner executes (agent-supplied commands are ignored)
      */
     public record Engine(
             @DefaultValue("0.5") @DecimalMin("0.0") @DecimalMax("1.0") double ambiguityThreshold,
             @DefaultValue("false") boolean sandboxEnabled,
             @DefaultValue("false") boolean verifyBuildEnabled,
             @DefaultValue("1.0") @DecimalMin("0.0") double backoffScale,
-            @DefaultValue("sandbox") @NotNull Path sandboxRoot) {
+            @DefaultValue("sandbox") @NotNull Path sandboxRoot,
+            @DefaultValue("3.0") @DecimalMin("1.0") double llmTimeoutScale,
+            @DefaultValue("./mvnw -B -ntp -q verify") @NotBlank String buildCommand) {
     }
 
     /**

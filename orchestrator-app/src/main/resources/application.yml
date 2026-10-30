@@ -57,6 +57,8 @@ sdlc:
     verify-build-enabled: false
     backoff-scale: 1.0
     sandbox-root: sandbox
+    llm-timeout-scale: 3.0               # stage timeouts x3 when an LLM provider executes the attempt
+    build-command: ./mvnw -B -ntp -q verify   # the only command a sandbox build may run
   security:
     api-key: ""
   console:

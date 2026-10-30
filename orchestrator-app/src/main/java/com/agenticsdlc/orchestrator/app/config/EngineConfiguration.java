@@ -97,6 +97,8 @@ public class EngineConfiguration {
                 .sandboxEnabled(engine.sandboxEnabled())
                 .verifyBuildEnabled(engine.verifyBuildEnabled())
                 .sandboxRoot(engine.sandboxRoot())
+                .llmTimeoutScale(engine.llmTimeoutScale())
+                .buildCommand(engine.buildCommand())
                 .workspaceRoot(workspace.root())
                 .clock(clock)
                 .workspaceIndex(workspace::current)

@@ -118,7 +118,7 @@ the control in the code and the residual risk. The five that matter most for a p
 
 Validation is layered so that no single check carries the weight: typed invariants on every artifact, policy at run
 start and at every gate, structural verification and a STRIDE review as stages, a release checklist, risk-based and
-mandatory human approvals, budgets, and an append-only audit log. 677 automated tests prove the behaviour, including
+mandatory human approvals, budgets, and an append-only audit log. 768 automated tests prove the behaviour, including
 every failure path the documentation describes ([TESTING.md](TESTING.md)).
 
 **Observed in live runs** ([SCENARIOS.md](SCENARIOS.md)): the deterministic greenfield run completes with
@@ -138,7 +138,7 @@ Claude-backed run produced substantially richer artifacts and was safe-stopped b
 | Realism of outputs | a working URL shortener with production controls; deterministic artifacts that are honest about being skeletons; a Claude-backed run quoted with its tokens, latencies, errors and the mistakes a reviewer had to catch |
 | Validation and risk rigor | layered checks (section 5), a twenty-entry risk register with residual risk stated per entry, failure scenarios each proven by a named test ([RISKS_AND_TRADEOFFS.md](RISKS_AND_TRADEOFFS.md)) |
 | Clarity and defensibility of decisions | ten ADRs with context and consequences; trade-offs with the alternative considered and when to revisit; a table of where the code refines the specification |
-| Engineering principles | tests before trust (677 tests, no network in CI), immutable artifacts with canonical hashing, durability before visibility, least privilege for agents, explicit failure semantics |
+| Engineering principles | tests before trust (768 tests, no network in CI), immutable artifacts with canonical hashing, durability before visibility, least privilege for agents, explicit failure semantics |
 | Engineering judgment | deterministic-first agents so governance is reproducible; a release gate that cannot be configured away; limitations stated next to the features they limit |
 
 ## 7. Assumptions
@@ -166,8 +166,9 @@ Stated plainly, with the production path in [RISKS_AND_TRADEOFFS.md](RISKS_AND_T
   identity on the control plane (API key optional).
 - A failed store commit leaves the in-memory run ahead of the store.
 - The console polls; Ollama on a CPU is slow and can hit stage timeouts, after which the fallback takes over.
-- A full Claude-backed run does not fit the default 200 000-token budget, and a complete change set does not fit
-  in 16 000 output tokens.
+- The first full Claude-backed run exhausted the then-default 200 000-token budget and a complete change set
+  overflowed 16 000 output tokens; the defaults are now 600 000 tokens and 32 000 streamed output tokens, and
+  prompts summarize non-adjacent upstream artifacts. LLM runs remain more expensive and slower than deterministic ones.
 
 ## 9. With more time
 

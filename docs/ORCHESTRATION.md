@@ -283,7 +283,7 @@ of a start or re-plan), `ENTRY` and `EXIT` (candidate payload); each rule decide
 |---|---|---|---|
 | SEC-001 ProhibitedIntent | RUN_START; intake exit | a form of disable, remove, bypass, drop, weaken or circumvent followed within four tokens by a control (validation, authentication, auth, security, approval, tests, testing, audit, logging, check, limiter, ratelimit, throttling, verification, encryption, hashing, masking); phrases "skip tests", "ignore compliance", "allow any destination", "log full ip", "store plaintext password", "turn off" or "switch off" a control, "make ... <control> optional", "no longer validate/check/authenticate/hash/encrypt/verify/audit", "exfiltrat..."; a sentence that removes the logging of raw or full IP addresses or other personal data is a privacy improvement and is allowed | DENY, CRITICAL |
 | SEC-002 SecretLeak | every exit | any string value, object key or `key: value` pair of the payload, scanned as raw text (scanning the escaped JSON document would hide quoted literals), matches an AWS access key id, an Anthropic API key, a GitHub token (`gh[pousr]_`), a literal password assignment, a PEM private key block, a Slack token, a JSON web token or a generic credential assignment (`api_key`, `client_secret`, `secret`, `token`, `passwd`, `pwd`) ([`SecretPatterns`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/util/SecretPatterns.java)); configuration placeholders (`${ENV}`, `{{ }}`, `<redacted>`, `***`, `change-me`) and bare identifiers or expressions (`this.password = password;`) are ignored; the finding names the kind, never the value | DENY, CRITICAL |
-| SEC-003 ProtectedPath | `ChangeSet` exit | a path matches `**/security/**`, `**/application-prod*.yml`, `.github/**` or `**/pom.xml` | REQUIRE_APPROVAL, HIGH |
+| SEC-003 ProtectedPath | `ChangeSet` exit | a path matches `**/security/**`, `**/application-prod*.yml`, `.github/**`, `**/pom.xml`, `**/mvnw`, `**/mvnw.cmd`, `**/.mvn/**`, `orchestrator-core/**`, `orchestrator-app/**`, `**/Dockerfile*` or `**/docker-compose*.y*ml` (case-insensitive, on normalized paths) | REQUIRE_APPROVAL, HIGH |
 | CMP-001 PiiHandling | `DesignSpec` exit | personal data declared without protection or retention | REQUIRE_APPROVAL, HIGH |
 | CMP-002 PiiProhibited | RUN_START; intake exit | storing or logging raw, full or unhashed IP addresses, or IP addresses "as-is", unencrypted or "in plain form"; e-mail in clear text; "without hashing", masking or anonymisation; sentences that remove, stop or delete such logging or storage are privacy improvements and are allowed | DENY, CRITICAL |
 | CHG-001 ChangeSize | `ChangeSet` exit | more than 25 files or more than 1500 content lines | REQUIRE_APPROVAL, MEDIUM |
@@ -459,7 +459,7 @@ invalidations a re-plan causes.
 | Bound | Default | Checked | On breach |
 |---|---|---|---|
 | `maxAgentCalls` ([`RunBudget`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/model/RunBudget.java)) | 40 | before every attempt (first, retry, fallback, rework, clarification re-run) | `BUDGET_EXCEEDED`, safe-stop |
-| `maxLlmTokens` (input plus output) | 200 000 | before every attempt, once any tokens were used | same |
+| `maxLlmTokens` (input plus output) | 600 000 | before every attempt, once any tokens were used | same |
 | `maxActiveDuration` (elapsed minus human wait) | 2 h | before every attempt | same |
 | `maxFeedbackLoops` (verify loops and REWORK) | 2 | on a failed report; on REWORK | stage fails, or rejection refused |
 | `maxReplans` | 3 | on `replan` | command refused |
@@ -468,12 +468,14 @@ invalidations a re-plan causes.
 
 `RunOptions.budgetOverride` replaces the defaults per run. Usage is never reset. A human `resume` after
 `BUDGET_EXCEEDED` extends every limit by one default allowance (`RunBudget.extended()`, for example 40 more agent
-calls and 200 000 more tokens) and records `budgetExtended` in `RUN_RESUMED`
+calls and 600 000 more tokens) and records `budgetExtended` in `RUN_RESUMED`
 (`agentCallBudgetExceededSafeStopsTheRun` proves the safe-stop and the extension); a `replan` does not extend the
 budget, so it re-stops at the next activation while the budget is still exhausted. Engine settings
 ([`EngineConfig`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/EngineConfig.java)): ambiguity threshold 0.5, backoff scale 1.0, maximum backoff 30 s, sandbox and sandbox
-build disabled, sandbox root `./sandbox`, build timeout 10 min. LLM agents default to 16 000 output tokens and a
-180 s request timeout. The safe-stop triggers are the six halt reasons of section 6.
+build disabled, sandbox root `./sandbox`, build timeout 10 min, build command `./mvnw -B -ntp -q verify` (the only
+command a sandbox build runs; agent-supplied commands are ignored), LLM timeout scale 3.0 (stage timeouts are
+multiplied by it whenever an LLM provider executes the attempt). The Anthropic adapter streams responses of up to
+32 000 output tokens with a 300 s request timeout. The safe-stop triggers are the six halt reasons of section 6.
 
 ## 10. Reliability metrics
 
