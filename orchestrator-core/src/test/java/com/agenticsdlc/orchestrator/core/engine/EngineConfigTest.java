@@ -11,6 +11,9 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 
 import com.agenticsdlc.orchestrator.core.agent.AgentSettings;
+import com.agenticsdlc.orchestrator.core.audit.HmacChangeRecordSigner;
+import com.agenticsdlc.orchestrator.core.audit.UnsignedChangeRecordSigner;
+import com.agenticsdlc.orchestrator.core.port.InMemoryRunLeaseProvider;
 
 class EngineConfigTest {
 
@@ -70,5 +73,56 @@ class EngineConfigTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new EngineConfig.ProviderCircuitBreaker(3, Duration.ZERO))
                 .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void signerLeaseAndRegistrySettingsHaveDefaultsAndAreValidated() {
+        EngineConfig defaults = EngineConfig.defaults();
+        assertThat(defaults.changeRecordSigner()).isInstanceOf(UnsignedChangeRecordSigner.class);
+        assertThat(defaults.nodeId()).isEqualTo(EngineConfig.defaultNodeId())
+                .matches("[A-Za-z0-9._-]+-" + ProcessHandle.current().pid() + "-[0-9a-f]{6}")
+                .hasSizeLessThanOrEqualTo(EngineConfig.MAX_NODE_ID_LENGTH);
+        assertThat(EngineConfig.defaultNodeId()).as("computed once per JVM").isSameAs(defaults.nodeId());
+        assertThat(defaults.leaseProvider()).isInstanceOf(InMemoryRunLeaseProvider.class);
+        assertThat(EngineConfig.defaults().leaseProvider()).as("each default config coordinates only its engine")
+                .isNotSameAs(defaults.leaseProvider());
+        assertThat(defaults.leaseTtl()).isEqualTo(Duration.ofSeconds(60));
+        assertThat(defaults.registryRetention()).isEqualTo(Duration.ofHours(1));
+        assertThat(defaults.registryMaxTerminalRuns()).isEqualTo(500);
+
+        InMemoryRunLeaseProvider shared = new InMemoryRunLeaseProvider();
+        HmacChangeRecordSigner signer = new HmacChangeRecordSigner(new byte[32], "k1");
+        EngineConfig custom = EngineConfig.builder().changeRecordSigner(signer).nodeId("node-a").leaseProvider(shared)
+                .leaseTtl(Duration.ofSeconds(5)).registryRetention(Duration.ZERO).registryMaxTerminalRuns(3).build();
+        assertThat(custom.toBuilder().build()).isEqualTo(custom);
+        assertThat(custom.changeRecordSigner()).isSameAs(signer);
+        assertThat(custom.nodeId()).isEqualTo("node-a");
+        assertThat(custom.leaseProvider()).isSameAs(shared);
+        assertThat(custom.leaseTtl()).isEqualTo(Duration.ofSeconds(5));
+        assertThat(custom.registryRetention()).isZero();
+        assertThat(custom.registryMaxTerminalRuns()).isEqualTo(3);
+
+        EngineConfig previousCanonical = new EngineConfig(0.5, 1.0, Duration.ofSeconds(30), false, false,
+                Path.of("sandbox"), null, Duration.ofMinutes(10), Clock.systemUTC(), () -> null, List.of(), null, null,
+                null, "mvn verify", 2.0, 100, 1000, EngineConfig.ProviderCircuitBreaker.DISABLED);
+        assertThat(previousCanonical.sourceContextTotalChars()).isEqualTo(1000);
+        assertThat(previousCanonical.changeRecordSigner()).isSameAs(UnsignedChangeRecordSigner.INSTANCE);
+        assertThat(previousCanonical.nodeId()).isEqualTo(EngineConfig.defaultNodeId());
+        assertThat(previousCanonical.leaseProvider()).isInstanceOf(InMemoryRunLeaseProvider.class);
+        assertThat(previousCanonical.leaseTtl()).isEqualTo(EngineConfig.DEFAULT_LEASE_TTL);
+        assertThat(previousCanonical.registryMaxTerminalRuns())
+                .isEqualTo(EngineConfig.DEFAULT_REGISTRY_MAX_TERMINAL_RUNS);
+
+        assertThatThrownBy(() -> EngineConfig.builder().nodeId(" ").build())
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> EngineConfig.builder().nodeId("n".repeat(129)).build())
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> EngineConfig.builder().leaseTtl(Duration.ZERO).build())
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> EngineConfig.builder().registryRetention(Duration.ofSeconds(-1)).build())
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> EngineConfig.builder().registryMaxTerminalRuns(-1).build())
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThat(EngineConfig.builder().nodeId(null).build().nodeId()).isEqualTo(EngineConfig.defaultNodeId());
     }
 }

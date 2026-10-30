@@ -1,6 +1,10 @@
 package com.agenticsdlc.orchestrator.core.engine;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -13,21 +17,29 @@ import java.util.function.Function;
 import org.jspecify.annotations.Nullable;
 
 import com.agenticsdlc.orchestrator.core.model.Run;
+import com.agenticsdlc.orchestrator.core.model.RunStatus;
+import com.agenticsdlc.orchestrator.core.port.RunLease;
 
 /**
- * In-memory registry of live runs: one {@link RunHolder} (run, lock, in-flight attempts) per run. All run
- * mutations happen inside {@link #withLock(String, Function)}. Runs that are not registered yet are loaded
- * lazily from the store.
+ * In-memory registry (cache) of runs: one {@link RunHolder} (run, lock, in-flight attempts, lease) per run. All run
+ * mutations happen under the holder's lock. Runs that are not registered (never seen, or evicted) are loaded lazily
+ * from the store when a mutation needs them (rehydration).
+ *
+ * <p>Bounded retention ({@link #evictIdle}): a run that is not executing on this node (not RUNNING, no in-flight
+ * attempt, no lease held) is evicted once it has not changed for the retention period, and terminal runs beyond a
+ * maximum count are evicted least recently ended first. Eviction never loses data: every mutation is committed to
+ * the store before it becomes visible, and runs whose last commit failed (in memory ahead of the store) are kept.</p>
  */
 final class RunRegistry {
 
     /**
-     * A registered run with its lock and in-flight attempts. Fields other than {@code lock} are guarded by
-     * {@code lock}.
+     * A registered run with its lock, in-flight attempts and lease. Fields other than {@code lock} are guarded by
+     * {@code lock}; the volatile ones may also be read without it.
      */
     static final class RunHolder {
         final ReentrantLock lock = new ReentrantLock();
-        final Run run;
+        /** The live aggregate; replaced under the lock when a newer state written by another node is loaded. */
+        Run run;
         final Map<String, InFlight> inFlight = new HashMap<>();
         private long tokenSequence;
         /** False for a new run until its first commit succeeded (runs loaded from the store are committed). */
@@ -37,6 +49,12 @@ final class RunRegistry {
          * the holder before (for example the completion of an attempt that finished meanwhile) must not commit it.
          */
         volatile boolean discarded;
+        /** Set when the holder was evicted: a mutation that obtained it before must resolve the run again. */
+        volatile boolean evicted;
+        /** Set while the last commit failed (the run in memory is ahead of the store); such a run is not evicted. */
+        volatile boolean dirty;
+        /** The lease this node holds on the run, or null. Written under the lock, read by attempt heartbeats. */
+        volatile @Nullable RunLease lease;
 
         RunHolder(Run run) {
             this.run = run;
@@ -64,12 +82,22 @@ final class RunRegistry {
     }
 
     /**
-     * Registers a run unless a run with the same id is registered.
+     * Registers a new run unless a run with the same id is registered.
      *
      * @param run the run
      * @return the registered holder
      */
     RunHolder register(Run run) {
+        return holders.computeIfAbsent(run.id(), id -> new RunHolder(run));
+    }
+
+    /**
+     * Registers a run just loaded from the store unless a run with the same id is registered.
+     *
+     * @param run the loaded run
+     * @return the registered holder (the existing one when the run was registered already)
+     */
+    RunHolder registerLoaded(Run run) {
         return holders.computeIfAbsent(run.id(), id -> new RunHolder(run));
     }
 
@@ -85,7 +113,7 @@ final class RunRegistry {
     }
 
     /**
-     * Returns the holder of a run, loading it from the store if needed.
+     * Returns the holder of a run, loading it from the store and registering it if needed (rehydration).
      *
      * @param runId run id
      * @return the holder
@@ -100,7 +128,7 @@ final class RunRegistry {
         if (loaded.isEmpty()) {
             throw new RunNotFoundException(runId);
         }
-        return register(loaded.get());
+        return registerLoaded(loaded.get());
     }
 
     /**
@@ -123,20 +151,83 @@ final class RunRegistry {
     }
 
     /**
-     * Runs {@code fn} while holding the run's lock.
+     * Returns the number of registered runs.
      *
-     * @param runId run id
-     * @param fn function
-     * @param <T> result type
-     * @return the result
+     * @return count
      */
-    <T> T withLock(String runId, Function<RunHolder, T> fn) {
-        RunHolder holder = holder(runId);
-        holder.lock.lock();
-        try {
-            return fn.apply(holder);
-        } finally {
-            holder.lock.unlock();
+    int size() {
+        return holders.size();
+    }
+
+    /**
+     * Evicts idle runs: every idle run whose last change is at least {@code retention} old, then the least recently
+     * ended terminal runs beyond {@code maxTerminalRuns}. A run is idle when it is committed, not RUNNING, has no
+     * in-flight attempt, no lease held by this node and its last commit did not fail. Holders that are locked
+     * right now are skipped (they are being used).
+     *
+     * @param now current time
+     * @param retention retention of idle runs after their last change
+     * @param maxTerminalRuns maximum number of cached terminal runs
+     * @return ids of the evicted runs
+     */
+    List<String> evictIdle(Instant now, Duration retention, int maxTerminalRuns) {
+        List<String> evicted = new ArrayList<>();
+        List<TerminalCandidate> terminal = new ArrayList<>();
+        for (RunHolder holder : holders.values()) {
+            if (!holder.lock.tryLock()) {
+                continue;
+            }
+            try {
+                if (!idle(holder)) {
+                    continue;
+                }
+                Run run = holder.run;
+                if (!run.updatedAt().plus(retention).isAfter(now)) {
+                    evict(holder, evicted);
+                } else if (run.status().isTerminal()) {
+                    Instant ended = run.endedAt() != null ? run.endedAt() : run.updatedAt();
+                    terminal.add(new TerminalCandidate(holder, run.id(), ended));
+                }
+            } finally {
+                holder.lock.unlock();
+            }
         }
+        int excess = terminal.size() - maxTerminalRuns;
+        if (excess > 0) {
+            terminal.sort(Comparator.comparing(TerminalCandidate::endedAt).thenComparing(TerminalCandidate::runId));
+            for (TerminalCandidate candidate : terminal) {
+                if (excess <= 0) {
+                    break;
+                }
+                RunHolder holder = candidate.holder();
+                if (!holder.lock.tryLock()) {
+                    continue;
+                }
+                try {
+                    if (idle(holder)) {
+                        evict(holder, evicted);
+                        excess--;
+                    }
+                } finally {
+                    holder.lock.unlock();
+                }
+            }
+        }
+        return evicted;
+    }
+
+    private static boolean idle(RunHolder holder) {
+        return !holder.evicted && !holder.discarded && !holder.dirty && holder.committed && holder.lease == null
+                && holder.inFlight.isEmpty() && holder.run.status() != RunStatus.RUNNING;
+    }
+
+    private void evict(RunHolder holder, List<String> evicted) {
+        holder.evicted = true;
+        String runId = holder.run.id();
+        holders.remove(runId, holder);
+        evicted.add(runId);
+    }
+
+    private record TerminalCandidate(RunHolder holder, String runId, Instant endedAt) {
     }
 }

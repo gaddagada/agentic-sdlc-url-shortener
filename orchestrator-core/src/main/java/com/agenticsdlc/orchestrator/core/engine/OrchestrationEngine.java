@@ -4,10 +4,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutorService;
@@ -41,8 +43,11 @@ import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
 import com.agenticsdlc.orchestrator.core.artifact.VerificationReport;
 import com.agenticsdlc.orchestrator.core.audit.Actor;
 import com.agenticsdlc.orchestrator.core.audit.ActorType;
+import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
 import com.agenticsdlc.orchestrator.core.audit.AuditEventType;
 import com.agenticsdlc.orchestrator.core.audit.AuditSink;
+import com.agenticsdlc.orchestrator.core.audit.ChangeRecordSigner;
+import com.agenticsdlc.orchestrator.core.audit.UnsignedChangeRecordSigner;
 import com.agenticsdlc.orchestrator.core.graph.StageDefinition;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowGraph;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
@@ -73,6 +78,8 @@ import com.agenticsdlc.orchestrator.core.policy.PolicyEngine;
 import com.agenticsdlc.orchestrator.core.policy.PolicyFinding;
 import com.agenticsdlc.orchestrator.core.policy.Verdict;
 import com.agenticsdlc.orchestrator.core.policy.rules.NoGoReleaseRule;
+import com.agenticsdlc.orchestrator.core.port.RunLease;
+import com.agenticsdlc.orchestrator.core.port.RunLeaseProvider;
 import com.agenticsdlc.orchestrator.core.port.RunStore;
 import com.agenticsdlc.orchestrator.core.util.Clocks;
 import com.agenticsdlc.orchestrator.core.util.Ids;
@@ -109,8 +116,32 @@ import com.agenticsdlc.orchestrator.core.workspace.WorkspaceSandbox;
  * the new run, so no run that was never persisted stays visible. {@link #get} and {@link #list} return copies built
  * under the lock.</p>
  *
+ * <p>Audit hash chain: every audit event is linked to the run's previous event ({@code prevHash}, {@code hash}; see
+ * {@link com.agenticsdlc.orchestrator.core.audit.AuditChain}) when it is created; the chain head is part of the
+ * run's snapshot and is resynchronized with {@link AuditSink#lastEvent} when a run is loaded from the store or a
+ * commit fails, so the chain continues across restarts, nodes and failed commits without gaps.</p>
+ *
+ * <p>Signed change records: when the run completes, the release change record is finalized with the approvals and
+ * signed by {@link EngineConfig#changeRecordSigner()} (unsigned by default); the ARTIFACT_ACCEPTED event of the
+ * finalized record names the signature algorithm and key id.</p>
+ *
+ * <p>Multi-node operation: a run is leased ({@link RunLeaseProvider}) by the node that executes its stages, from
+ * the command or event that schedules work until the run waits for a human, is safe-stopped or ends. The lease is
+ * renewed at every mutation and periodically while an attempt runs. A mutation of a run leased by another node
+ * throws {@link RunLeasedElsewhereException}; reads never need a lease. When this node acquires a run's lease it
+ * first reloads the run if the store holds a newer state (written by another node), and reads of runs that are not
+ * executing here are refreshed from the store the same way. Within one node, the per-run lock remains the
+ * mechanism.</p>
+ *
+ * <p>Bounded memory: runs that are not executing on this node are evicted from the in-memory registry after
+ * {@link EngineConfig#registryRetention()} without a change, and terminal runs beyond
+ * {@link EngineConfig#registryMaxTerminalRuns()} are evicted least recently ended first ({@link #evictIdleRuns()}).
+ * {@link #get} and {@link #list} fall back to the store for runs that are not cached, and a command on such a run
+ * loads it again first.</p>
+ *
  * <p>Commands throw {@link RunNotFoundException} for unknown runs, {@link InvalidRunStateException} (an
- * {@link IllegalStateException}) when the run or stage is in the wrong state, {@link InvalidCommandException}
+ * {@link IllegalStateException}) when the run or stage is in the wrong state, its subclass
+ * {@link RunLeasedElsewhereException} when another node is executing the run, {@link InvalidCommandException}
  * for invalid input, and a plain {@link IllegalStateException} when the engine is closed or shutting down.</p>
  */
 public final class OrchestrationEngine implements AutoCloseable {
@@ -145,6 +176,8 @@ public final class OrchestrationEngine implements AutoCloseable {
     private final ReplanService replanService;
     private final RollbackService rollbackService;
     private final ProviderCircuits circuits;
+    private final RunLeaseProvider leases;
+    private final String nodeId;
     private volatile boolean closed;
 
     /**
@@ -183,7 +216,9 @@ public final class OrchestrationEngine implements AutoCloseable {
                 ? Executors.newSingleThreadScheduledExecutor(
                 Thread.ofPlatform().name("sdlc-retry-scheduler").daemon(true).factory())
                 : config.retryScheduler();
-        this.registry = new RunRegistry(runStore::load);
+        this.leases = config.leaseProvider();
+        this.nodeId = config.nodeId();
+        this.registry = new RunRegistry(this::loadForRegistry);
         this.scheduler = new Scheduler(graph);
         this.gates = new GateEvaluator(policyEngine);
         this.stageExecutor = new StageExecutor(graph, config, executor);
@@ -280,8 +315,14 @@ public final class OrchestrationEngine implements AutoCloseable {
             if (removed != null) {
                 removed.lock.lock();
                 try {
+                    removed.discarded = true;
                     removed.inFlight.values().forEach(f -> f.future().cancel(true));
                     removed.inFlight.clear();
+                    RunLease lease = removed.lease;
+                    removed.lease = null;
+                    if (lease != null) {
+                        releaseQuietly(lease);
+                    }
                 } finally {
                     removed.lock.unlock();
                 }
@@ -296,7 +337,7 @@ public final class OrchestrationEngine implements AutoCloseable {
             tx.audit(AuditEventType.RUN_CREATED, null, requestedBy, "run created for scenario " + scenario,
                     RunMutation.data("scenario", scenario, "autonomy", options.autonomy(), "provider",
                             providerLabel(options.providerId()), "workspace", options.workspace(),
-                            "requestedBy", requestedBy.id(),
+                            "requestedBy", requestedBy.id(), "nodeId", tx.nodeId,
                             "requirementChars", run.requirement().length(), "faults",
                             options.faults().stream().map(f -> f.stageId() + ":" + f.kind() + "x" + f.failTimes())
                                     .toList()));
@@ -628,7 +669,7 @@ public final class OrchestrationEngine implements AutoCloseable {
             run.markStarted(tx.now);
             tx.audit(AuditEventType.RUN_RESUMED, null, actor, "run resumed by " + actor.id(),
                     RunMutation.data("previousHaltReason", previous, "resetStages", reset, "budgetExtended",
-                            budgetExtended, "budget", run.budget()));
+                            budgetExtended, "budget", run.budget(), "nodeId", tx.nodeId));
             for (StageExecution exec : run.stages()) {
                 StageExecution live = run.stage(exec.stageId());
                 if (live.status() == StageStatus.RETRY_SCHEDULED) {
@@ -643,86 +684,176 @@ public final class OrchestrationEngine implements AutoCloseable {
     }
 
     /**
-     * Returns a snapshot copy of a run, safe to read and serialize.
+     * Returns a snapshot copy of a run, safe to read and serialize. A run that is cached in memory is returned from
+     * memory, refreshed first from the store when the store holds a newer state written by another node (only for
+     * runs that are not executing on this node and not terminal); a run that is not cached (evicted, or never seen
+     * by this engine) is read from the store without caching it. Reads never need the run's lease.
      *
      * @param runId run id
      * @return the copy
      * @throws RunNotFoundException when unknown
      */
     public Run get(String runId) {
-        return registry.withLock(runId, holder -> holder.run.copy());
-    }
-
-    /**
-     * Returns snapshot copies of all runs known to the engine, newest first.
-     *
-     * @return copies
-     */
-    public List<Run> list() {
-        List<Run> runs = new ArrayList<>();
-        for (RunRegistry.RunHolder holder : registry.all()) {
+        RunRegistry.RunHolder holder = registry.find(runId);
+        if (holder != null) {
             holder.lock.lock();
             try {
-                runs.add(holder.run.copy());
+                if (!holder.evicted && !holder.discarded) {
+                    if (holder.lease == null && holder.committed && !holder.run.status().isTerminal()) {
+                        refreshIfStale(holder);
+                    }
+                    return holder.run.copy();
+                }
             } finally {
                 holder.lock.unlock();
             }
         }
+        return runStore.load(runId).orElseThrow(() -> new RunNotFoundException(runId));
+    }
+
+    /**
+     * Returns snapshot copies of all runs, newest first: the runs cached in memory merged with every run of the
+     * store ({@link RunStore#loadAll()}), without duplicates. The cached copy of a run wins, unless this node is not
+     * executing the run and the store holds a newer state (written by another node).
+     *
+     * @return copies
+     */
+    public List<Run> list() {
+        Map<String, Run> byId = new HashMap<>();
+        for (Run stored : runStore.loadAll()) {
+            byId.put(stored.id(), stored);
+        }
+        for (RunRegistry.RunHolder holder : registry.all()) {
+            holder.lock.lock();
+            try {
+                if (holder.evicted || holder.discarded) {
+                    continue;
+                }
+                Run live = holder.run;
+                Run stored = byId.get(live.id());
+                if (stored == null || holder.lease != null || !newer(stored, live)) {
+                    byId.put(live.id(), live.copy());
+                }
+            } finally {
+                holder.lock.unlock();
+            }
+        }
+        List<Run> runs = new ArrayList<>(byId.values());
         runs.sort(Comparator.comparing(Run::createdAt).reversed().thenComparing(Run::id));
+        evictQuietly(null);
         return List.copyOf(runs);
     }
 
     /**
-     * Loads all persisted runs and recovers runs interrupted by a restart: every RUNNING run gets its RUNNING
-     * stages reset to PENDING (STALE when an accepted artifact exists) and is SAFE_STOPPED with
-     * {@link HaltReason#INTERRUPTED_BY_RESTART} (audited RUN_INTERRUPTED and SAFE_STOP). Runs waiting for a
-     * human, stopped or terminal are only registered. Call once at startup.
+     * Evicts runs that are not executing on this node from the in-memory registry: runs without a change for
+     * {@link EngineConfig#registryRetention()}, then the least recently ended terminal runs beyond
+     * {@link EngineConfig#registryMaxTerminalRuns()}. A run is never evicted while it is RUNNING, has an in-flight
+     * attempt, is leased by this node or is ahead of the store after a failed commit. Evicted runs remain readable
+     * through {@link #get} and {@link #list} (from the store) and are loaded again by the next command. The engine
+     * calls this after every command and in {@link #list()}; adapters may also call it periodically.
+     *
+     * @return the number of evicted runs
+     */
+    public int evictIdleRuns() {
+        return evictAt(now());
+    }
+
+    private int evictAt(Instant at) {
+        List<String> evicted = registry.evictIdle(at, config.registryRetention(), config.registryMaxTerminalRuns());
+        if (!evicted.isEmpty()) {
+            LOG.debug("evicted idle runs from memory count={} cached={}", evicted.size(), registry.size());
+        }
+        return evicted.size();
+    }
+
+    /** Evicts idle runs at the given time (or now), never failing the caller. */
+    private void evictQuietly(@Nullable Instant at) {
+        try {
+            evictAt(at != null ? at : now());
+        } catch (RuntimeException e) {
+            LOG.warn("run eviction failed error={}", e.toString());
+        }
+    }
+
+    /**
+     * Returns whether this engine currently caches the run in memory (diagnostics and tests).
+     *
+     * @param runId run id
+     * @return true when the run is registered
+     */
+    boolean isCached(String runId) {
+        return registry.find(runId) != null;
+    }
+
+    /**
+     * Recovers runs interrupted by a restart: every persisted RUNNING run that no node holds a valid lease on (it is
+     * not executing anywhere) gets its RUNNING stages reset to PENDING (STALE when an accepted artifact exists) and
+     * is SAFE_STOPPED with {@link HaltReason#INTERRUPTED_BY_RESTART} (audited RUN_INTERRUPTED and SAFE_STOP). Runs
+     * leased by a node are skipped (another node is executing them); runs waiting for a human, stopped or terminal
+     * are left in the store and loaded on demand. Call once at startup; it is safe to call again later (for example
+     * periodically, to recover runs of a node that died once its lease expired).
      */
     public void recoverInterrupted() {
         ensureOpen();
         int recovered = 0;
         for (Run loaded : runStore.loadAll()) {
-            RunRegistry.RunHolder holder = registry.register(loaded);
+            if (loaded.status() != RunStatus.RUNNING) {
+                continue;
+            }
+            Optional<String> owner = leases.holderOf(loaded.id());
+            if (owner.isPresent()) {
+                LOG.info("run not recovered: it is executing on node {} runId={}", owner.get(), loaded.id());
+                continue;
+            }
+            resyncAuditChain(loaded);
+            RunRegistry.RunHolder holder = registry.registerLoaded(loaded);
             boolean live;
             holder.lock.lock();
             try {
-                live = !holder.inFlight.isEmpty() || holder.run.status() != RunStatus.RUNNING;
+                live = !holder.inFlight.isEmpty() || holder.lease != null
+                        || holder.run.status() != RunStatus.RUNNING;
             } finally {
                 holder.lock.unlock();
             }
             if (live) {
                 continue;
             }
-            mutate(loaded.id(), tx -> {
-                Run run = tx.run;
-                if (run.status() != RunStatus.RUNNING) {
-                    return;
-                }
-                List<String> reset = new ArrayList<>();
-                for (StageExecution exec : run.stages()) {
-                    if (exec.status() == StageStatus.RUNNING) {
-                        control.resetToReady(tx, run.stage(exec.stageId()), "interrupted by engine restart",
-                                Actor.system());
-                        reset.add(exec.stageId());
+            try {
+                mutate(loaded.id(), tx -> {
+                    Run run = tx.run;
+                    if (run.status() != RunStatus.RUNNING || !tx.holder.inFlight.isEmpty()) {
+                        return;
                     }
-                }
-                tx.audit(AuditEventType.RUN_INTERRUPTED, null, Actor.system(),
-                        "run interrupted by an engine restart; " + reset.size() + " in-flight stages reset",
-                        RunMutation.data("resetStages", reset));
-                run.setStatus(RunStatus.SAFE_STOPPED);
-                run.setHalt(HaltReason.INTERRUPTED_BY_RESTART, "engine restarted while the run was in progress");
-                tx.audit(AuditEventType.SAFE_STOP, null, Actor.system(), "run safe-stopped: INTERRUPTED_BY_RESTART",
-                        RunMutation.data("haltReason", HaltReason.INTERRUPTED_BY_RESTART, "resetStages", reset));
-            });
-            recovered++;
+                    List<String> reset = new ArrayList<>();
+                    for (StageExecution exec : run.stages()) {
+                        if (exec.status() == StageStatus.RUNNING) {
+                            control.resetToReady(tx, run.stage(exec.stageId()), "interrupted by engine restart",
+                                    Actor.system());
+                            reset.add(exec.stageId());
+                        }
+                    }
+                    tx.audit(AuditEventType.RUN_INTERRUPTED, null, Actor.system(),
+                            "run interrupted by an engine restart; " + reset.size() + " in-flight stages reset",
+                            RunMutation.data("resetStages", reset, "nodeId", tx.nodeId));
+                    run.setStatus(RunStatus.SAFE_STOPPED);
+                    run.setHalt(HaltReason.INTERRUPTED_BY_RESTART, "engine restarted while the run was in progress");
+                    tx.audit(AuditEventType.SAFE_STOP, null, Actor.system(),
+                            "run safe-stopped: INTERRUPTED_BY_RESTART",
+                            RunMutation.data("haltReason", HaltReason.INTERRUPTED_BY_RESTART, "resetStages", reset));
+                });
+                recovered++;
+            } catch (RunLeasedElsewhereException e) {
+                LOG.info("run not recovered: node {} acquired it meanwhile runId={}", e.holder(), loaded.id());
+            }
         }
-        LOG.info("recovery finished interruptedRuns={}", recovered);
+        LOG.info("recovery finished interruptedRuns={} node={}", recovered, nodeId);
     }
 
     /**
-     * Stops accepting commands, cancels in-flight attempts and shuts down engine-owned executors. Runs that
-     * were in progress stay RUNNING in the store and are recovered by {@link #recoverInterrupted()} on the
-     * next start.
+     * Stops accepting commands, cancels in-flight attempts, releases the run leases this node holds (so that other
+     * nodes can recover its runs right away) and shuts down engine-owned executors. Runs that were in progress stay
+     * RUNNING in the store and are recovered by {@link #recoverInterrupted()} on the next start (or by another
+     * node).
      */
     @Override
     public void close() {
@@ -735,6 +866,11 @@ public final class OrchestrationEngine implements AutoCloseable {
             try {
                 holder.inFlight.values().forEach(f -> f.future().cancel(true));
                 holder.inFlight.clear();
+                RunLease lease = holder.lease;
+                holder.lease = null;
+                if (lease != null) {
+                    releaseQuietly(lease);
+                }
             } finally {
                 holder.lock.unlock();
             }
@@ -764,35 +900,191 @@ public final class OrchestrationEngine implements AutoCloseable {
 
     // =========================================================================================== mutation core
 
+    /**
+     * Runs one mutation of a run under its lock: resolves (or rehydrates) the run, takes or renews the run's lease
+     * (refreshing the run from the store when the lease is newly acquired and the store holds a newer state), applies
+     * the body, pumps, commits the run with the mutation's hash-chained audit events, and releases the lease unless
+     * the run keeps executing (RUNNING). A mutation that does not commit rolls the audit chain back to the last
+     * committed event.
+     */
     private Run mutate(String runId, Consumer<RunMutation> body) {
         ensureOpen();
-        RunRegistry.RunHolder holder = registry.holder(runId);
-        Run copy;
-        holder.lock.lock();
-        try {
-            if (holder.discarded) {
-                // the creation of this run could not be committed; it is unregistered and must stay unpersisted
-                throw new RunNotFoundException(runId);
-            }
-            RunMutation tx = new RunMutation(holder, now());
-            body.accept(tx);
-            pump(tx);
-            tx.run.touch(tx.now);
+        while (true) {
+            RunRegistry.RunHolder holder = registry.holder(runId);
+            Run copy;
+            Instant at;
+            holder.lock.lock();
             try {
-                runStore.commit(tx.run, tx.events(), auditSink);
-            } catch (RuntimeException e) {
-                if (!holder.committed) {
-                    holder.discarded = true;
+                if (holder.evicted) {
+                    continue; // evicted meanwhile: resolve the run again (from the store)
                 }
-                throw e;
+                if (holder.discarded) {
+                    // the creation of this run could not be committed; it is unregistered and must stay unpersisted
+                    throw new RunNotFoundException(runId);
+                }
+                RunMutation tx = null;
+                boolean committed = false;
+                try {
+                    ensureLease(holder);
+                    tx = new RunMutation(holder, now(), nodeId);
+                    body.accept(tx);
+                    pump(tx);
+                    tx.run.touch(tx.now);
+                    try {
+                        runStore.commit(tx.run, tx.events(), auditSink);
+                    } catch (RuntimeException e) {
+                        if (!holder.committed) {
+                            holder.discarded = true;
+                        }
+                        holder.dirty = true;
+                        throw e;
+                    }
+                    committed = true;
+                    holder.committed = true;
+                    holder.dirty = false;
+                    copy = tx.run.copy();
+                    at = tx.now;
+                } finally {
+                    if (!committed && tx != null) {
+                        tx.rollbackAuditChain();
+                        if (holder.dirty) {
+                            resyncAuditChain(tx.run);
+                        }
+                    }
+                    releaseLeaseUnlessExecuting(holder);
+                }
+            } finally {
+                holder.lock.unlock();
             }
-            holder.committed = true;
-            copy = tx.run.copy();
-        } finally {
-            holder.lock.unlock();
+            notifyListener(copy);
+            evictQuietly(at);
+            return copy;
         }
-        notifyListener(copy);
-        return copy;
+    }
+
+    // =========================================================================================== leases and store
+
+    /**
+     * Makes sure this node holds the run's lease: renews the lease it holds, or acquires a new one and then refreshes
+     * the run from the store if another node advanced it meanwhile. The refresh happens after the acquisition (even
+     * for a run loaded a moment ago), because only then can no other node commit a newer state.
+     *
+     * @throws RunLeasedElsewhereException when another node holds a valid lease
+     */
+    private void ensureLease(RunRegistry.RunHolder holder) {
+        String runId = holder.run.id();
+        RunLease held = holder.lease;
+        if (held != null) {
+            if (leases.renew(held, config.leaseTtl())) {
+                return;
+            }
+            holder.lease = null;
+            LOG.warn("run lease lost (expired and taken over or released) runId={} node={}", runId, nodeId);
+        }
+        Optional<RunLease> acquired = leases.tryAcquire(runId, nodeId, config.leaseTtl());
+        if (acquired.isEmpty()) {
+            throw new RunLeasedElsewhereException(runId, leases.holderOf(runId).orElse("unknown"));
+        }
+        holder.lease = acquired.get();
+        if (holder.committed) {
+            refreshIfStale(holder);
+        }
+    }
+
+    /** Releases the run's lease unless the run keeps executing on this node (RUNNING). Never fails the caller. */
+    private void releaseLeaseUnlessExecuting(RunRegistry.RunHolder holder) {
+        RunLease lease = holder.lease;
+        if (lease == null || (!holder.discarded && holder.run.status() == RunStatus.RUNNING)) {
+            return;
+        }
+        holder.lease = null;
+        releaseQuietly(lease);
+    }
+
+    private void releaseQuietly(RunLease lease) {
+        try {
+            leases.release(lease);
+        } catch (RuntimeException e) {
+            LOG.warn("run lease release failed runId={} node={} error={}; it expires after {}", lease.runId(),
+                    nodeId, e.toString(), config.leaseTtl());
+        }
+    }
+
+    /** Renews the run's lease from an attempt's heartbeat (off the run lock). */
+    private void renewLeaseFromAttempt(String runId) {
+        RunRegistry.RunHolder holder = registry.find(runId);
+        RunLease lease = holder == null ? null : holder.lease;
+        if (lease != null && !leases.renew(lease, config.leaseTtl())) {
+            LOG.warn("run lease lost while an attempt was running runId={} node={}", runId, nodeId);
+        }
+    }
+
+    private Duration heartbeatInterval() {
+        return Duration.ofMillis(Math.max(1L, config.leaseTtl().toMillis() / 3));
+    }
+
+    /**
+     * Replaces the cached run by the store's state when the store holds a newer one (written by another node):
+     * in-flight attempts of the superseded state are detached (their results are discarded when they finish). They
+     * are not interrupted, because this may run on the thread of one of them (its completion re-acquiring the
+     * lease), and interrupting a thread that is about to commit could break the store's I/O. Called under the run
+     * lock.
+     */
+    private void refreshIfStale(RunRegistry.RunHolder holder) {
+        Run current = holder.run;
+        Optional<Run> stored = runStore.load(current.id());
+        if (stored.isEmpty() || !newer(stored.get(), current)) {
+            return;
+        }
+        Run fresh = stored.get();
+        resyncAuditChain(fresh);
+        holder.inFlight.values().forEach(f -> f.future().cancel(false));
+        holder.inFlight.clear();
+        holder.run = fresh;
+        holder.dirty = false;
+        LOG.info("run refreshed from the store runId={} auditSeq={} -> {} status={}", current.id(), current.auditSeq(),
+                fresh.auditSeq(), fresh.status());
+    }
+
+    /** Whether the stored state of a run is newer than the cached one (more audit events, or a later update). */
+    private static boolean newer(Run stored, Run cached) {
+        return stored.auditSeq() > cached.auditSeq()
+                || (stored.auditSeq() == cached.auditSeq() && stored.updatedAt().isAfter(cached.updatedAt()));
+    }
+
+    /** Loads a run from the store for registration, with its audit chain head resynchronized with the audit log. */
+    private Optional<Run> loadForRegistry(String runId) {
+        Optional<Run> loaded = runStore.load(runId);
+        loaded.ifPresent(this::resyncAuditChain);
+        return loaded;
+    }
+
+    /**
+     * Aligns the run's audit sequence and chain head with the last event the audit log actually holds (the log is
+     * the source of truth: a snapshot may be ahead of it when a non-atomic commit saved the run but failed to append
+     * the events). A bounded probe confirms the common case; otherwise {@link AuditSink#lastEvent} is used. Failures
+     * are logged and leave the run unchanged.
+     */
+    private void resyncAuditChain(Run run) {
+        try {
+            long seq = run.auditSeq();
+            List<AuditEvent> probe = auditSink.forRun(run.id(), Math.max(0L, seq - 1), 2);
+            if (seq == 0 ? probe.isEmpty() : probe.size() == 1 && probe.getFirst().seq() == seq
+                    && Objects.equals(probe.getFirst().hash(), run.auditHeadHash())) {
+                return;
+            }
+            Optional<AuditEvent> last = auditSink.lastEvent(run.id());
+            long lastSeq = last.map(AuditEvent::seq).orElse(0L);
+            String lastHash = last.map(AuditEvent::hash).orElse(null);
+            if (lastSeq != seq || !Objects.equals(lastHash, run.auditHeadHash())) {
+                LOG.warn("audit chain head resynchronized with the audit log runId={} seq={} -> {}", run.id(), seq,
+                        lastSeq);
+                run.resetAuditChain(lastSeq, lastHash);
+            }
+        } catch (RuntimeException e) {
+            LOG.warn("audit chain head could not be checked against the audit log runId={} error={}", run.id(),
+                    e.toString());
+        }
     }
 
     private void notifyListener(Run copy) {
@@ -966,7 +1258,7 @@ public final class OrchestrationEngine implements AutoCloseable {
                         + def.id() + " started with " + agentId,
                 RunMutation.data("attempt", exec.attempts(), "maxAttempts", def.retryPolicy().maxAttempts(), "agent",
                         agentId, "agentSelection", agentSelection, "planVersion", run.planVersion(), "derivedFrom",
-                        context.derivedFrom(), "timeoutMs", timeout.toMillis()));
+                        context.derivedFrom(), "timeoutMs", timeout.toMillis(), "nodeId", tx.nodeId));
         String runId = run.id();
         String stageId = def.id();
         StageAgent chosen = agent;
@@ -994,7 +1286,8 @@ public final class OrchestrationEngine implements AutoCloseable {
 
     private void runAttempt(String runId, String stageId, long token, StageAgent agent, String agentId,
                             StageContext context, Duration timeout, @Nullable String circuitProvider) {
-        StageExecutor.AttemptOutcome outcome = stageExecutor.execute(agent, context, timeout);
+        StageExecutor.AttemptOutcome outcome = stageExecutor.execute(agent, context, timeout,
+                () -> renewLeaseFromAttempt(runId), heartbeatInterval());
         if (circuitProvider != null) {
             // recorded before the result is applied, so that a retry scheduled by it already sees the new state
             recordCircuitOutcome(circuitProvider, runId, stageId, outcome);
@@ -1006,6 +1299,9 @@ public final class OrchestrationEngine implements AutoCloseable {
             mutate(runId, tx -> onAttemptFinished(tx, stageId, token, agentId, outcome));
         } catch (RunNotFoundException e) {
             LOG.debug("attempt result discarded: the run is no longer registered runId={} stageId={}", runId,
+                    stageId);
+        } catch (RunLeasedElsewhereException e) {
+            LOG.warn("attempt result discarded: node {} took over the run runId={} stageId={}", e.holder(), runId,
                     stageId);
         } catch (RuntimeException e) {
             if (closed) {
@@ -1412,8 +1708,23 @@ public final class OrchestrationEngine implements AutoCloseable {
                 List<String> artifactIds = run.acceptedArtifacts().stream().filter(a -> !a.stageId().equals(def.id()))
                         .map(Artifact::id).toList();
                 ReleaseReadiness.ChangeRecord record = release.changeRecord();
-                ReleaseReadiness finalized = release.withChangeRecord(new ReleaseReadiness.ChangeRecord(
-                        record.summary(), record.riskLevel(), record.rollbackPlan(), records, artifactIds, verdict));
+                ReleaseReadiness.ChangeRecord finalRecord = new ReleaseReadiness.ChangeRecord(record.summary(),
+                        record.riskLevel(), record.rollbackPlan(), records, artifactIds, verdict);
+                ChangeRecordSigner signer = config.changeRecordSigner();
+                ReleaseReadiness.Signature signature = null;
+                String signatureError = null;
+                if (!UnsignedChangeRecordSigner.ALGORITHM.equals(signer.algorithm())) {
+                    try {
+                        String value = signer.sign(ChangeRecordSigner.canonicalPayload(finalRecord));
+                        signature = new ReleaseReadiness.Signature(signer.algorithm(), signer.keyId(), value,
+                                tx.now.toString());
+                    } catch (RuntimeException e) {
+                        // never block completion on the signer; the missing signature is visible and audited
+                        signatureError = e.getClass().getSimpleName() + ": " + e.getMessage();
+                        LOG.error("change record signing failed runId={} keyId={}", run.id(), signer.keyId(), e);
+                    }
+                }
+                ReleaseReadiness finalized = release.withChangeRecord(finalRecord.withSignature(signature));
                 Map<String, Integer> derivedFrom = new LinkedHashMap<>(accepted.provenance().derivedFrom());
                 derivedFrom.put(def.id(), accepted.version());
                 Provenance provenance = new Provenance(derivedFrom, def.role(), ENGINE_AGENT_ID, ENGINE_AGENT_ID, null,
@@ -1424,9 +1735,14 @@ public final class OrchestrationEngine implements AutoCloseable {
                 run.addArtifact(artifact);
                 run.accept(def.id(), artifact.version());
                 tx.audit(AuditEventType.ARTIFACT_ACCEPTED, def.id(), Actor.system(), artifact.reference()
-                                + " accepted: change record finalized with " + records.size() + " approvals",
+                                + " accepted: change record finalized with " + records.size() + " approvals"
+                                + (signature != null ? " and signed (" + signature.algorithm() + ", key "
+                                + signature.keyId() + ")" : signatureError != null ? " (signing failed)" : ""),
                         RunMutation.data("artifactId", artifact.id(), "version", artifact.version(), "hash",
-                                artifact.hash(), "approvals", records.size()));
+                                artifact.hash(), "approvals", records.size(), "signatureAlgorithm",
+                                signature != null ? signature.algorithm() : UnsignedChangeRecordSigner.ALGORITHM,
+                                "keyId", signature != null ? signature.keyId() : UnsignedChangeRecordSigner.ALGORITHM,
+                                "signer", signer.algorithm(), "signatureError", signatureError));
             }
         }
         run.setStatus(RunStatus.COMPLETED);
@@ -1506,7 +1822,8 @@ public final class OrchestrationEngine implements AutoCloseable {
     }
 
     private void onRetryDue(String runId, String stageId, long token, Duration delay, int failedWakeUps) {
-        if (closed) {
+        if (closed || !isCached(runId)) {
+            // an evicted run was not executing here, so its scheduled retry is obsolete (resume re-arms retries)
             return;
         }
         try {

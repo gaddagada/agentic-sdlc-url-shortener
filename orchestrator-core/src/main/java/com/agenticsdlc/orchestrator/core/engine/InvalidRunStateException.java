@@ -9,9 +9,10 @@ package com.agenticsdlc.orchestrator.core.engine;
  *
  * <p>It extends {@link IllegalStateException} so existing handlers keep working; adapters should map it to a
  * conflict (HTTP 409). {@link InvalidCommandException} remains the type for invalid arguments, and engine
- * lifecycle problems (closed or shutting-down engine) are reported as plain {@link IllegalStateException}.</p>
+ * lifecycle problems (closed or shutting-down engine) are reported as plain {@link IllegalStateException}. The
+ * subclass {@link RunLeasedElsewhereException} reports a run that another engine node is executing.</p>
  */
-public final class InvalidRunStateException extends IllegalStateException {
+public class InvalidRunStateException extends IllegalStateException {
 
     private static final long serialVersionUID = 1L;
 

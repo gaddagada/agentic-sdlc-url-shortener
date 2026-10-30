@@ -45,8 +45,8 @@ import tools.jackson.core.JacksonException;
  * retryable provider errors are TRANSIENT; other provider errors and an unavailable provider are FATAL, which
  * engages the deterministic fallback. Usage, model
  * and prompt hash are reported for provenance and budgets, also for failed attempts. The requirements role
- * applies the intrinsic clarification gate; approvals an LLM might put into a release change record are
- * discarded (agents never approve anything).</p>
+ * applies the intrinsic clarification gate; approvals and a signature an LLM might put into a release change record
+ * are discarded (agents never approve or sign anything).</p>
  *
  * @param <T> payload type
  */
@@ -198,7 +198,8 @@ public final class LlmStageAgent<T extends ArtifactPayload> implements StageAgen
                         + spec.ambiguity().score() + " reaches the clarification threshold", trace);
             }
         }
-        if (payload instanceof ReleaseReadiness release && !release.changeRecord().approvals().isEmpty()) {
+        if (payload instanceof ReleaseReadiness release && (!release.changeRecord().approvals().isEmpty()
+                || release.changeRecord().signature() != null)) {
             ReleaseReadiness.ChangeRecord record = release.changeRecord();
             accepted = release.withChangeRecord(new ReleaseReadiness.ChangeRecord(record.summary(), record.riskLevel(),
                     record.rollbackPlan(), List.of(), record.artifactIds(), record.policyVerdict()));

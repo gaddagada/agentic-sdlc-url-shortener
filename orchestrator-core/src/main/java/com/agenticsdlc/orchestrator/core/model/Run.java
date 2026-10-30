@@ -73,6 +73,7 @@ public final class Run {
     private @Nullable String firstFailureStageId;
     private @Nullable Instant recoveredAt;
     private long auditSeq;
+    private @Nullable String auditHeadHash;
     private final LinkedHashMap<String, Integer> lastArtifactVersions;
 
     private Run(String id, String workflowId, int workflowVersion, String scenarioKey, String requirement,
@@ -157,6 +158,7 @@ public final class Run {
         copy.firstFailureStageId = firstFailureStageId;
         copy.recoveredAt = recoveredAt;
         copy.auditSeq = auditSeq;
+        copy.auditHeadHash = auditHeadHash;
         copy.lastArtifactVersions.putAll(lastArtifactVersions);
         return copy;
     }
@@ -190,7 +192,8 @@ public final class Run {
                 budget, status, haltReason, haltDetail, planVersion, createdAt, startedAt, endedAt, updatedAt,
                 stageSnapshots, artifactSnapshots, acceptedVersions, approvals, clarification,
                 new ArrayList<>(checkpoints), compensations, counters, humanWaitIntervals, policyFindings,
-                injectedFaults, firstFailureAt, firstFailureStageId, recoveredAt, auditSeq, lastArtifactVersions);
+                injectedFaults, firstFailureAt, firstFailureStageId, recoveredAt, auditSeq, lastArtifactVersions,
+                auditHeadHash);
     }
 
     /**
@@ -261,6 +264,7 @@ public final class Run {
         run.firstFailureStageId = snapshot.firstFailureStageId();
         run.recoveredAt = snapshot.recoveredAt();
         run.auditSeq = snapshot.auditSeq();
+        run.auditHeadHash = snapshot.auditHeadHash();
         snapshot.lastArtifactVersions().forEach((stageId, version) -> {
             if (run.stages.containsKey(stageId)) {
                 run.lastArtifactVersions.put(stageId, version);
@@ -554,6 +558,17 @@ public final class Run {
     /** @return the last audit sequence number used */
     public long auditSeq() {
         return auditSeq;
+    }
+
+    /**
+     * Returns the head of the run's audit hash chain: the {@code hash} of the event with sequence number
+     * {@link #auditSeq()}, or null when the run has no signed events (new run, or a run whose events were written
+     * before hash chaining existed).
+     *
+     * @return lowercase hex SHA-256, or null
+     */
+    public @Nullable String auditHeadHash() {
+        return auditHeadHash;
     }
 
     /**
@@ -929,5 +944,29 @@ public final class Run {
      */
     public long nextAuditSeq() {
         return ++auditSeq;
+    }
+
+    /**
+     * Records the hash of the event that was just given sequence number {@link #auditSeq()} (the new chain head).
+     *
+     * @param hash the event hash
+     */
+    public void advanceAuditHead(String hash) {
+        this.auditHeadHash = Objects.requireNonNull(hash, "hash");
+    }
+
+    /**
+     * Resets the audit sequence and chain head, for example to the last event the audit log actually holds after a
+     * commit failed or when a run is loaded from the store.
+     *
+     * @param seq the last sequence number in use (0 for none)
+     * @param headHash the hash of that event, or null (no events, or an unsigned last event)
+     */
+    public void resetAuditChain(long seq, @Nullable String headHash) {
+        if (seq < 0) {
+            throw new IllegalArgumentException("audit sequence must not be negative");
+        }
+        this.auditSeq = seq;
+        this.auditHeadHash = headHash;
     }
 }

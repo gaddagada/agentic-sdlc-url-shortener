@@ -324,9 +324,11 @@ class OrchestrationEngineGovernanceTest {
         EngineHarness second = new EngineHarness(harness.store, harness.audit);
         try {
             OrchestrationEngine engine = second.start();
-            assertThat(engine.list()).isEmpty();
+            assertThat(engine.list()).as("list() includes persisted runs").extracting(Run::id).containsExactly(id);
             assertThat(engine.get(id).stage("design").status()).isEqualTo(StageStatus.AWAITING_APPROVAL);
+            assertThat(engine.isCached(id)).as("reads do not load runs into memory").isFalse();
             engine.approve(id, "design", ALICE, null);
+            assertThat(engine.isCached(id)).as("a command rehydrates the run").isTrue();
             second.awaitApproval(id, "release-readiness");
             assertThat(engine.list()).extracting(Run::id).containsExactly(id);
         } finally {

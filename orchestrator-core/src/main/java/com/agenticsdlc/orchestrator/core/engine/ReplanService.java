@@ -105,7 +105,7 @@ final class ReplanService {
         tx.audit(AuditEventType.REPLAN, null, actor, "re-planned to plan v" + planVersion + "; "
                         + invalidated.size() + " stages invalidated",
                 RunMutation.data("planVersion", planVersion, "invalidated", invalidated, "requirementChars",
-                        requirement.length()));
+                        requirement.length(), "nodeId", tx.nodeId));
         return invalidated;
     }
 }

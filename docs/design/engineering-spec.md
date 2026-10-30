@@ -19,9 +19,9 @@ overview lives in `docs/ARCHITECTURE.md`; this file is the implementation contra
 
 ---
 
-## 0. Assessment mapping
+## 0. Requirements coverage
 
-| Assessment requirement | Where it is satisfied |
+| Requirement | Where it is satisfied |
 |---|---|
 | 1. Requirement understanding (intent, ambiguity, normalization) | `intake` stage: `RequirementSpec`, `AmbiguityReport`, clarification gate (section 5.6.1) |
 | 2. Task decomposition with dependencies and sequencing | `decompose` stage: `TaskPlan` validated as a DAG, critical path, parallel groups (5.6.2) |
@@ -55,7 +55,7 @@ Two planes, one repository:
 +------------------------------------------------------------------+
 ```
 
-- `url-shortener` is the production-grade service the assignment asks for. It is independently
+- `url-shortener` is the production-grade service the platform is demonstrated on. It is independently
   deployable and has no dependency on the orchestrator.
 - `orchestrator-core` is a framework-independent Java library (no Spring) implementing the
   agentic SDLC engine. It is unit-tested in isolation with fake agents and an in-memory store.
@@ -405,6 +405,22 @@ Threading model:
   ReentrantLock lock; Map<String, Future<?>> inFlight; }`. All mutations happen inside
   `withLock(runId, fn)`. After every mutation the engine calls `RunStore.save(run)` and flushes
   pending audit events to `AuditSink` while still holding the lock (durability before visibility).
+- Registry eviction (bounded memory): the registry is a cache. A run that is not executing on this node
+  (not RUNNING, no in-flight attempt, no lease held, last commit succeeded) is evicted after
+  `EngineConfig.registryRetention` (default 1 h) without a change; terminal runs (COMPLETED, ABORTED) beyond
+  `registryMaxTerminalRuns` (default 500) are evicted least recently ended first. Eviction runs after every
+  command, in `list()` and on `evictIdleRuns()`. No data is lost: `get` falls back to `RunStore.load`, `list`
+  merges the cache with `RunStore.loadAll()` (the cached copy wins unless the store is newer), and a command
+  on an evicted run loads it again first (rehydration).
+- Run leases (multi-node): a `RunLeaseProvider` (port, default `InMemoryRunLeaseProvider`) leases a run to
+  the node (`EngineConfig.nodeId`) that executes its stages, from the command or event that schedules work
+  until the run waits for a human, is safe-stopped or ends. It is renewed at every mutation and every
+  `leaseTtl / 3` (default TTL 60 s) while an attempt runs. A mutation of a run leased by another node throws
+  `RunLeasedElsewhereException` (an `InvalidRunStateException`, HTTP 409); reads need no lease. After
+  acquiring a lease the engine reloads the run if the store holds a newer state; an expired lease can be
+  taken over; `close()` releases the node's leases and `recoverInterrupted()` skips runs leased by a live
+  node. `nodeId` is recorded in RUN_CREATED, RUN_RESUMED, REPLAN, RUN_INTERRUPTED and STAGE_STARTED data.
+  The per-run lock remains the mechanism within one node.
 - `pump(run)` (called after every mutation): compute ready stages via `Scheduler` (status PENDING or
   STALE, all predecessors SUCCEEDED, run status RUNNING or WAITING_HUMAN); for each ready stage
   evaluate the entry gate; stages allowed to run are submitted to an `ExecutorService` built from
@@ -446,6 +462,12 @@ Threading model:
 - Completion: when every stage is SUCCEEDED the run becomes `COMPLETED`, `endedAt` is set, the
   `release-readiness` artifact's change record is finalized with the approvals list (approver,
   timestamp, comment) by the engine (not the agent) so that approvals are authoritative.
+  Signed change records: at that moment `EngineConfig.changeRecordSigner` (SPI `ChangeRecordSigner`;
+  default `UnsignedChangeRecordSigner`, no signature; `HmacChangeRecordSigner` = HmacSHA256, key of at
+  least 32 bytes, hex value, constant-time verification) signs the canonical JSON of the finalized record
+  without its `signature` member, stored as `ChangeRecord.signature { algorithm, keyId, value, signedAt }`.
+  The ARTIFACT_ACCEPTED event of the finalized record carries `signatureAlgorithm` and `keyId` (and
+  `signatureError` when the signer failed; the run still completes, unsigned).
 - Commands: `approve`/`reject` require the stage to be `AWAITING_APPROVAL`; `clarify` requires
   `intake` to be `AWAITING_CLARIFICATION`; `replan` is allowed in RUNNING, WAITING_HUMAN and
   SAFE_STOPPED (not after COMPLETED/ABORTED) and requires `counters.replans < maxReplans`; `stop`
@@ -466,8 +488,19 @@ Threading model:
   CHECKPOINT_CREATED, COMPENSATION_EXECUTED, COMPENSATION_FAILED, ROLLBACK_COMPLETED, REPLAN,
   STAGE_INVALIDATED, BUDGET_EXCEEDED, SAFE_STOP, RUN_RESUMED, RUN_COMPLETED, RUN_ABORTED,
   RUN_INTERRUPTED`. `AuditEvent { long seq, Instant timestamp, String runId, @Nullable String stageId,
-  AuditEventType type, Actor actor, String message, Map<String, Object> data }`.
+  AuditEventType type, Actor actor, String message, Map<String, Object> data, @Nullable String prevHash,
+  @Nullable String hash }`.
   `Actor { ActorType type (SYSTEM|AGENT|HUMAN), String id }`.
+- Audit hash chain: every event is chained per run when it is created. `hash` is the lowercase hex
+  SHA-256 of the UTF-8 canonical JSON (`JsonCodec.strictCanonicalJson`: keys sorted at every level, no
+  whitespace, normalized numbers) of `{seq, timestamp (ISO-8601 UTC), runId, stageId ("" when null), type,
+  actorType, actorId, message, data, prevHash}`; `prevHash` is the previous event's hash, or
+  `AuditChain.GENESIS` (64 zeros) for the first event. The chain head is stored in the run snapshot
+  (`auditHeadHash`) and resynchronized with `AuditSink.lastEvent` when a run is loaded or a commit fails;
+  a mutation that is not committed rolls the sequence and head back, so the chain has no gaps.
+  `AuditChain.verify(events)` reports content changes, broken links, sequence gaps and unsigned (legacy)
+  events as a `ChainVerification`. `InMemoryAuditSink` rejects a batch that does not continue the stored
+  chain. Engine messages are capped at 2000 characters before hashing.
 - `EngineListener` (optional callback) receives `onRunChanged(Run)` after each mutation so the app can
   push updates (not required by the UI, which polls).
 
@@ -690,7 +723,8 @@ with auth note. `passed = no CRITICAL/HIGH findings`. A failed scan yields `Stag
 ```
 ReleaseReadiness { List<ChecklistItem> checklist; GoNoGo decision (GO|GO_WITH_CONDITIONS|NO_GO); List<String> conditions; ChangeRecord changeRecord; String releaseNotes }
 ChecklistItem { String item; String status (PASS|FAIL|WAIVED|N_A); String evidence }
-ChangeRecord { String summary; RiskLevel riskLevel; String rollbackPlan; List<ApprovalRecord> approvals; List<String> artifactIds; String policyVerdict }
+ChangeRecord { String summary; RiskLevel riskLevel; String rollbackPlan; List<ApprovalRecord> approvals; List<String> artifactIds; String policyVerdict; @Nullable Signature signature }
+Signature { String algorithm; String keyId; String value; String signedAt }   // engine-written at completion (5.5); agents never sign
 ApprovalRecord { String stageId; String approver; String decidedAt; String comment }
 ```
 Deterministic: checklist from upstream artifacts (verification passed, security passed, docs present,
@@ -825,8 +859,18 @@ active = end-to-end minus the sum of `humanWaitIntervals`. Percentiles use neare
 
 ```java
 public interface RunStore { void save(Run run); Optional<Run> load(String id); List<Run> loadAll(); }
-public interface AuditSink { void append(List<AuditEvent> events); List<AuditEvent> forRun(String runId, long afterSeq); }
+public interface AuditSink { void append(List<AuditEvent> events); List<AuditEvent> forRun(String runId, long afterSeq);
+                             default Optional<AuditEvent> lastEvent(String runId); }
+public interface RunLeaseProvider { Optional<RunLease> tryAcquire(String runId, String ownerId, Duration ttl);
+                                    boolean renew(RunLease lease, Duration ttl); void release(RunLease lease);
+                                    Optional<String> holderOf(String runId); }
+public record RunLease(String runId, String ownerId, String token, Instant expiresAt) {}
 ```
+
+Sinks must store `prevHash`/`hash` and every hashed field verbatim, and should override `lastEvent` with a
+bounded query. A lease provider grants a new token only when the run has no valid lease (not re-entrant),
+renews by token (also after expiry if nobody took over) and judges expiry with its own clock.
+`InMemoryRunLeaseProvider` is the default (one per engine unless shared).
 
 `InMemoryRunStore` and `InMemoryAuditSink` live in core (used by tests and as default). The JPA
 adapters live in the app. `Run` must be serializable to JSON via `JsonCodec` (the JPA store persists
@@ -1140,7 +1184,10 @@ quick start, demo, repository map), `docs/ARCHITECTURE.md`, `docs/ORCHESTRATION.
 
 ## 12. Out of scope / known limitations (to be echoed in docs)
 
-- Single-node engine (in-memory locks); multi-node needs a distributed lock and a work queue.
+- Single-node engine (in-memory locks); multi-node needs a distributed lock and a work queue. Core now
+  provides the lease half (`RunLeaseProvider`, section 5.5); there is still no work queue: a run executes on
+  the node that scheduled its work, and a run of a crashed node is recovered (`recoverInterrupted` or
+  stop/resume) only after its lease expires.
 - Deterministic agents produce skeleton code, not compilable features; LLM mode produces full
   content but is not guaranteed to compile; the optional sandbox build is the validation path.
 - No DNS-resolution SSRF check in the shortener; no distributed rate limiter; no authentication on

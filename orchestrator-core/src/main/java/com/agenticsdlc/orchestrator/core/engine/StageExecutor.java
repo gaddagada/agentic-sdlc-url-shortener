@@ -285,6 +285,23 @@ final class StageExecutor {
      * @return the outcome, or null when the attempt was cancelled (the caller must then do nothing)
      */
     @Nullable AttemptOutcome execute(StageAgent agent, StageContext context, Duration timeout) {
+        return execute(agent, context, timeout, null, timeout);
+    }
+
+    /**
+     * Executes an attempt like {@link #execute(StageAgent, StageContext, Duration)}, calling {@code heartbeat} every
+     * {@code heartbeatInterval} while the agent runs (the engine renews the run's lease with it). A heartbeat that
+     * throws is logged and does not affect the attempt.
+     *
+     * @param agent the agent
+     * @param context the context
+     * @param timeout attempt timeout
+     * @param heartbeat called periodically while waiting, or null
+     * @param heartbeatInterval interval between heartbeats (positive)
+     * @return the outcome, or null when the attempt was cancelled or the executor rejected it
+     */
+    @Nullable AttemptOutcome execute(StageAgent agent, StageContext context, Duration timeout,
+                                     @Nullable Runnable heartbeat, Duration heartbeatInterval) {
         long start = System.nanoTime();
         Future<StageResult> inner;
         try {
@@ -292,9 +309,31 @@ final class StageExecutor {
         } catch (RejectedExecutionException e) {
             return null;
         }
+        long timeoutNanos = saturatedNanos(timeout);
+        long intervalNanos = Math.max(1L, saturatedNanos(heartbeatInterval));
         StageResult result;
         try {
-            StageResult r = inner.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            StageResult r = null;
+            boolean timedOut = false;
+            while (true) {
+                long remaining = timeoutNanos - (System.nanoTime() - start);
+                if (remaining <= 0) {
+                    timedOut = true;
+                    break;
+                }
+                try {
+                    r = inner.get(heartbeat == null ? remaining : Math.min(remaining, intervalNanos),
+                            TimeUnit.NANOSECONDS);
+                    break;
+                } catch (TimeoutException slice) {
+                    if (heartbeat != null && timeoutNanos - (System.nanoTime() - start) > 0) {
+                        beat(heartbeat);
+                    }
+                }
+            }
+            if (timedOut) {
+                throw new TimeoutException();
+            }
             result = r != null ? r : StageResult.failure(StageFailure.fatal("agent returned no result"));
         } catch (TimeoutException e) {
             inner.cancel(true);
@@ -311,6 +350,22 @@ final class StageExecutor {
         }
         long latencyMs = (System.nanoTime() - start) / 1_000_000L;
         return new AttemptOutcome(result, latencyMs, context);
+    }
+
+    private static void beat(Runnable heartbeat) {
+        try {
+            heartbeat.run();
+        } catch (RuntimeException e) {
+            LOG.warn("attempt heartbeat failed error={}", e.toString());
+        }
+    }
+
+    private static long saturatedNanos(Duration duration) {
+        try {
+            return duration.toNanos();
+        } catch (ArithmeticException e) {
+            return duration.isNegative() ? Long.MIN_VALUE : Long.MAX_VALUE;
+        }
     }
 
     /**

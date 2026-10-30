@@ -49,6 +49,8 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  * @param lastArtifactVersions highest artifact version ever assigned per stage, including versions of artifacts
  *                             later removed from the history (denied by an exit gate), so version numbers are
  *                             never reused; absent in snapshots written before it existed
+ * @param auditHeadHash hash of the run's last audit event (head of its hash chain), or null when the run has no
+ *                      signed events; absent in snapshots written before hash chaining existed
  */
 public record RunSnapshot(
         String id,
@@ -82,7 +84,8 @@ public record RunSnapshot(
         @Nullable String firstFailureStageId,
         @Nullable Instant recoveredAt,
         long auditSeq,
-        Map<String, Integer> lastArtifactVersions) {
+        Map<String, Integer> lastArtifactVersions,
+        @Nullable String auditHeadHash) {
 
     /**
      * Normalizes collections.
@@ -101,6 +104,60 @@ public record RunSnapshot(
         if (counters == null) {
             counters = RunCounters.ZERO;
         }
+    }
+
+    /**
+     * Creates a snapshot without an audit chain head (the canonical constructor before hash chaining existed).
+     *
+     * @param id run id
+     * @param workflowId workflow id
+     * @param workflowVersion workflow version
+     * @param scenarioKey scenario key
+     * @param requirement original requirement
+     * @param activeRequirement active requirement
+     * @param options run options
+     * @param budget effective budget
+     * @param status run status
+     * @param haltReason halt reason
+     * @param haltDetail halt or abort detail
+     * @param planVersion plan version
+     * @param createdAt creation time
+     * @param startedAt first start time
+     * @param endedAt completion or abort time
+     * @param updatedAt last mutation time
+     * @param stages stage executions
+     * @param artifacts artifact history
+     * @param acceptedVersions accepted versions
+     * @param approvals approvals
+     * @param clarification clarification
+     * @param checkpoints checkpoints
+     * @param compensations compensations
+     * @param counters counters
+     * @param humanWaitIntervals human-wait intervals
+     * @param policyFindings policy findings
+     * @param injectedFaults injected faults
+     * @param firstFailureAt first failure time
+     * @param firstFailureStageId first failure stage
+     * @param recoveredAt recovery time
+     * @param auditSeq last audit sequence number
+     * @param lastArtifactVersions highest artifact versions
+     */
+    public RunSnapshot(String id, String workflowId, int workflowVersion, String scenarioKey, String requirement,
+                       String activeRequirement, RunOptions options, RunBudget budget, RunStatus status,
+                       @Nullable HaltReason haltReason, @Nullable String haltDetail, int planVersion, Instant createdAt,
+                       @Nullable Instant startedAt, @Nullable Instant endedAt, Instant updatedAt,
+                       List<StageSnapshot> stages, List<ArtifactSnapshot> artifacts,
+                       Map<String, Integer> acceptedVersions, List<Approval> approvals,
+                       @Nullable Clarification clarification, List<Checkpoint> checkpoints,
+                       List<Compensation> compensations, RunCounters counters, List<Interval> humanWaitIntervals,
+                       List<PolicyFindingRecord> policyFindings, Map<String, Integer> injectedFaults,
+                       @Nullable Instant firstFailureAt, @Nullable String firstFailureStageId,
+                       @Nullable Instant recoveredAt, long auditSeq, Map<String, Integer> lastArtifactVersions) {
+        this(id, workflowId, workflowVersion, scenarioKey, requirement, activeRequirement, options, budget, status,
+                haltReason, haltDetail, planVersion, createdAt, startedAt, endedAt, updatedAt, stages, artifacts,
+                acceptedVersions, approvals, clarification, checkpoints, compensations, counters, humanWaitIntervals,
+                policyFindings, injectedFaults, firstFailureAt, firstFailureStageId, recoveredAt, auditSeq,
+                lastArtifactVersions, null);
     }
 
     /**

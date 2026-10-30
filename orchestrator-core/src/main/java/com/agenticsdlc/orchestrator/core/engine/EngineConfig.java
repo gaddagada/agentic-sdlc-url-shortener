@@ -1,9 +1,12 @@
 package com.agenticsdlc.orchestrator.core.engine;
 
+import java.net.InetAddress;
 import java.nio.file.Path;
+import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
@@ -14,6 +17,10 @@ import org.jspecify.annotations.Nullable;
 
 import com.agenticsdlc.orchestrator.core.agent.AgentRegistry;
 import com.agenticsdlc.orchestrator.core.agent.AgentSettings;
+import com.agenticsdlc.orchestrator.core.audit.ChangeRecordSigner;
+import com.agenticsdlc.orchestrator.core.audit.UnsignedChangeRecordSigner;
+import com.agenticsdlc.orchestrator.core.port.InMemoryRunLeaseProvider;
+import com.agenticsdlc.orchestrator.core.port.RunLeaseProvider;
 import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
 
 /**
@@ -49,6 +56,25 @@ import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
  * @param providerCircuitBreaker engine-wide circuit breaker per LLM provider (default
  *                               {@link ProviderCircuitBreaker#DEFAULTS}: open after 3 consecutive failures, 10 min
  *                               cooldown)
+ * @param changeRecordSigner signs the release change record when the run completes and the record is finalized with
+ *                           the approvals (default {@link UnsignedChangeRecordSigner}: no signature)
+ * @param nodeId id of this engine node, used as lease owner and recorded in RUN_CREATED, RUN_RESUMED, REPLAN,
+ *               RUN_INTERRUPTED and STAGE_STARTED audit data (default {@link #defaultNodeId()}: host name, process
+ *               id and a random suffix, computed once per JVM; at most {@value #MAX_NODE_ID_LENGTH} characters). It
+ *               must be unique per running engine process: an id reused by a restarted process makes the unexpired
+ *               leases of its previous incarnation look live (and blocks their recovery) until they expire
+ * @param leaseProvider grants run leases so that several nodes can share one store (default: a new
+ *                      {@link InMemoryRunLeaseProvider} on {@code clock}, which only coordinates this engine)
+ * @param leaseTtl lease duration; the lease is renewed at every mutation and every {@code leaseTtl / 3} while an
+ *                 agent attempt runs (default {@value #DEFAULT_LEASE_TTL_SECONDS} s); it should exceed the longest
+ *                 retry backoff ({@code maxBackoff * backoffScale}), during which nothing renews it
+ * @param registryRetention how long a run that is not executing on this node (WAITING_HUMAN, SAFE_STOPPED,
+ *                          COMPLETED, ABORTED) stays cached in memory after its last change (default 1 h; zero evicts
+ *                          such runs right after each command); evicted runs are read from and rehydrated from the
+ *                          store on demand
+ * @param registryMaxTerminalRuns maximum number of COMPLETED and ABORTED runs cached in memory; beyond it the
+ *                                least recently ended ones are evicted (default
+ *                                {@value #DEFAULT_REGISTRY_MAX_TERMINAL_RUNS})
  */
 public record EngineConfig(
         double ambiguityThreshold,
@@ -69,10 +95,31 @@ public record EngineConfig(
         double llmTimeoutScale,
         int sourceContextPerFileChars,
         int sourceContextTotalChars,
-        ProviderCircuitBreaker providerCircuitBreaker) {
+        ProviderCircuitBreaker providerCircuitBreaker,
+        ChangeRecordSigner changeRecordSigner,
+        String nodeId,
+        RunLeaseProvider leaseProvider,
+        Duration leaseTtl,
+        Duration registryRetention,
+        int registryMaxTerminalRuns) {
 
     /** Default {@link #llmTimeoutScale()}. */
     public static final double DEFAULT_LLM_TIMEOUT_SCALE = 3.0;
+
+    /** Default {@link #leaseTtl()} in seconds. */
+    public static final long DEFAULT_LEASE_TTL_SECONDS = 60;
+
+    /** Default {@link #leaseTtl()}. */
+    public static final Duration DEFAULT_LEASE_TTL = Duration.ofSeconds(DEFAULT_LEASE_TTL_SECONDS);
+
+    /** Default {@link #registryRetention()}. */
+    public static final Duration DEFAULT_REGISTRY_RETENTION = Duration.ofHours(1);
+
+    /** Default {@link #registryMaxTerminalRuns()}. */
+    public static final int DEFAULT_REGISTRY_MAX_TERMINAL_RUNS = 500;
+
+    /** Maximum length of {@link #nodeId()} (it is stored in lease and audit columns). */
+    public static final int MAX_NODE_ID_LENGTH = 128;
 
     /** Default {@link #sourceContextPerFileChars()}. */
     public static final int DEFAULT_SOURCE_CONTEXT_PER_FILE_CHARS = 20_000;
@@ -149,6 +196,104 @@ public record EngineConfig(
         Objects.requireNonNull(providerCircuitBreaker, "providerCircuitBreaker");
         if (sourceContextPerFileChars < 1 || sourceContextTotalChars < 1) {
             throw new IllegalArgumentException("source context limits must be positive");
+        }
+        Objects.requireNonNull(changeRecordSigner, "changeRecordSigner");
+        Objects.requireNonNull(nodeId, "nodeId");
+        Objects.requireNonNull(leaseProvider, "leaseProvider");
+        Objects.requireNonNull(leaseTtl, "leaseTtl");
+        Objects.requireNonNull(registryRetention, "registryRetention");
+        if (nodeId.isBlank() || nodeId.length() > MAX_NODE_ID_LENGTH) {
+            throw new IllegalArgumentException("nodeId must be non-blank and at most " + MAX_NODE_ID_LENGTH
+                    + " characters");
+        }
+        if (leaseTtl.isNegative() || leaseTtl.isZero()) {
+            throw new IllegalArgumentException("leaseTtl must be positive");
+        }
+        if (registryRetention.isNegative()) {
+            throw new IllegalArgumentException("registryRetention must not be negative");
+        }
+        if (registryMaxTerminalRuns < 0) {
+            throw new IllegalArgumentException("registryMaxTerminalRuns must not be negative");
+        }
+    }
+
+    /**
+     * Creates a configuration with the default change record signer, node id, lease provider (in memory, on
+     * {@code clock}), lease TTL and registry retention (the canonical constructor before they existed).
+     *
+     * @param ambiguityThreshold ambiguity threshold
+     * @param backoffScale backoff scale
+     * @param maxBackoff backoff cap
+     * @param sandboxEnabled whether sandboxes are enabled
+     * @param verifyBuildEnabled whether sandbox builds are enabled
+     * @param sandboxRoot sandbox root
+     * @param workspaceRoot workspace root, or null
+     * @param buildTimeout build timeout
+     * @param clock clock
+     * @param workspaceIndex codebase index supplier
+     * @param compensationHandlers compensation handlers
+     * @param listener listener, or null
+     * @param stageExecutor stage executor, or null
+     * @param retryScheduler retry scheduler, or null
+     * @param buildCommand sandbox build command
+     * @param llmTimeoutScale LLM timeout scale
+     * @param sourceContextPerFileChars source context characters per file
+     * @param sourceContextTotalChars source context characters in total
+     * @param providerCircuitBreaker provider circuit breaker
+     */
+    public EngineConfig(double ambiguityThreshold, double backoffScale, Duration maxBackoff, boolean sandboxEnabled,
+                        boolean verifyBuildEnabled, Path sandboxRoot, @Nullable Path workspaceRoot,
+                        Duration buildTimeout, Clock clock, Supplier<@Nullable CodebaseIndex> workspaceIndex,
+                        List<CompensationHandler> compensationHandlers, @Nullable EngineListener listener,
+                        @Nullable ExecutorService stageExecutor, @Nullable ScheduledExecutorService retryScheduler,
+                        String buildCommand, double llmTimeoutScale, int sourceContextPerFileChars,
+                        int sourceContextTotalChars, ProviderCircuitBreaker providerCircuitBreaker) {
+        this(ambiguityThreshold, backoffScale, maxBackoff, sandboxEnabled, verifyBuildEnabled, sandboxRoot,
+                workspaceRoot, buildTimeout, clock, workspaceIndex, compensationHandlers, listener, stageExecutor,
+                retryScheduler, buildCommand, llmTimeoutScale, sourceContextPerFileChars, sourceContextTotalChars,
+                providerCircuitBreaker, UnsignedChangeRecordSigner.INSTANCE, defaultNodeId(),
+                new InMemoryRunLeaseProvider(Objects.requireNonNull(clock, "clock")), DEFAULT_LEASE_TTL,
+                DEFAULT_REGISTRY_RETENTION, DEFAULT_REGISTRY_MAX_TERMINAL_RUNS);
+    }
+
+    /**
+     * Returns the default node id of this JVM: the host name, the process id and a random six-hex-digit suffix
+     * (for example {@code build-host-4711-3fa2c9}), computed once and then shared by every engine of the JVM.
+     * Characters other than letters, digits, {@code .}, {@code _} and {@code -} are replaced by {@code -}. Engines
+     * that share a lease provider within one JVM (tests) must be given distinct node ids explicitly.
+     *
+     * @return the default node id
+     */
+    public static String defaultNodeId() {
+        return DefaultNodeId.VALUE;
+    }
+
+    /** Lazily computed default node id (host name resolution may be slow, so it happens once, on first use). */
+    private static final class DefaultNodeId {
+        static final String VALUE = compute();
+
+        private static String compute() {
+            String host = System.getenv("HOSTNAME");
+            if (host == null || host.isBlank()) {
+                host = System.getenv("COMPUTERNAME");
+            }
+            if (host == null || host.isBlank()) {
+                try {
+                    host = InetAddress.getLocalHost().getHostName();
+                } catch (Exception e) {
+                    host = "localhost";
+                }
+            }
+            String sanitized = host.strip().replaceAll("[^A-Za-z0-9._-]", "-");
+            if (sanitized.isEmpty()) {
+                sanitized = "localhost";
+            }
+            if (sanitized.length() > 64) {
+                sanitized = sanitized.substring(0, 64);
+            }
+            byte[] suffix = new byte[3];
+            new SecureRandom().nextBytes(suffix);
+            return sanitized + "-" + ProcessHandle.current().pid() + "-" + HexFormat.of().formatHex(suffix);
         }
     }
 
@@ -276,6 +421,12 @@ public record EngineConfig(
         b.sourceContextPerFileChars = sourceContextPerFileChars;
         b.sourceContextTotalChars = sourceContextTotalChars;
         b.providerCircuitBreaker = providerCircuitBreaker;
+        b.changeRecordSigner = changeRecordSigner;
+        b.nodeId = nodeId;
+        b.leaseProvider = leaseProvider;
+        b.leaseTtl = leaseTtl;
+        b.registryRetention = registryRetention;
+        b.registryMaxTerminalRuns = registryMaxTerminalRuns;
         return b;
     }
 
@@ -312,8 +463,81 @@ public record EngineConfig(
         private int sourceContextPerFileChars = DEFAULT_SOURCE_CONTEXT_PER_FILE_CHARS;
         private int sourceContextTotalChars = DEFAULT_SOURCE_CONTEXT_TOTAL_CHARS;
         private ProviderCircuitBreaker providerCircuitBreaker = ProviderCircuitBreaker.DEFAULTS;
+        private ChangeRecordSigner changeRecordSigner = UnsignedChangeRecordSigner.INSTANCE;
+        private @Nullable String nodeId;
+        private @Nullable RunLeaseProvider leaseProvider;
+        private Duration leaseTtl = DEFAULT_LEASE_TTL;
+        private Duration registryRetention = DEFAULT_REGISTRY_RETENTION;
+        private int registryMaxTerminalRuns = DEFAULT_REGISTRY_MAX_TERMINAL_RUNS;
 
         private Builder() {
+        }
+
+        /**
+         * Sets the signer of finalized release change records.
+         *
+         * @param value signer ({@link UnsignedChangeRecordSigner} attaches no signature)
+         * @return this builder
+         */
+        public Builder changeRecordSigner(ChangeRecordSigner value) {
+            this.changeRecordSigner = value;
+            return this;
+        }
+
+        /**
+         * Sets the id of this engine node (lease owner, audit data).
+         *
+         * @param value node id (not blank, at most {@value EngineConfig#MAX_NODE_ID_LENGTH} characters), or null for
+         *              {@link EngineConfig#defaultNodeId()}
+         * @return this builder
+         */
+        public Builder nodeId(@Nullable String value) {
+            this.nodeId = value;
+            return this;
+        }
+
+        /**
+         * Sets the run lease provider; nodes that share a run store must share a lease provider too.
+         *
+         * @param value provider, or null for a new {@link InMemoryRunLeaseProvider} on the configured clock
+         * @return this builder
+         */
+        public Builder leaseProvider(@Nullable RunLeaseProvider value) {
+            this.leaseProvider = value;
+            return this;
+        }
+
+        /**
+         * Sets the lease duration.
+         *
+         * @param value positive duration
+         * @return this builder
+         */
+        public Builder leaseTtl(Duration value) {
+            this.leaseTtl = value;
+            return this;
+        }
+
+        /**
+         * Sets how long a run that is not executing on this node stays cached after its last change.
+         *
+         * @param value non-negative duration
+         * @return this builder
+         */
+        public Builder registryRetention(Duration value) {
+            this.registryRetention = value;
+            return this;
+        }
+
+        /**
+         * Sets the maximum number of terminal runs cached in memory.
+         *
+         * @param value non-negative count
+         * @return this builder
+         */
+        public Builder registryMaxTerminalRuns(int value) {
+            this.registryMaxTerminalRuns = value;
+            return this;
         }
 
         /**
@@ -534,7 +758,11 @@ public record EngineConfig(
             return new EngineConfig(ambiguityThreshold, backoffScale, maxBackoff, sandboxEnabled, verifyBuildEnabled,
                     sandboxRoot, workspaceRoot, buildTimeout, clock, workspaceIndex, compensationHandlers, listener,
                     stageExecutor, retryScheduler, buildCommand, llmTimeoutScale, sourceContextPerFileChars,
-                    sourceContextTotalChars, providerCircuitBreaker);
+                    sourceContextTotalChars, providerCircuitBreaker, changeRecordSigner,
+                    nodeId != null ? nodeId : defaultNodeId(),
+                    leaseProvider != null ? leaseProvider
+                            : new InMemoryRunLeaseProvider(Objects.requireNonNull(clock, "clock")),
+                    leaseTtl, registryRetention, registryMaxTerminalRuns);
         }
     }
 }

@@ -2,6 +2,8 @@ package com.agenticsdlc.orchestrator.core.artifact;
 
 import java.util.List;
 
+import org.jspecify.annotations.Nullable;
+
 import com.agenticsdlc.orchestrator.core.util.Immutables;
 
 /**
@@ -76,9 +78,12 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
      * @param approvals human approvals (filled by the engine at completion)
      * @param artifactIds ids of the accepted artifacts this release is based on
      * @param policyVerdict policy verdict summary
+     * @param signature the engine's signature over the finalized record (set when the run completes and a signer is
+     *                  configured), or null: unsigned, not finalized yet, or written before signatures existed. Agents
+     *                  never sign; a signature an agent puts here is discarded
      */
     public record ChangeRecord(String summary, RiskLevel riskLevel, String rollbackPlan, List<ApprovalRecord> approvals,
-                               List<String> artifactIds, String policyVerdict) {
+                               List<String> artifactIds, String policyVerdict, @Nullable Signature signature) {
         /**
          * Normalizes fields.
          */
@@ -88,6 +93,55 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
             approvals = Immutables.list(approvals);
             artifactIds = Immutables.list(artifactIds);
             policyVerdict = Immutables.text(policyVerdict);
+        }
+
+        /**
+         * Creates an unsigned change record (the constructor before signatures existed).
+         *
+         * @param summary change summary
+         * @param riskLevel risk level
+         * @param rollbackPlan rollback plan
+         * @param approvals human approvals
+         * @param artifactIds ids of the accepted artifacts this release is based on
+         * @param policyVerdict policy verdict summary
+         */
+        public ChangeRecord(String summary, RiskLevel riskLevel, String rollbackPlan, List<ApprovalRecord> approvals,
+                            List<String> artifactIds, String policyVerdict) {
+            this(summary, riskLevel, rollbackPlan, approvals, artifactIds, policyVerdict, null);
+        }
+
+        /**
+         * Returns a copy with a different signature.
+         *
+         * @param newSignature the signature, or null for an unsigned copy
+         * @return the copy
+         */
+        public ChangeRecord withSignature(@Nullable Signature newSignature) {
+            return new ChangeRecord(summary, riskLevel, rollbackPlan, approvals, artifactIds, policyVerdict,
+                    newSignature);
+        }
+    }
+
+    /**
+     * A signature over a finalized change record: {@code value} signs the canonical JSON of the record without its
+     * {@code signature} member (see {@code ChangeRecordSigner.canonicalPayload} in the audit package).
+     * {@code signedAt} is informational and not covered by the signature.
+     *
+     * @param algorithm signature algorithm, for example {@code HmacSHA256}
+     * @param keyId identifier of the signing key (never the key itself)
+     * @param value the signature (lowercase hex for HMAC)
+     * @param signedAt ISO-8601 UTC time of signing (a string, like {@link ApprovalRecord#decidedAt()}, so that the
+     *                 payload stays expressible as a structured-output JSON schema)
+     */
+    public record Signature(String algorithm, String keyId, String value, String signedAt) {
+        /**
+         * Normalizes text.
+         */
+        public Signature {
+            algorithm = Immutables.text(algorithm);
+            keyId = Immutables.text(keyId);
+            value = Immutables.text(value);
+            signedAt = Immutables.text(signedAt);
         }
     }
 
@@ -172,12 +226,17 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
                 checklist.stream().map(i -> List.of(i.item(), String.valueOf(i.status()), i.evidence())).toList());
         md.heading(3, "Conditions").bullets(conditions);
         if (changeRecord != null) {
+            Signature signature = changeRecord.signature();
             md.heading(3, "Change record")
                     .field("Summary", changeRecord.summary())
                     .field("Risk", changeRecord.riskLevel())
                     .field("Rollback plan", changeRecord.rollbackPlan())
                     .field("Policy verdict", changeRecord.policyVerdict())
                     .field("Artifacts", Markdown.join(changeRecord.artifactIds()));
+            if (signature != null) {
+                md.field("Signature", signature.algorithm() + " (key " + signature.keyId() + ", signed "
+                        + signature.signedAt() + ")");
+            }
             md.table(List.of("Stage", "Approver", "Decided at", "Comment", "Artifact hash"),
                     changeRecord.approvals().stream().map(a -> List.of(a.stageId(), a.approver(), a.decidedAt(),
                             a.comment(), a.artifactHash().isEmpty() ? "-" : a.artifactHash())).toList());
