@@ -21,6 +21,11 @@ import com.agenticsdlc.orchestrator.core.agent.StageResult;
 import com.agenticsdlc.orchestrator.core.artifact.ArtifactPayload;
 import com.agenticsdlc.orchestrator.core.artifact.ChangeSet;
 import com.agenticsdlc.orchestrator.core.artifact.DesignSpec;
+import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis;
+import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
+import com.agenticsdlc.orchestrator.core.artifact.TaskPlan;
+import com.agenticsdlc.orchestrator.core.artifact.TestPlan;
+import com.agenticsdlc.orchestrator.core.artifact.VerificationReport;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.agenticsdlc.orchestrator.core.model.RunOptions;
 import com.agenticsdlc.orchestrator.core.model.WorkspaceMode;
@@ -113,6 +118,10 @@ class DeterministicAgentsTest {
         assertThat(sandbox.resolve("url-shortener/src/main/java/com/agenticsdlc/shortener/api/LinkController.java"
                 + ".skeleton")).exists();
         assertThat(sandbox.resolve("url-shortener/target")).doesNotExist();
+        String existingTest = "url-shortener/src/test/java/com/agenticsdlc/shortener/api/LinkControllerTest.java";
+        assertThat(sandbox.resolve(existingTest)).as("existing tests are never overwritten").content()
+                .isEqualTo(Files.readString(workspace.resolve(existingTest)));
+        assertThat(sandbox.resolve(existingTest + ".skeleton")).content().contains("MODIFY skeleton");
         assertThat(changeSet.changes()).anySatisfy(c -> {
             assertThat(c.fileName()).isEqualTo("BulkCreateLinksRequestTest.java");
         });
@@ -121,6 +130,67 @@ class DeterministicAgentsTest {
         DesignSpec design = (DesignSpec) upstream.getLast();
         assertThat(design.apiChanges()).isNotEmpty();
         assertThat(Files.exists(sandbox)).isTrue();
+    }
+
+    @Test
+    void implementationModifiesFilesThatExistInTheIndexAndNeverCreatesThem(@TempDir Path dir) throws Exception {
+        CodebaseIndex index = new CodebaseIndexer().index(SyntheticWorkspace.create(dir));
+        Map<AgentRole, StageAgent> agents = new EnumMap<>(AgentRole.class);
+        DeterministicAgents.all(null).forEach(a -> agents.put(a.role(), a));
+        RunOptions repo = RunOptions.defaults().withWorkspace(WorkspaceMode.REPO);
+        List<ArtifactPayload> upstream = new ArrayList<>();
+        for (AgentRole role : List.of(AgentRole.REQUIREMENTS, AgentRole.PLANNING, AgentRole.CODEBASE_ANALYSIS,
+                AgentRole.ARCHITECTURE)) {
+            upstream.add(((StageResult.Success) agents.get(role).execute(Contexts.of(role, BROWNFIELD, repo, index,
+                    List.of(), upstream.toArray(ArtifactPayload[]::new)))).payload());
+        }
+        RequirementSpec spec = (RequirementSpec) upstream.get(0);
+        TaskPlan plan = (TaskPlan) upstream.get(1);
+        ImpactAnalysis impact = (ImpactAnalysis) upstream.get(2);
+        DesignSpec design = (DesignSpec) upstream.get(3);
+        ImplementationAgent implementation = new ImplementationAgent();
+
+        ChangeSet changeSet = implementation.implement(design, spec, impact, plan, List.of(), index);
+
+        String existingTest = "url-shortener/src/test/java/com/agenticsdlc/shortener/api/LinkControllerTest.java";
+        assertThat(index.containsPath(existingTest)).isTrue();
+        assertThat(changeSet.changes()).filteredOn(c -> c.path().equals(existingTest)).singleElement().satisfies(c -> {
+            assertThat(c.operation()).isEqualTo(ChangeSet.Operation.MODIFY);
+            assertThat(c.contentKind()).isEqualTo(ChangeSet.ContentKind.SKELETON);
+            assertThat(c.content()).startsWith("// MODIFY skeleton for the existing test class LinkControllerTest")
+                    .contains("keep the existing tests unchanged").doesNotContain("package ")
+                    .contains("org.junit.jupiter.api.Assertions.fail(\"TODO: implement ");
+        });
+        assertThat(changeSet.changes()).filteredOn(c -> c.path().endsWith("api/LinkController.java")).singleElement()
+                .satisfies(c -> {
+                    assertThat(c.operation()).isEqualTo(ChangeSet.Operation.MODIFY);
+                    assertThat(c.content()).contains("// MODIFY skeleton for the existing type LinkController");
+                });
+        assertThat(changeSet.changes()).filteredOn(c -> index.containsPath(c.path())).isNotEmpty()
+                .allSatisfy(c -> assertThat(c.operation()).as(c.path()).isEqualTo(ChangeSet.Operation.MODIFY));
+        assertThat(changeSet.changes()).filteredOn(c -> c.operation() == ChangeSet.Operation.CREATE).isNotEmpty()
+                .allSatisfy(c -> assertThat(index.containsPath(c.path())).as(c.path()).isFalse());
+        assertThat(changeSet.changes()).filteredOn(c -> c.path().contains("src/test/")).isNotEmpty()
+                .allSatisfy(c -> assertThat(c.content()).contains("org.junit.jupiter.api.Assertions.fail(\"TODO: "
+                        + "implement ").doesNotContainPattern("void \\w+\\(\\) \\{\\s*}"));
+        assertThat(changeSet.risks()).contains(ImplementationAgent.SKELETON_RISK);
+        assertThat(ImplementationAgent.SKELETON_RISK).startsWith("skeleton implementation; not compilable/complete");
+        assertThat(implementation.implement(design, spec, impact, plan, List.of(), index)).as("deterministic")
+                .isEqualTo(changeSet);
+
+        ChangeSet withoutIndex = implementation.implement(design, spec, impact, plan, List.of());
+        assertThat(withoutIndex.changes()).filteredOn(c -> c.path().equals(existingTest)).singleElement()
+                .satisfies(c -> assertThat(c.operation()).as("unknown without an index")
+                        .isEqualTo(ChangeSet.Operation.CREATE));
+
+        TestPlan testPlan = new TestDesignAgent().plan(spec, design);
+        VerificationReport report = new VerificationAgent().verify(changeSet, design, testPlan, spec, null, index);
+        assertThat(report.structuralChecks()).filteredOn(c -> c.name().equals("no-create-over-existing-file"))
+                .singleElement().satisfies(c -> assertThat(c.passed()).isTrue());
+        assertThat(report.structuralChecks()).filteredOn(c -> c.name().equals("tests-are-not-vacuous"))
+                .singleElement().satisfies(c -> assertThat(c.passed()).isTrue());
+        assertThat(report.passed()).isTrue();
+        assertThat(report.skeletonOnly()).isTrue();
     }
 
     @Test

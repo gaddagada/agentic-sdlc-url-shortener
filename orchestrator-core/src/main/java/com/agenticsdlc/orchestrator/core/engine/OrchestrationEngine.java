@@ -867,7 +867,9 @@ public final class OrchestrationEngine implements AutoCloseable {
 
     /**
      * Submits one attempt of a stage: checks budgets, selects the agent (primary, fault-injected primary or
-     * deterministic fallback), records the attempt, builds the context and runs it on the stage executor.
+     * deterministic fallback), records the attempt, builds the context and runs it on the stage executor with the
+     * effective timeout ({@link EngineConfig#attemptTimeout(Duration, String)}: scaled for LLM provider agents),
+     * which the STAGE_STARTED audit event records as {@code timeoutMs}.
      */
     private void submitAttempt(RunMutation tx, StageDefinition def, StageExecution exec) {
         Run run = tx.run;
@@ -898,16 +900,19 @@ public final class OrchestrationEngine implements AutoCloseable {
         long token = tx.holder.nextToken();
         exec.setToken(token);
         StageContext context = stageExecutor.buildContext(run, def, exec);
+        // LLM provider agents get the stage timeout times llmTimeoutScale (long streamed outputs)
+        Duration timeout = config.attemptTimeout(def.timeout(), agentId);
         tx.audit(AuditEventType.STAGE_STARTED, def.id(), Actor.agent(agentId), "attempt " + exec.attempts() + " of "
                         + def.id() + " started with " + agentId,
                 RunMutation.data("attempt", exec.attempts(), "maxAttempts", def.retryPolicy().maxAttempts(), "agent",
-                        agentId, "planVersion", run.planVersion(), "derivedFrom", context.derivedFrom()));
+                        agentId, "planVersion", run.planVersion(), "derivedFrom", context.derivedFrom(),
+                        "timeoutMs", timeout.toMillis()));
         String runId = run.id();
         String stageId = def.id();
         StageAgent chosen = agent;
         try {
             var future = executor.submit(() -> runAttempt(runId, stageId, token, chosen, agentId, context,
-                    def.timeout()));
+                    timeout));
             tx.holder.inFlight.put(stageId, new RunRegistry.InFlight(token, future));
         } catch (RejectedExecutionException e) {
             throw new IllegalStateException("engine is shutting down", e);

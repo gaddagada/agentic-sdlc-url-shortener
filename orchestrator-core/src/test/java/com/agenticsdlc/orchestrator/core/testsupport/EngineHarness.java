@@ -5,6 +5,7 @@ import static org.awaitility.Awaitility.await;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -48,6 +49,7 @@ public final class EngineHarness implements AutoCloseable {
     public final InMemoryAuditSink audit;
     public final List<Compensation> compensated = new CopyOnWriteArrayList<>();
     private final Map<AgentRole, StageAgent> agents = new EnumMap<>(AgentRole.class);
+    private final Map<String, List<StageAgent>> providers = new LinkedHashMap<>();
     private WorkflowDefinition definition = WorkflowDefinitions.defaultSdlc();
     private UnaryOperator<EngineConfig.Builder> configCustomizer = b -> b;
     private PolicyEngine policy = PolicyEngine.withDefaultRules();
@@ -75,6 +77,12 @@ public final class EngineHarness implements AutoCloseable {
 
     public EngineHarness agents(List<StageAgent> list) {
         list.forEach(this::agent);
+        return this;
+    }
+
+    /** Registers agents of an LLM-like provider (selected with {@code RunOptions.withProvider(providerId)}). */
+    public EngineHarness provider(String providerId, StageAgent... providerAgents) {
+        providers.computeIfAbsent(providerId, k -> new ArrayList<>()).addAll(List.of(providerAgents));
         return this;
     }
 
@@ -119,7 +127,9 @@ public final class EngineHarness implements AutoCloseable {
         };
         EngineConfig config = configCustomizer.apply(EngineConfig.builder().backoffScale(0)
                 .compensationHandler(handler)).build();
-        engine = new OrchestrationEngine(new WorkflowGraph(definition), AgentRegistry.of(agents.values()), policy,
+        AgentRegistry.Builder registry = AgentRegistry.builder().deterministic(agents.values());
+        providers.forEach(registry::provider);
+        engine = new OrchestrationEngine(new WorkflowGraph(definition), registry.build(), policy,
                 storeDecorator.apply(store), audit, metrics, config);
         engines.add(engine);
         return engine;

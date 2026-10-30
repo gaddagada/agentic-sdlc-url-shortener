@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 
 import org.junit.jupiter.api.Test;
@@ -16,6 +17,7 @@ import com.agenticsdlc.orchestrator.core.agent.StageAgent;
 import com.agenticsdlc.orchestrator.core.agent.StageContext;
 import com.agenticsdlc.orchestrator.core.agent.StageFailure;
 import com.agenticsdlc.orchestrator.core.agent.StageResult;
+import com.agenticsdlc.orchestrator.core.artifact.ArtifactPayload;
 import com.agenticsdlc.orchestrator.core.artifact.ChangeSet;
 import com.agenticsdlc.orchestrator.core.artifact.DesignSpec;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
@@ -210,7 +212,149 @@ class LlmStageAgentTest {
         assertThat(client.requests.getFirst().user()).contains("## Feedback to address")
                 .contains("Add tests for: Feature").contains("## The previous attempt failed")
                 .contains("overview must not be blank");
-        assertThat(client.requests.getFirst().system()).contains("contentKind FULL");
+        assertThat(client.requests.getFirst().system()).contains("contentKind FULL only for new files")
+                .contains("MODIFY with contentKind DIFF").contains("never repeat unchanged code")
+                .contains("never CREATE an existing file").contains("start with url-shortener/ or docs/")
+                .contains(PromptTemplates.OUTPUT_SIZE);
+    }
+
+    // ------------------------------------------------------------------ context policy
+
+    private static final String CHANGE_SET_MARKER = "UNIQUE_CHANGE_SET_BODY_MARKER";
+
+    /** The nine upstream payloads of release-readiness in topological order; the change set has a large body. */
+    private static ArtifactPayload[] pipelinePayloads() {
+        String body = "class Feature {\n" + ("    // " + CHANGE_SET_MARKER + " filler line of generated code\n")
+                .repeat(600) + "}\n";
+        return new ArtifactPayload[] {Payloads.requirementSpec(RiskLevel.LOW), Payloads.taskPlan(), Payloads.impact(),
+                Payloads.design(RiskLevel.MEDIUM), Payloads.changeSet("url-shortener/src/main/java/com/example/"
+                + "Feature.java", body), Payloads.testPlan(), Payloads.verification(true), Payloads.docs(),
+                Payloads.security()};
+    }
+
+    private static StageContext withDirectPredecessors(StageContext base, Set<String> direct) {
+        return new StageContext(base.runId(), base.stageId(), base.role(), base.requirement(),
+                base.originalRequirement(), base.clarificationAnswers(), base.clarificationQuestions(), base.upstream(),
+                base.feedback(), base.attempt(), base.planVersion(), base.previousError(), base.workspaceIndex(),
+                base.options(), base.approvals(), base.settings(), direct);
+    }
+
+    private String promptFor(AgentRole role, Object answer, StageContext context) throws Exception {
+        client.requests.clear();
+        client.answer = r -> answer;
+        LlmStageAgent.forRole(role, client, codec, 4000, Duration.ofSeconds(30)).execute(context);
+        return client.requests.getFirst().user();
+    }
+
+    private static String full(String stage, String kind) {
+        return "### " + stage + " (" + kind + " v1)\n```json\n";
+    }
+
+    private static String summary(String stage, String kind) {
+        return "### " + stage + " (" + kind + " v1, summary)\n";
+    }
+
+    @Test
+    void designPromptEmbedsItsDirectPredecessorsAndTheRequirementSpecInFull() throws Exception {
+        ArtifactPayload[] all = pipelinePayloads();
+        StageContext base = Contexts.of(AgentRole.ARCHITECTURE, "Add bulk creation", all[0], all[1], all[2]);
+        StageContext context = withDirectPredecessors(base, Set.of("decompose", "impact"));
+        assertThat(context.isDirectPredecessor("impact")).isTrue();
+        assertThat(context.isDirectPredecessor("intake")).isFalse();
+
+        String user = promptFor(AgentRole.ARCHITECTURE, Payloads.design(RiskLevel.MEDIUM), context);
+
+        assertThat(user).contains(PromptTemplates.FULL_ARTIFACTS_HEADING)
+                .contains(full("intake", "REQUIREMENT_SPEC")).contains("\"normalizedStatement\"")
+                .contains(full("decompose", "TASK_PLAN")).contains("\"criticalPath\"")
+                .contains(full("impact", "IMPACT_ANALYSIS")).contains("\"existingCodebase\"")
+                .doesNotContain(PromptTemplates.SUMMARIZED_ARTIFACTS_HEADING).doesNotContain(", summary)");
+    }
+
+    @Test
+    void releasePromptSummarizesIndirectArtifactsInsteadOfEmbeddingTheirJson() throws Exception {
+        ArtifactPayload[] all = pipelinePayloads();
+        StageContext base = Contexts.of(AgentRole.RELEASE, "Add bulk creation", all);
+        assertThat(base.upstream().keySet()).containsExactly("intake", "decompose", "impact", "design", "implement",
+                "test-design", "verify", "document", "security-scan");
+        StageContext context = withDirectPredecessors(base, Set.of("verify", "document", "security-scan"));
+
+        String user = promptFor(AgentRole.RELEASE, Payloads.release(ReleaseReadiness.GoNoGo.GO), context);
+
+        assertThat(user).contains(full("verify", "VERIFICATION_REPORT")).contains("\"structuralChecks\"")
+                .contains(full("document", "DOCUMENTATION_BUNDLE")).contains("\"operationsRunbook\"")
+                .contains(full("security-scan", "SECURITY_REVIEW")).contains("\"threats\"")
+                .contains(full("intake", "REQUIREMENT_SPEC")).contains("\"acceptanceCriteria\"");
+        assertThat(user).contains(PromptTemplates.SUMMARIZED_ARTIFACTS_HEADING)
+                .contains(summary("decompose", "TASK_PLAN")).contains(summary("impact", "IMPACT_ANALYSIS"))
+                .contains(summary("design", "DESIGN_SPEC")).contains(summary("implement", "CHANGE_SET"))
+                .contains(summary("test-design", "TEST_PLAN"));
+        for (String indirect : List.of("decompose (TASK_PLAN", "impact (IMPACT_ANALYSIS", "design (DESIGN_SPEC",
+                "implement (CHANGE_SET", "test-design (TEST_PLAN")) {
+            assertThat(user).as(indirect).doesNotContain("### " + indirect + " v1)\n```json");
+        }
+        // the change set appears as a file list without its content and without its JSON
+        assertThat(user).contains("url-shortener/src/main/java/com/example/Feature.java")
+                .doesNotContain(CHANGE_SET_MARKER).doesNotContain("\"contentKind\"").doesNotContain("\"criticalPath\"")
+                .doesNotContain("\"alternativesConsidered\"");
+        assertThat(user.indexOf(PromptTemplates.SUMMARIZED_ARTIFACTS_HEADING))
+                .isGreaterThan(user.indexOf(PromptTemplates.FULL_ARTIFACTS_HEADING));
+
+        // materially smaller than embedding every transitive artifact in full (the previous behaviour)
+        String everything = promptFor(AgentRole.RELEASE, Payloads.release(ReleaseReadiness.GoNoGo.GO), base);
+        assertThat(everything).contains(CHANGE_SET_MARKER).contains(full("implement", "CHANGE_SET"))
+                .doesNotContain(PromptTemplates.SUMMARIZED_ARTIFACTS_HEADING);
+        assertThat(user.length()).isLessThan(everything.length() / 4);
+    }
+
+    @Test
+    void summariesAreBoundedForLargeIndirectArtifacts() throws Exception {
+        RequirementSpec spec = Payloads.requirementSpec(RiskLevel.LOW);
+        DesignSpec base = Payloads.design(RiskLevel.MEDIUM);
+        List<DesignSpec.Component> many = new ArrayList<>();
+        for (int i = 0; i < 200; i++) {
+            many.add(new DesignSpec.Component("Component" + i, "responsibility number " + i, "SERVICE", true));
+        }
+        DesignSpec large = new DesignSpec(base.overview(), many, base.apiChanges(), base.dataModelChanges(),
+                base.sequenceFlows(), base.nfrStrategies(), base.securityConsiderations(), base.dataHandling(),
+                base.alternativesConsidered(), base.risk(), base.decisions());
+        StageContext context = withDirectPredecessors(Contexts.of(AgentRole.TEST_DESIGN, "x", spec, large,
+                Payloads.changeSet("url-shortener/src/main/java/A.java", "class A {}")), Set.of("implement"));
+        String user = promptFor(AgentRole.TEST_DESIGN, Payloads.testPlan(), context);
+        int start = user.indexOf(summary("design", "DESIGN_SPEC"));
+        assertThat(start).isPositive();
+        String designSection = user.substring(start, user.indexOf("\n```\n", start));
+        assertThat(designSection).contains("Component0").doesNotContain("Component199").endsWith("[truncated]");
+        assertThat(designSection.length()).isLessThan(PromptTemplates.SUMMARY_CHARS + 200);
+        assertThat(PromptTemplates.system(AgentRole.TEST_DESIGN))
+                .contains("coverageMatrix values must be comma-separated test case ids only")
+                .contains("\"TC-1, TC-4\"").contains("no prose");
+    }
+
+    @Test
+    void aChangeSetTheSandboxRejectsIsInvalidOutputThatStillReportsTokens(
+            @org.junit.jupiter.api.io.TempDir java.nio.file.Path dir) {
+        java.nio.file.Path workspace = com.agenticsdlc.orchestrator.core.testsupport.SyntheticWorkspace
+                .create(dir.resolve("ws"));
+        String existing = "url-shortener/src/main/java/com/agenticsdlc/shortener/api/LinkController.java";
+        client.answer = r -> new ChangeSet("HEAD", List.of(new ChangeSet.FileChange(existing,
+                ChangeSet.Operation.CREATE, "java", "rewrite", ChangeSet.ContentKind.FULL, "class LinkController {}",
+                List.of())), "./mvnw verify", List.of(), "revert", List.of());
+        StageContext base = Contexts.of(AgentRole.IMPLEMENTATION, "x");
+        StageContext context = new StageContext(base.runId(), base.stageId(), base.role(), base.requirement(),
+                base.originalRequirement(), java.util.Map.of(), List.of(), base.upstream(), List.of(), 1, 1, null,
+                null, com.agenticsdlc.orchestrator.core.model.RunOptions.defaults()
+                .withWorkspace(com.agenticsdlc.orchestrator.core.model.WorkspaceMode.REPO), List.of(),
+                new com.agenticsdlc.orchestrator.core.agent.AgentSettings(0.5, true, false, workspace,
+                        dir.resolve("sandboxes"), Duration.ofMinutes(1)));
+        assertThatThrownBy(() -> LlmStageAgent.forRole(AgentRole.IMPLEMENTATION, client, codec, 4000,
+                Duration.ofSeconds(30)).execute(context)).isInstanceOfSatisfying(StageFailure.class, f -> {
+                    assertThat(f.kind()).isEqualTo(FailureKind.INVALID_OUTPUT);
+                    assertThat(f.getMessage()).contains("CREATE of existing file " + existing);
+                    assertThat(f.trace()).isNotNull();
+                    assertThat(f.trace().inputTokens()).isEqualTo(1200);
+                    assertThat(f.trace().outputTokens()).isEqualTo(340);
+                });
     }
 
     @Test

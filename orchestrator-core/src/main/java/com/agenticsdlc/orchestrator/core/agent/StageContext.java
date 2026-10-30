@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 import org.jspecify.annotations.Nullable;
 
@@ -35,6 +36,9 @@ import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
  * @param options run options
  * @param approvals approvals granted in the current plan version (read-only evidence)
  * @param settings engine settings for agents
+ * @param directPredecessors ids of the stage's direct predecessors in the workflow graph (its {@code dependsOn});
+ *                           LLM prompts embed the full JSON only of these artifacts (and of the requirement
+ *                           specification) and a compact summary of the other upstream artifacts
  */
 public record StageContext(
         String runId,
@@ -52,7 +56,8 @@ public record StageContext(
         @Nullable CodebaseIndex workspaceIndex,
         RunOptions options,
         List<Approval> approvals,
-        AgentSettings settings) {
+        AgentSettings settings,
+        Set<String> directPredecessors) {
 
     /**
      * Copies collections.
@@ -70,6 +75,49 @@ public record StageContext(
         upstream = Immutables.map(upstream);
         feedback = Immutables.list(feedback);
         approvals = Immutables.list(approvals);
+        directPredecessors = Immutables.sortedSet(directPredecessors);
+    }
+
+    /**
+     * Creates a context without explicit graph information: every upstream artifact is treated as a direct
+     * predecessor (prompts then embed all upstream artifacts in full, the behaviour before direct predecessors
+     * were known).
+     *
+     * @param runId run id
+     * @param stageId stage id
+     * @param role agent role
+     * @param requirement active requirement
+     * @param originalRequirement original requirement
+     * @param clarificationAnswers answers by question id
+     * @param clarificationQuestions the questions that were answered
+     * @param upstream accepted artifacts of all transitive predecessors, by stage id
+     * @param feedback feedback for this stage
+     * @param attempt attempt number (1-based)
+     * @param planVersion plan version
+     * @param previousError error of the previous attempt, or null
+     * @param workspaceIndex codebase index, or null
+     * @param options run options
+     * @param approvals approvals granted in the current plan version
+     * @param settings engine settings for agents
+     */
+    public StageContext(String runId, String stageId, AgentRole role, String requirement, String originalRequirement,
+                        Map<String, String> clarificationAnswers, List<ClarificationQuestion> clarificationQuestions,
+                        Map<String, Artifact> upstream, List<String> feedback, int attempt, int planVersion,
+                        @Nullable String previousError, @Nullable CodebaseIndex workspaceIndex, RunOptions options,
+                        List<Approval> approvals, AgentSettings settings) {
+        this(runId, stageId, role, requirement, originalRequirement, clarificationAnswers, clarificationQuestions,
+                upstream, feedback, attempt, planVersion, previousError, workspaceIndex, options, approvals, settings,
+                upstream == null ? Set.of() : upstream.keySet());
+    }
+
+    /**
+     * Returns whether an upstream stage is a direct predecessor of this stage.
+     *
+     * @param upstreamStageId upstream stage id
+     * @return true for direct predecessors
+     */
+    public boolean isDirectPredecessor(String upstreamStageId) {
+        return directPredecessors.contains(upstreamStageId);
     }
 
     /**

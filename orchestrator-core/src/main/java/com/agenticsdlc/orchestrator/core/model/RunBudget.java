@@ -6,17 +6,28 @@ import java.util.Objects;
 /**
  * Run-level budgets bounding autonomy. Per-stage attempts come from the stage's retry policy.
  *
+ * <p>The default token budget (600 000) is sized for a complete LLM run of the ten-stage default workflow with an
+ * Opus-class model: every stage prompt carries the requirement specification and the full JSON of its direct
+ * predecessors' artifacts (summaries of the rest), the late stages see a full change set, and retries plus a
+ * verification feedback loop re-send that context. A live brownfield run measured roughly 4k to 40k input tokens
+ * per stage (12k output for the design) and exhausted the former 200 000 default after nine calls. The budget
+ * remains a safety stop, not a cost target: a run that exceeds it safe-stops with {@code BUDGET_EXCEEDED} and a
+ * human resume grants one more default allowance.</p>
+ *
  * @param maxFeedbackLoops maximum verification feedback loops and rework rejections (default 2)
  * @param maxReplans maximum re-plans (default 3)
  * @param maxAgentCalls maximum agent attempts across all stages (default 40)
- * @param maxLlmTokens maximum LLM input plus output tokens (default 200 000)
+ * @param maxLlmTokens maximum LLM input plus output tokens (default 600 000)
  * @param maxActiveDuration maximum active (non-human-wait) duration (default 2 hours)
  */
 public record RunBudget(int maxFeedbackLoops, int maxReplans, int maxAgentCalls, long maxLlmTokens,
                         Duration maxActiveDuration) {
 
+    /** Default token budget: ten stages with full direct-predecessor artifacts in context, retries included. */
+    public static final long DEFAULT_MAX_LLM_TOKENS = 600_000L;
+
     /** Default budget. */
-    public static final RunBudget DEFAULT = new RunBudget(2, 3, 40, 200_000L, Duration.ofHours(2));
+    public static final RunBudget DEFAULT = new RunBudget(2, 3, 40, DEFAULT_MAX_LLM_TOKENS, Duration.ofHours(2));
 
     /**
      * Validates the budget.

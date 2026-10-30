@@ -157,6 +157,26 @@ public final class Markdown {
     }
 
     /**
+     * Truncates text to about {@code maxChars} characters, preferably at a line boundary, and appends a
+     * {@code [truncated]} marker when anything was cut.
+     *
+     * @param text the text
+     * @param maxChars maximum characters kept (at least 1)
+     * @return the text, or its truncated prefix followed by {@code [truncated]}
+     */
+    public static String truncate(String text, int maxChars) {
+        int max = Math.max(1, maxChars);
+        if (text.length() <= max) {
+            return text;
+        }
+        int cut = text.lastIndexOf('\n', max);
+        if (cut < max / 2) {
+            cut = max;
+        }
+        return text.substring(0, cut).stripTrailing() + "\n[truncated]\n";
+    }
+
+    /**
      * Joins items with ", " or returns "-" when empty.
      *
      * @param items items

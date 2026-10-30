@@ -213,7 +213,10 @@ class OrchestrationEngineTest {
         assertThat(bothStarted.getCount()).isZero();
         assertThat(verifyStarted.get()).isGreaterThan(implementDone.get()).isGreaterThan(testDesignDone.get());
         StageContext verifyContext = verify.contexts().getFirst();
-        assertThat(verifyContext.upstream()).containsKeys(IMPLEMENT, TEST_DESIGN);
+        assertThat(verifyContext.upstream()).containsKeys(IMPLEMENT, TEST_DESIGN, DESIGN, INTAKE);
+        assertThat(verifyContext.directPredecessors()).as("graph dependsOn of verify")
+                .containsExactlyInAnyOrder(IMPLEMENT, TEST_DESIGN);
+        assertThat(verifyContext.isDirectPredecessor(DESIGN)).isFalse();
         assertThat(run.stage("document").status()).isEqualTo(StageStatus.SUCCEEDED);
         assertThat(run.stage("security-scan").status()).isEqualTo(StageStatus.SUCCEEDED);
         assertThat(run.acceptedArtifact(VERIFY).orElseThrow().provenance().derivedFrom())

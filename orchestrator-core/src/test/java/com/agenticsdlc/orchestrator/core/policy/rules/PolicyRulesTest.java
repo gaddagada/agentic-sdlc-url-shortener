@@ -227,11 +227,43 @@ class PolicyRulesTest {
                     });
         }
 
+        @ParameterizedTest
+        @ValueSource(strings = {"mvnw", "mvnw.cmd", ".mvn/wrapper/maven-wrapper.properties",
+                "orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/OrchestrationEngine.java",
+                "orchestrator-app/src/main/resources/application.yml", "orchestrator-app/pom.xml", "Dockerfile",
+                "url-shortener/Dockerfile.native", "docker-compose.yml", "docker-compose.override.yml",
+                "deploy/docker-compose-prod.yaml"})
+        void protectsTheBuildWrapperContainersAndTheControlPlane(String path) {
+            assertThat(ProtectedPathRule.isProtected(path)).as(path).isTrue();
+            assertThat(rule.evaluate(exit(AutonomyLevel.FULL_AUTO, AgentRole.IMPLEMENTATION,
+                    changeSet(List.of("url-shortener/src/main/java/A.java", path), "x")))).get().satisfies(f -> {
+                        assertThat(f.verdict()).isEqualTo(Verdict.REQUIRE_APPROVAL);
+                        assertThat(f.severity()).isEqualTo(Severity.HIGH);
+                        assertThat(f.message()).contains(path);
+                    });
+        }
+
+        @ParameterizedTest
+        @ValueSource(strings = {"./pom.xml", "POM.XML", "url-shortener/Pom.Xml", "url-shortener//pom.xml",
+                "./url-shortener/./pom.xml", "url-shortener\\pom.xml", "/pom.xml", "url-shortener/../pom.xml",
+                ".GITHUB/workflows/ci.yml", "Orchestrator-Core/src/main/java/X.java", "./MVNW",
+                "url-shortener/src/main/java/com/x/Security/AuthConfig.java",
+                "url-shortener/src/main/resources/APPLICATION-PROD.YML"})
+        void matchesNormalizedPathsCaseInsensitively(String path) {
+            assertThat(ProtectedPathRule.isProtected(path)).as(path).isTrue();
+            assertThat(rule.evaluate(exit(AutonomyLevel.FULL_AUTO, AgentRole.IMPLEMENTATION,
+                    changeSet(List.of(path), "x")))).get().satisfies(f -> assertThat(f.message()).contains(path));
+        }
+
         @Test
         void ignoresOrdinaryPaths() {
             assertThat(rule.evaluate(exit(AutonomyLevel.FULL_AUTO, AgentRole.IMPLEMENTATION, changeSet(
                     List.of("url-shortener/src/main/java/securityish/A.java",
-                            "url-shortener/src/main/resources/application.yml", "docs/pom.xml.md"), "x")))).isEmpty();
+                            "url-shortener/src/main/resources/application.yml", "docs/pom.xml.md",
+                            "docs/orchestrator-core.md", "url-shortener/src/main/java/com/x/MvnwHelper.java",
+                            "docs/docker.md"), "x")))).isEmpty();
+            assertThat(Globs.normalize("./a//b/./c/../d")).isEqualTo("a/b/d");
+            assertThat(Globs.normalize("a\\b")).isEqualTo("a/b");
         }
     }
 

@@ -32,15 +32,22 @@ import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec.AcceptanceCriterion;
 import com.agenticsdlc.orchestrator.core.artifact.TaskPlan;
+import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
 
 /**
  * Deterministic implementation agent ({@code implement}): one SKELETON file per changed or new component
  * (package, class, constructor injection, endpoint and method stubs with {@code // TODO implement} markers),
  * a Flyway migration with real DDL per data model change, and one test skeleton per production file with test
- * methods named after the acceptance criteria. Plain request DTOs carry a documented test justification
- * instead of a dedicated test. Feedback from verification is reflected as {@code // Addressed feedback}
- * comments; requested missing tests are added. When sandboxes are enabled for REPO runs, the change set is
- * materialized into a sandbox and a {@code DELETE_SANDBOX} compensation is registered.
+ * methods named after the acceptance criteria; every skeleton test fails with
+ * {@code Assertions.fail("TODO: implement ...")} until it is implemented, so it can never pass vacuously. Plain
+ * request DTOs carry a documented test justification instead of a dedicated test. Feedback from verification is
+ * reflected as {@code // Addressed feedback} comments; requested missing tests are added.
+ *
+ * <p>When a codebase index is available (REPO runs), a planned file that already exists is emitted as MODIFY
+ * (never CREATE) with a skeleton of what to add (an existing test class gets only the additional test methods);
+ * a planned Java or migration file that does not exist is emitted as CREATE. The change set's risks state that it
+ * is a skeleton implementation that is not compilable/complete. When sandboxes are enabled for REPO runs, the
+ * change set is materialized into a sandbox and a {@code DELETE_SANDBOX} compensation is registered.</p>
  */
 public final class ImplementationAgent implements StageAgent {
 
@@ -48,8 +55,11 @@ public final class ImplementationAgent implements StageAgent {
     public static final String BASE_PATH = "url-shortener/src/main/java/com/agenticsdlc/shortener/";
     /** Migration directory. */
     public static final String MIGRATION_PATH = "url-shortener/src/main/resources/db/migration/";
-    /** Build command of the change sets. */
+    /** Build command proposed in the change sets (informational; sandbox builds use the engine's command). */
     public static final String BUILD_COMMAND = "./mvnw -pl url-shortener verify";
+    /** Risk stated by every skeleton change set. */
+    public static final String SKELETON_RISK = "skeleton implementation; not compilable/complete: method bodies "
+            + "marked TODO and the failing test stubs must be completed, built and reviewed before merge";
     private static final Pattern MISSING_TESTS = Pattern.compile("Add tests for: (.+)");
     private static final Pattern CREATE_TABLE = Pattern.compile("create table (\\w+) \\(([^)]*)\\)");
     private static final Pattern ADD_COLUMN = Pattern.compile("add column (\\w+) to (\\w+)");
@@ -77,7 +87,7 @@ public final class ImplementationAgent implements StageAgent {
         RequirementSpec spec = context.require(RequirementSpec.class);
         ImpactAnalysis impact = context.find(ImpactAnalysis.class).orElse(null);
         TaskPlan plan = context.find(TaskPlan.class).orElse(null);
-        ChangeSet changeSet = implement(design, spec, impact, plan, context.feedback());
+        ChangeSet changeSet = implement(design, spec, impact, plan, context.feedback(), context.workspaceIndex());
         List<CompensationRequest> compensations = new ArrayList<>();
         SandboxMaterializer.materialize(changeSet, context).ifPresent(compensations::add);
         return StageResult.success(changeSet, changeSet.changes().size() + " files (" + changeSet.totalContentLines()
@@ -87,7 +97,7 @@ public final class ImplementationAgent implements StageAgent {
     }
 
     /**
-     * Builds the change set.
+     * Builds the change set without a codebase index (operations follow the design's new/changed flags).
      *
      * @param design design
      * @param spec requirement specification
@@ -98,6 +108,22 @@ public final class ImplementationAgent implements StageAgent {
      */
     public ChangeSet implement(DesignSpec design, RequirementSpec spec, @Nullable ImpactAnalysis impact,
                                @Nullable TaskPlan plan, List<String> feedback) {
+        return implement(design, spec, impact, plan, feedback, null);
+    }
+
+    /**
+     * Builds the change set.
+     *
+     * @param design design
+     * @param spec requirement specification
+     * @param impact impact analysis or null
+     * @param plan task plan or null
+     * @param feedback feedback entries
+     * @param index codebase index of the workspace, or null (files it contains are modified, never created)
+     * @return the change set
+     */
+    public ChangeSet implement(DesignSpec design, RequirementSpec spec, @Nullable ImpactAnalysis impact,
+                               @Nullable TaskPlan plan, List<String> feedback, @Nullable CodebaseIndex index) {
         Map<String, String> knownPaths = new LinkedHashMap<>();
         if (impact != null) {
             impact.components().forEach(c -> knownPaths.put(c.name(), c.path()));
@@ -131,30 +157,39 @@ public final class ImplementationAgent implements StageAgent {
             String schema = design.apiChanges().stream().map(ApiChange::requestSchema)
                     .filter(s -> s.startsWith(component.name() + " ") || s.equals(component.name())).findFirst()
                     .orElse("");
+            Operation operation = operation(path, component.isNew() ? Operation.CREATE : Operation.MODIFY, index);
             String content = JavaSkeletons.production(path, component, endpoints, firstTask, notes, knownTypes,
-                    schema);
+                    schema, operation == Operation.MODIFY);
             String summary = component.responsibility() + (endpoints.isEmpty() ? ""
                     : ". Endpoints: " + String.join(", ", endpoints.stream().map(e -> e.method() + " " + e.path())
                     .toList()));
-            production.add(new FileChange(path, component.isNew() ? Operation.CREATE : Operation.MODIFY, "java",
-                    summary, ContentKind.SKELETON, content, implementTasks));
+            production.add(new FileChange(path, operation, "java", summary, ContentKind.SKELETON, content,
+                    implementTasks));
             boolean dto = "OTHER".equals(component.type()) && component.name().matches(".*(Request|Response)$");
             if (dto && !requestedTests.contains(component.name())) {
                 dtoWithoutTests.add(component.name());
                 continue;
             }
             String testPath = testPath(path, component.name());
-            tests.add(new FileChange(testPath, Operation.CREATE, "java", "Tests for " + component.name()
-                    + " derived from the acceptance criteria", ContentKind.SKELETON,
-                    JavaSkeletons.test(testPath, component.name(), criteriaFor(component, spec)), implementTasks));
+            List<AcceptanceCriterion> criteria = criteriaFor(component, spec);
+            if (operation(testPath, Operation.CREATE, index) == Operation.MODIFY) {
+                tests.add(new FileChange(testPath, Operation.MODIFY, "java", "Additional tests for "
+                        + component.name() + " derived from the acceptance criteria (existing test class)",
+                        ContentKind.SKELETON, JavaSkeletons.testAdditions(testPath, component.name(), criteria),
+                        implementTasks));
+            } else {
+                tests.add(new FileChange(testPath, Operation.CREATE, "java", "Tests for " + component.name()
+                        + " derived from the acceptance criteria", ContentKind.SKELETON,
+                        JavaSkeletons.test(testPath, component.name(), criteria), implementTasks));
+            }
         }
-        List<FileChange> migrations = migrations(design.dataModelChanges(), implementTasks);
+        List<FileChange> migrations = migrations(design.dataModelChanges(), implementTasks, index);
         List<FileChange> all = new ArrayList<>(production);
         all.addAll(migrations);
         all.addAll(tests);
 
         List<String> risks = new ArrayList<>();
-        risks.add("Skeleton code: method bodies marked TODO must be completed and reviewed before release");
+        risks.add(SKELETON_RISK);
         if (design.risk() != null) {
             design.risk().factors().forEach(f -> risks.add("Design risk: " + f));
         }
@@ -220,7 +255,30 @@ public final class ImplementationAgent implements StageAgent {
         return spec.acceptanceCriteria().stream().limit(2).toList();
     }
 
-    private static List<FileChange> migrations(List<DataModelChange> changes, List<String> traces) {
+    /**
+     * Chooses the operation of a planned file: MODIFY when the codebase index contains it (an existing file is
+     * never created again); CREATE when an index is available, the file is of an indexed kind (Java source or test,
+     * Flyway migration) and it is not indexed; otherwise the planned operation.
+     *
+     * @param path repository-relative path
+     * @param planned operation planned from the design
+     * @param index codebase index or null
+     * @return the operation
+     */
+    static Operation operation(String path, Operation planned, @Nullable CodebaseIndex index) {
+        if (index == null || index.isEmpty()) {
+            return planned;
+        }
+        if (index.containsPath(path)) {
+            return Operation.MODIFY;
+        }
+        boolean indexedKind = (path.endsWith(".java") && (path.contains("src/main/java/")
+                || path.contains("src/test/java/"))) || (path.contains("db/migration/") && path.endsWith(".sql"));
+        return indexedKind ? Operation.CREATE : planned;
+    }
+
+    private static List<FileChange> migrations(List<DataModelChange> changes, List<String> traces,
+                                               @Nullable CodebaseIndex codebase) {
         Map<String, List<String>> ddlByFile = new LinkedHashMap<>();
         int index = 1;
         for (DataModelChange change : changes) {
@@ -230,7 +288,8 @@ public final class ImplementationAgent implements StageAgent {
             ddlByFile.computeIfAbsent(file, k -> new ArrayList<>()).add(ddl(change));
         }
         List<FileChange> files = new ArrayList<>();
-        ddlByFile.forEach((file, statements) -> files.add(new FileChange(MIGRATION_PATH + file, Operation.CREATE, "sql",
+        ddlByFile.forEach((file, statements) -> files.add(new FileChange(MIGRATION_PATH + file,
+                operation(MIGRATION_PATH + file, Operation.CREATE, codebase), "sql",
                 "Flyway migration: " + String.join("; ", changes.stream()
                         .filter(c -> file.equals(c.migration()) || c.migration().isBlank())
                         .map(DataModelChange::change).toList()),

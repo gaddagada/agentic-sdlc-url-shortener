@@ -1,9 +1,14 @@
 package com.agenticsdlc.orchestrator.core.artifact;
 
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import com.agenticsdlc.orchestrator.core.util.Immutables;
 
@@ -13,21 +18,51 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  * @param strategy overall strategy
  * @param levels test levels used
  * @param cases test cases ({@code TC-n})
- * @param coverageMatrix requirement id to comma-separated test case ids
+ * @param coverageMatrix requirement id to comma-separated test case ids; values are normalized to the
+ *                       canonical {@code "TC-1, TC-4"} form (ids extracted with {@code TC-\d+}, prose dropped)
  * @param risksNotCovered requirements or risks without automated coverage
  */
 public record TestPlan(String strategy, List<TestLevel> levels, List<TestCase> cases, Map<String, String> coverageMatrix,
                        List<String> risksNotCovered) implements ArtifactPayload {
 
+    private static final Pattern CASE_ID = Pattern.compile("TC-\\d+");
+
     /**
-     * Normalizes collections and text.
+     * Normalizes collections and text. Coverage matrix values are reduced to their test case ids so that prose a
+     * model writes around the ids ({@code "TC-20 (automated checks); manual review in T14"}) is tolerated and the
+     * stored value (and therefore the artifact hash) is canonical.
      */
     public TestPlan {
         strategy = Immutables.text(strategy);
         levels = Immutables.list(levels);
         cases = Immutables.list(cases);
-        coverageMatrix = Immutables.map(coverageMatrix);
+        coverageMatrix = normalizeCoverage(coverageMatrix);
         risksNotCovered = Immutables.list(risksNotCovered);
+    }
+
+    /**
+     * Extracts the test case ids ({@code TC-n}) referenced by a coverage matrix value, ignoring any surrounding
+     * prose, in order of first appearance and without duplicates.
+     *
+     * @param value coverage matrix value
+     * @return the referenced test case ids
+     */
+    public static List<String> caseIds(String value) {
+        Set<String> ids = new LinkedHashSet<>();
+        Matcher m = CASE_ID.matcher(Immutables.text(value));
+        while (m.find()) {
+            ids.add(m.group());
+        }
+        return List.copyOf(ids);
+    }
+
+    private static Map<String, String> normalizeCoverage(Map<String, String> matrix) {
+        if (matrix == null || matrix.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> normalized = new LinkedHashMap<>();
+        matrix.forEach((requirement, value) -> normalized.put(requirement, String.join(", ", caseIds(value))));
+        return Collections.unmodifiableMap(normalized);
     }
 
     /** Test level. */
@@ -124,14 +159,22 @@ public record TestPlan(String strategy, List<TestLevel> levels, List<TestCase> c
             p.requireNonNull(c.type(), "test case " + c.id() + " type");
             ids.add(c.id());
         }
-        coverageMatrix.forEach((requirement, caseIds) -> {
-            for (String caseId : caseIds.split(",")) {
-                String trimmed = caseId.strip();
-                p.require(trimmed.isEmpty() || ids.contains(trimmed),
-                        "coverageMatrix entry " + requirement + " references unknown test case " + trimmed);
+        coverageMatrix.forEach((requirement, value) -> {
+            List<String> referenced = caseIds(value);
+            p.require(!referenced.isEmpty() || listedAsNotCovered(requirement), "coverageMatrix entry " + requirement
+                    + " references no test case (values must be test case ids such as \"TC-1, TC-4\"; list "
+                    + "requirements without a case in risksNotCovered)");
+            for (String caseId : referenced) {
+                p.require(ids.contains(caseId),
+                        "coverageMatrix entry " + requirement + " references unknown test case " + caseId);
             }
         });
         p.throwIfAny();
+    }
+
+    private boolean listedAsNotCovered(String requirement) {
+        Pattern id = Pattern.compile("(?<![\\w-])" + Pattern.quote(requirement) + "(?![\\w-])");
+        return risksNotCovered.stream().anyMatch(r -> id.matcher(r).find());
     }
 
     @Override

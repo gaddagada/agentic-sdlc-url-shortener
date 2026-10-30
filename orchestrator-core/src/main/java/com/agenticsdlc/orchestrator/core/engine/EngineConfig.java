@@ -12,6 +12,7 @@ import java.util.function.Supplier;
 
 import org.jspecify.annotations.Nullable;
 
+import com.agenticsdlc.orchestrator.core.agent.AgentRegistry;
 import com.agenticsdlc.orchestrator.core.agent.AgentSettings;
 import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
 
@@ -33,6 +34,13 @@ import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
  * @param stageExecutor executor for stage attempts, or null for an engine-owned virtual-thread executor;
  *                      it must allow nested task submission (an attempt waits on a nested task)
  * @param retryScheduler scheduler for retry wake-ups, or null for an engine-owned single-thread scheduler
+ * @param buildCommand the fixed command of sandbox builds (default {@value AgentSettings#DEFAULT_BUILD_COMMAND});
+ *                     the {@code buildCommand} an agent writes into a change set is informational only, so an
+ *                     agent can never choose what runs in the sandbox
+ * @param llmTimeoutScale factor applied to a stage's timeout when the active agent is an LLM provider agent (not
+ *                        the deterministic agent or the deterministic fallback), so that long streamed outputs
+ *                        (for example 32k tokens) are cut off by the provider limits rather than by the stage
+ *                        timeout (default {@value #DEFAULT_LLM_TIMEOUT_SCALE}; at least 1.0)
  */
 public record EngineConfig(
         double ambiguityThreshold,
@@ -48,7 +56,12 @@ public record EngineConfig(
         List<CompensationHandler> compensationHandlers,
         @Nullable EngineListener listener,
         @Nullable ExecutorService stageExecutor,
-        @Nullable ScheduledExecutorService retryScheduler) {
+        @Nullable ScheduledExecutorService retryScheduler,
+        String buildCommand,
+        double llmTimeoutScale) {
+
+    /** Default {@link #llmTimeoutScale()}. */
+    public static final double DEFAULT_LLM_TIMEOUT_SCALE = 3.0;
 
     /**
      * Validates the configuration.
@@ -59,6 +72,7 @@ public record EngineConfig(
         Objects.requireNonNull(buildTimeout, "buildTimeout");
         Objects.requireNonNull(clock, "clock");
         Objects.requireNonNull(workspaceIndex, "workspaceIndex");
+        Objects.requireNonNull(buildCommand, "buildCommand");
         compensationHandlers = List.copyOf(compensationHandlers);
         if (ambiguityThreshold < 0.0 || ambiguityThreshold > 1.0) {
             throw new IllegalArgumentException("ambiguityThreshold must be within 0..1");
@@ -66,6 +80,59 @@ public record EngineConfig(
         if (backoffScale < 0.0) {
             throw new IllegalArgumentException("backoffScale must not be negative");
         }
+        if (buildCommand.isBlank()) {
+            throw new IllegalArgumentException("buildCommand must not be blank");
+        }
+        if (!(llmTimeoutScale >= 1.0) || Double.isInfinite(llmTimeoutScale)) {
+            throw new IllegalArgumentException("llmTimeoutScale must be a finite value of at least 1.0");
+        }
+    }
+
+    /**
+     * Creates a configuration with the default build command ({@value AgentSettings#DEFAULT_BUILD_COMMAND}) and
+     * the default LLM timeout scale ({@value #DEFAULT_LLM_TIMEOUT_SCALE}).
+     *
+     * @param ambiguityThreshold ambiguity threshold
+     * @param backoffScale backoff scale
+     * @param maxBackoff backoff cap
+     * @param sandboxEnabled whether sandboxes are enabled
+     * @param verifyBuildEnabled whether sandbox builds are enabled
+     * @param sandboxRoot sandbox root
+     * @param workspaceRoot workspace root, or null
+     * @param buildTimeout build timeout
+     * @param clock clock
+     * @param workspaceIndex codebase index supplier
+     * @param compensationHandlers compensation handlers
+     * @param listener listener, or null
+     * @param stageExecutor stage executor, or null
+     * @param retryScheduler retry scheduler, or null
+     */
+    public EngineConfig(double ambiguityThreshold, double backoffScale, Duration maxBackoff, boolean sandboxEnabled,
+                        boolean verifyBuildEnabled, Path sandboxRoot, @Nullable Path workspaceRoot,
+                        Duration buildTimeout, Clock clock, Supplier<@Nullable CodebaseIndex> workspaceIndex,
+                        List<CompensationHandler> compensationHandlers, @Nullable EngineListener listener,
+                        @Nullable ExecutorService stageExecutor, @Nullable ScheduledExecutorService retryScheduler) {
+        this(ambiguityThreshold, backoffScale, maxBackoff, sandboxEnabled, verifyBuildEnabled, sandboxRoot,
+                workspaceRoot, buildTimeout, clock, workspaceIndex, compensationHandlers, listener, stageExecutor,
+                retryScheduler, AgentSettings.DEFAULT_BUILD_COMMAND, DEFAULT_LLM_TIMEOUT_SCALE);
+    }
+
+    /**
+     * Returns the timeout of one attempt: the stage timeout, multiplied by {@link #llmTimeoutScale()} when the
+     * attempt runs an LLM provider agent (any agent id other than {@code deterministic} and
+     * {@code fallback:deterministic}).
+     *
+     * @param stageTimeout the stage's configured timeout
+     * @param agentId id of the agent running the attempt
+     * @return the effective attempt timeout
+     */
+    public Duration attemptTimeout(Duration stageTimeout, String agentId) {
+        if (AgentRegistry.DETERMINISTIC.equals(agentId) || AgentRegistry.FALLBACK_AGENT_ID.equals(agentId)
+                || llmTimeoutScale == 1.0) {
+            return stageTimeout;
+        }
+        double scaled = stageTimeout.toNanos() * llmTimeoutScale;
+        return Duration.ofNanos(scaled >= Long.MAX_VALUE ? Long.MAX_VALUE : Math.round(scaled));
     }
 
     /**
@@ -107,6 +174,8 @@ public record EngineConfig(
         b.listener = listener;
         b.stageExecutor = stageExecutor;
         b.retryScheduler = retryScheduler;
+        b.buildCommand = buildCommand;
+        b.llmTimeoutScale = llmTimeoutScale;
         return b;
     }
 
@@ -117,7 +186,7 @@ public record EngineConfig(
      */
     public AgentSettings agentSettings() {
         return new AgentSettings(ambiguityThreshold, sandboxEnabled, verifyBuildEnabled, workspaceRoot, sandboxRoot,
-                buildTimeout);
+                buildTimeout, buildCommand);
     }
 
     /**
@@ -138,6 +207,8 @@ public record EngineConfig(
         private @Nullable EngineListener listener;
         private @Nullable ExecutorService stageExecutor;
         private @Nullable ScheduledExecutorService retryScheduler;
+        private String buildCommand = AgentSettings.DEFAULT_BUILD_COMMAND;
+        private double llmTimeoutScale = DEFAULT_LLM_TIMEOUT_SCALE;
 
         private Builder() {
         }
@@ -231,6 +302,28 @@ public record EngineConfig(
         }
 
         /**
+         * Sets the fixed sandbox build command (agent-supplied build commands are never executed).
+         *
+         * @param value Maven command, for example {@code ./mvnw -B -ntp -q verify}
+         * @return this builder
+         */
+        public Builder buildCommand(String value) {
+            this.buildCommand = value;
+            return this;
+        }
+
+        /**
+         * Sets the factor applied to stage timeouts for LLM provider agents.
+         *
+         * @param value factor of at least 1.0 (1.0 disables scaling)
+         * @return this builder
+         */
+        public Builder llmTimeoutScale(double value) {
+            this.llmTimeoutScale = value;
+            return this;
+        }
+
+        /**
          * Sets the clock.
          *
          * @param value clock
@@ -304,7 +397,7 @@ public record EngineConfig(
         public EngineConfig build() {
             return new EngineConfig(ambiguityThreshold, backoffScale, maxBackoff, sandboxEnabled, verifyBuildEnabled,
                     sandboxRoot, workspaceRoot, buildTimeout, clock, workspaceIndex, compensationHandlers, listener,
-                    stageExecutor, retryScheduler);
+                    stageExecutor, retryScheduler, buildCommand, llmTimeoutScale);
         }
     }
 }

@@ -83,7 +83,13 @@ class DeterministicPipelineTest {
         engine.approve(id, "release-readiness", ALICE, "ship it");
         Run done = harness.awaitStatus(id, RunStatus.COMPLETED);
         ReleaseReadiness release = done.acceptedPayload(ReleaseReadiness.class).orElseThrow();
-        assertThat(release.decision()).isIn(ReleaseReadiness.GoNoGo.GO, ReleaseReadiness.GoNoGo.GO_WITH_CONDITIONS);
+        assertThat(release.decision()).as("a skeleton change plan is never an unconditional GO")
+                .isEqualTo(ReleaseReadiness.GoNoGo.GO_WITH_CONDITIONS);
+        assertThat(release.conditions()).contains("implementation is a skeleton change plan; complete and build "
+                + "before merge");
+        assertThat(release.checklist()).noneMatch(i -> i.status() == ReleaseReadiness.ChecklistStatus.FAIL
+                || i.status() == ReleaseReadiness.ChecklistStatus.WAIVED);
+        assertThat(done.acceptedPayload(VerificationReport.class).orElseThrow().skeletonOnly()).isTrue();
         assertThat(release.changeRecord().approvals()).hasSize(2);
         assertThat(done.acceptedArtifacts()).hasSize(10)
                 .allSatisfy(a -> assertThat(a.markdown()).isNotBlank());
@@ -134,8 +140,20 @@ class DeterministicPipelineTest {
             assertThat(c.operation()).isEqualTo(ChangeSet.Operation.MODIFY);
             assertThat(c.content()).contains("@PostMapping(\"/api/v1/links/bulk\")");
         });
+        assertThat(changeSet.changes()).filteredOn(c -> c.operation() == ChangeSet.Operation.CREATE)
+                .as("existing files are modified, never created").noneMatch(c -> index.containsPath(c.path()));
+        assertThat(changeSet.changes()).anySatisfy(c -> {
+            assertThat(c.path()).endsWith("api/LinkControllerTest.java");
+            assertThat(c.operation()).isEqualTo(ChangeSet.Operation.MODIFY);
+        });
+        VerificationReport verification = atRelease.acceptedPayload(VerificationReport.class).orElseThrow();
+        assertThat(verification.structuralChecks()).extracting(c -> c.name())
+                .contains("no-create-over-existing-file", "tests-are-not-vacuous", "api-changes-planned");
+        assertThat(atRelease.acceptedPayload(ReleaseReadiness.class)).as("accepted only after approval").isEmpty();
         engine.approve(id, "release-readiness", ALICE, null);
-        harness.awaitStatus(id, RunStatus.COMPLETED);
+        Run done = harness.awaitStatus(id, RunStatus.COMPLETED);
+        assertThat(done.acceptedPayload(ReleaseReadiness.class).orElseThrow().decision())
+                .isEqualTo(ReleaseReadiness.GoNoGo.GO_WITH_CONDITIONS);
     }
 
     @Test

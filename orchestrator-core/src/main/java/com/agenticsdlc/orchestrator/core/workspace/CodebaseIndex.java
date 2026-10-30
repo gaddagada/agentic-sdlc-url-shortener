@@ -4,6 +4,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -14,6 +15,7 @@ import java.util.TreeMap;
 import org.jspecify.annotations.Nullable;
 
 import com.agenticsdlc.orchestrator.core.util.Immutables;
+import com.agenticsdlc.orchestrator.core.util.RepoPaths;
 
 /**
  * Immutable index of a workspace's Java types, migrations and configuration files, produced by
@@ -28,6 +30,7 @@ public final class CodebaseIndex {
     private final List<String> migrations;
     private final List<String> configFiles;
     private final Map<String, Set<String>> contentTokens;
+    private final Set<String> paths;
 
     /**
      * Creates an index.
@@ -51,6 +54,21 @@ public final class CodebaseIndex {
         Map<String, Set<String>> tokens = new LinkedHashMap<>();
         contentTokens.forEach((k, v) -> tokens.put(k, Immutables.sortedSet(v)));
         this.contentTokens = Collections.unmodifiableMap(tokens);
+        Set<String> all = new HashSet<>(this.migrations);
+        all.addAll(this.configFiles);
+        this.types.forEach(t -> all.add(t.path()));
+        this.paths = Set.copyOf(all);
+    }
+
+    /**
+     * Returns whether a workspace-relative file exists in the index (a Java type, including tests, a migration or
+     * a configuration file). The path is normalized first ({@code ./a//b} matches {@code a/b}).
+     *
+     * @param relativePath workspace-relative path with forward slashes
+     * @return true when the file is indexed
+     */
+    public boolean containsPath(String relativePath) {
+        return paths.contains(RepoPaths.normalize(relativePath));
     }
 
     /**

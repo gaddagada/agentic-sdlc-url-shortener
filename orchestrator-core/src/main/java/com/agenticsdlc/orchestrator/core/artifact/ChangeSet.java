@@ -9,7 +9,8 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  *
  * @param baseRevision the revision the change applies to
  * @param changes file changes
- * @param buildCommand command that builds and tests the change
+ * @param buildCommand command the agent proposes to build and test the change; informational only: sandbox
+ *                     builds always run the engine-configured command ({@code EngineConfig.buildCommand})
  * @param risks implementation risks and documented justifications
  * @param rollbackPlan how to roll the change back
  * @param traces task ids implemented
@@ -129,6 +130,27 @@ public record ChangeSet(String baseRevision, List<FileChange> changes, String bu
 
     @Override
     public String markdown() {
+        Markdown md = overview();
+        for (FileChange c : changes) {
+            if (!c.content().isBlank()) {
+                md.heading(4, c.path()).code(c.language(), c.content());
+            }
+        }
+        return md.render();
+    }
+
+    /**
+     * Summarizes the change set without file contents (operations, paths, summaries, risks, rollback plan).
+     *
+     * @param maxChars approximate maximum length
+     * @return the summary
+     */
+    @Override
+    public String contextSummary(int maxChars) {
+        return Markdown.truncate(overview().render(), maxChars);
+    }
+
+    private Markdown overview() {
         Markdown md = new Markdown().heading(2, "Change set")
                 .field("Base revision", baseRevision)
                 .field("Build command", "`" + buildCommand + "`")
@@ -139,11 +161,6 @@ public record ChangeSet(String baseRevision, List<FileChange> changes, String bu
         md.heading(3, "Risks").bullets(risks);
         md.heading(3, "Rollback plan").paragraph(rollbackPlan);
         md.field("Traces", Markdown.join(traces));
-        for (FileChange c : changes) {
-            if (!c.content().isBlank()) {
-                md.heading(4, c.path()).code(c.language(), c.content());
-            }
-        }
-        return md.render();
+        return md;
     }
 }

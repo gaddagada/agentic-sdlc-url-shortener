@@ -26,6 +26,10 @@ import org.slf4j.LoggerFactory;
  * {@code mvnw} or {@code mvn} followed by plain arguments; shell metacharacters are rejected). The wrapper
  * is resolved inside the sandbox ({@code mvnw.cmd} on Windows) and the process always runs with the sandbox
  * as working directory. Output is captured (last 50 lines) and surefire summary lines are parsed.
+ *
+ * <p>Callers pass the engine-configured command ({@code EngineConfig.buildCommand}, default
+ * {@code ./mvnw -B -ntp -q verify}); the {@code buildCommand} an agent writes into a change set is informational
+ * and never reaches this runner. The validation here is a second line of defence.</p>
  */
 public final class ProcessBuildRunner implements BuildRunner {
 

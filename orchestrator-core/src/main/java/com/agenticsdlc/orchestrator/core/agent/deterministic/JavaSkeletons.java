@@ -30,11 +30,16 @@ final class JavaSkeletons {
     }
 
     static String production(String path, Component component, List<ApiChange> endpoints, String task,
-                             List<String> feedback, Set<String> knownTypes, String requestSchema) {
+                             List<String> feedback, Set<String> knownTypes, String requestSchema, boolean existing) {
         StringBuilder out = new StringBuilder();
         String pkg = packageOf(path);
         for (String entry : feedback) {
             out.append("// Addressed feedback: ").append(comment(entry)).append('\n');
+        }
+        if (existing) {
+            out.append("// MODIFY skeleton for the existing type ").append(component.name())
+                    .append(": merge the members below that are missing into ").append(path)
+                    .append("; keep the existing members unchanged.\n");
         }
         if (!pkg.isEmpty()) {
             out.append("package ").append(pkg).append(";\n\n");
@@ -184,6 +189,10 @@ final class JavaSkeletons {
                 .append("\n}\n");
     }
 
+    /**
+     * Generates a new test class skeleton. Every test method fails with {@code Assertions.fail("TODO: ...")} until it
+     * is implemented, so skeleton tests can never pass vacuously.
+     */
     static String test(String path, String name, List<AcceptanceCriterion> criteria) {
         StringBuilder out = new StringBuilder();
         String pkg = packageOf(path);
@@ -191,10 +200,33 @@ final class JavaSkeletons {
             out.append("package ").append(pkg).append(";\n\n");
         }
         out.append("import org.junit.jupiter.api.Test;\n\n");
-        out.append("/**\n * Tests for ").append(name).append(" derived from the acceptance criteria.\n */\n");
+        out.append("/**\n * Tests for ").append(name).append(" derived from the acceptance criteria.\n *\n")
+                .append(" * <p>Generated skeleton: every test fails until it is implemented.</p>\n */\n");
         out.append("class ").append(name).append("Test {\n");
+        testMethods(out, criteria);
+        out.append("}\n");
+        return out.toString();
+    }
+
+    /**
+     * Generates the additions to an existing test class (a MODIFY skeleton): what to add, not a replacement of the
+     * file. The added methods fail until they are implemented.
+     */
+    static String testAdditions(String path, String name, List<AcceptanceCriterion> criteria) {
+        StringBuilder out = new StringBuilder();
+        out.append("// MODIFY skeleton for the existing test class ").append(name).append("Test: add the test methods ")
+                .append("below to ").append(path).append(" and keep the existing tests unchanged.\n")
+                .append("// Required import: org.junit.jupiter.api.Test. Every added test fails until it is ")
+                .append("implemented.\n");
+        testMethods(out, criteria);
+        return out.toString();
+    }
+
+    private static void testMethods(StringBuilder out, List<AcceptanceCriterion> criteria) {
         if (criteria.isEmpty()) {
-            out.append("\n    @Test\n    void behavesAsDesigned() {\n        // TODO implement\n    }\n");
+            out.append("\n    @Test\n    void behavesAsDesigned() {\n")
+                    .append("        org.junit.jupiter.api.Assertions.fail(\"TODO: implement behavesAsDesigned\");\n")
+                    .append("    }\n");
         }
         for (AcceptanceCriterion ac : criteria) {
             String method = ac.id().toLowerCase(Locale.ROOT).replace("-", "") + "_" + Text.camelCase(ac.then(), 5);
@@ -202,11 +234,10 @@ final class JavaSkeletons {
                     .append("        // Given ").append(comment(ac.given())).append('\n')
                     .append("        // When ").append(comment(ac.when())).append('\n')
                     .append("        // Then ").append(comment(ac.then())).append('\n')
-                    .append("        // TODO implement (traces ").append(String.join(", ", ac.traces())).append(")\n")
+                    .append("        org.junit.jupiter.api.Assertions.fail(\"TODO: implement ").append(method)
+                    .append(" (traces ").append(String.join(", ", ac.traces()).replace("\"", "")).append(")\");\n")
                     .append("    }\n");
         }
-        out.append("}\n");
-        return out.toString();
     }
 
     static String handlerName(ApiChange change) {

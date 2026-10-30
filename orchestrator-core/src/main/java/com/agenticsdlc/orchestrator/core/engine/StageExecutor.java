@@ -72,7 +72,8 @@ final class StageExecutor {
     /**
      * Builds the immutable context of an attempt: active requirement, clarification answers, accepted
      * artifacts of all transitive predecessors, feedback, attempt, plan version, previous error, workspace
-     * index (REPO runs), options, approvals granted in the current plan and agent settings.
+     * index (REPO runs), options, approvals granted in the current plan, agent settings and the stage's direct
+     * predecessors (LLM prompts embed only their artifacts and the requirement specification in full).
      */
     StageContext buildContext(Run run, StageDefinition def, StageExecution exec) {
         Map<String, Artifact> upstream = new LinkedHashMap<>();
@@ -91,7 +92,7 @@ final class StageExecutor {
         CodebaseIndex index = run.options().workspace() == WorkspaceMode.REPO ? workspaceIndex() : null;
         return new StageContext(run.id(), def.id(), def.role(), run.activeRequirement(), run.requirement(), answers,
                 questions, upstream, exec.feedback(), exec.attempts(), run.planVersion(), previousError, index,
-                run.options(), approvals, settings);
+                run.options(), approvals, settings, graph.predecessors(def.id()));
     }
 
     private @Nullable CodebaseIndex workspaceIndex() {

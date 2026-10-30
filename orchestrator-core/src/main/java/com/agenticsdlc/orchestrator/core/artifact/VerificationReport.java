@@ -15,16 +15,42 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  * @param build optional real build outcome (only when a sandbox build ran)
  * @param passed {@code all checks passed && uncovered empty && (build == null || build.exitCode == 0)}
  * @param feedbackForImplementation imperative feedback for each failed check
+ * @param skeletonOnly whether the verified change set contains SKELETON content, i.e. it is a change plan rather
+ *                     than complete code: API checks only confirm that the endpoints are planned, and the release
+ *                     can at best be GO_WITH_CONDITIONS; never null after construction (a boxed type so that JSON
+ *                     written before the field existed reads as false instead of failing)
+ * @param notes notes qualifying the verdict, for example {@value #NO_BUILD_NOTE} (empty when absent)
  */
 public record VerificationReport(List<Check> structuralChecks, Traceability traceability, @Nullable BuildOutcome build,
-                                 boolean passed, List<String> feedbackForImplementation) implements ArtifactPayload {
+                                 boolean passed, List<String> feedbackForImplementation, Boolean skeletonOnly,
+                                 List<String> notes) implements ArtifactPayload {
+
+    /** Note added when no sandbox build ran. */
+    public static final String NO_BUILD_NOTE = "structural checks only; no build executed";
 
     /**
-     * Normalizes collections.
+     * Normalizes collections; an absent {@code skeletonOnly} (older JSON) becomes false.
      */
+    @SuppressWarnings("ConstantValue")
     public VerificationReport {
         structuralChecks = Immutables.list(structuralChecks);
         feedbackForImplementation = Immutables.list(feedbackForImplementation);
+        skeletonOnly = skeletonOnly != null && skeletonOnly;
+        notes = Immutables.list(notes);
+    }
+
+    /**
+     * Creates a report of complete (non-skeleton) code without notes.
+     *
+     * @param structuralChecks structural checks
+     * @param traceability traceability
+     * @param build optional build outcome
+     * @param passed whether verification passed
+     * @param feedbackForImplementation feedback for each failed check
+     */
+    public VerificationReport(List<Check> structuralChecks, Traceability traceability, @Nullable BuildOutcome build,
+                              boolean passed, List<String> feedbackForImplementation) {
+        this(structuralChecks, traceability, build, passed, feedbackForImplementation, false, List.of());
     }
 
     /**
@@ -109,6 +135,12 @@ public record VerificationReport(List<Check> structuralChecks, Traceability trac
     public String markdown() {
         Markdown md = new Markdown().heading(2, "Verification report")
                 .field("Result", passed ? "PASSED" : "FAILED");
+        if (skeletonOnly) {
+            md.field("Scope", "skeleton change plan (structural checks; API changes planned, not implemented)");
+        }
+        if (!notes.isEmpty()) {
+            md.heading(3, "Notes").bullets(notes);
+        }
         md.heading(3, "Structural checks").table(List.of("Check", "Result", "Details"),
                 structuralChecks.stream().map(c -> List.of(c.name(), c.passed() ? "pass" : "FAIL", c.details()))
                         .toList());

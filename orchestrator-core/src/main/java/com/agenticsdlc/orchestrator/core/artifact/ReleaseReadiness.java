@@ -7,7 +7,8 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
 /**
  * Output of the {@code release-readiness} stage: checklist, go/no-go decision and change record. The
  * approvals in the change record are filled by the engine (not the agent) when the run completes, so that
- * approvals are authoritative.
+ * approvals are authoritative. A checklist item with status FAIL always requires the decision NO_GO: agents
+ * never waive failures themselves (a human may still approve a NO_GO release with a waiver comment).
  *
  * @param checklist release checklist
  * @param decision go/no-go decision
@@ -157,6 +158,10 @@ public record ReleaseReadiness(List<ChecklistItem> checklist, GoNoGo decision, L
         }
         p.require(decision != GoNoGo.GO_WITH_CONDITIONS || !conditions.isEmpty(),
                 "GO_WITH_CONDITIONS requires at least one condition");
+        List<String> failed = checklist.stream().filter(i -> i.status() == ChecklistStatus.FAIL)
+                .map(ChecklistItem::item).toList();
+        p.require(failed.isEmpty() || decision == null || decision == GoNoGo.NO_GO, "decision must be NO_GO when a "
+                + "checklist item failed (" + String.join(", ", failed) + "); failures are never self-waived");
         p.throwIfAny();
     }
 

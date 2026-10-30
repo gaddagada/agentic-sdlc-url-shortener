@@ -9,6 +9,7 @@ import java.util.Map;
 import org.junit.jupiter.api.Test;
 
 import com.agenticsdlc.orchestrator.core.agent.AgentRole;
+import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.agenticsdlc.orchestrator.core.testsupport.Payloads;
 
 class ArtifactPayloadsTest {
@@ -71,6 +72,82 @@ class ArtifactPayloadsTest {
                 List.of(new TestPlan.TestCase("TC-1", "t", TestPlan.Level.UNIT, TestPlan.CaseType.POSITIVE, "",
                         List.of(), "", List.of())), Map.of("FR-1", "TC-1,TC-9"), List.of());
         assertThatThrownBy(dangling::validate).hasMessageContaining("TC-9");
+    }
+
+    private static TestPlan planWith(Map<String, String> matrix, List<String> risksNotCovered, String... caseIds) {
+        return new TestPlan("s", List.of(new TestPlan.TestLevel(TestPlan.Level.UNIT, "", "")),
+                java.util.Arrays.stream(caseIds).map(id -> new TestPlan.TestCase(id, "t", TestPlan.Level.UNIT,
+                        TestPlan.CaseType.POSITIVE, "", List.of(), "", List.of())).toList(), matrix, risksNotCovered);
+    }
+
+    @Test
+    void coverageMatrixValuesTolerateProseAndAreNormalizedToCaseIds() {
+        // the exact value a live Opus run produced (it failed validation before)
+        String prose = "TC-20 (automated presence and content checks); the qualitative doc review is part of the "
+                + "T14/T15 human review";
+        TestPlan plan = planWith(Map.of("NFR-6", prose, "FR-1", "TC-1,TC-4", "FR-2", " TC-4 , TC-1, TC-4 "), List.of(),
+                "TC-1", "TC-4", "TC-20");
+        plan.validate();
+        assertThat(plan.coverageMatrix()).containsEntry("NFR-6", "TC-20").containsEntry("FR-1", "TC-1, TC-4")
+                .containsEntry("FR-2", "TC-4, TC-1");
+        assertThat(TestPlan.caseIds(prose)).containsExactly("TC-20");
+        assertThat(plan.markdown()).contains("| NFR-6 | TC-20 |");
+        assertThat(JsonCodec.standard().canonicalJson(plan)).as("canonical and therefore stable hashes")
+                .isEqualTo(JsonCodec.standard().canonicalJson(planWith(Map.of("NFR-6", "TC-20", "FR-1",
+                        "TC-1, TC-4", "FR-2", "TC-4, TC-1"), List.of(), "TC-1", "TC-4", "TC-20")));
+        TestPlan roundTrip = JsonCodec.standard().fromJson(JsonCodec.standard().toJson(plan), TestPlan.class);
+        assertThat(roundTrip).isEqualTo(plan);
+
+        TestPlan unknown = planWith(Map.of("NFR-6", prose), List.of(), "TC-1");
+        assertThatThrownBy(unknown::validate).isInstanceOfSatisfying(InvalidArtifactException.class,
+                e -> assertThat(e.problems()).containsExactly("coverageMatrix entry NFR-6 references unknown test case "
+                        + "TC-20"));
+
+        TestPlan noCase = planWith(Map.of("NFR-6", "manual review only"), List.of(), "TC-1");
+        assertThatThrownBy(noCase::validate).isInstanceOfSatisfying(InvalidArtifactException.class,
+                e -> assertThat(e.problems()).singleElement().asString()
+                        .startsWith("coverageMatrix entry NFR-6 references no test case"));
+        planWith(Map.of("NFR-6", ""), List.of("NFR-6 (USABILITY) has no automated test; manual review required"),
+                "TC-1").validate();
+        assertThatThrownBy(planWith(Map.of("FR-1", ""), List.of("FR-10 is manual"), "TC-1")::validate)
+                .as("FR-10 is not FR-1").isInstanceOf(InvalidArtifactException.class);
+    }
+
+    @Test
+    void verificationReportsReadOlderJsonWithoutTheNewFields() {
+        VerificationReport legacy = Payloads.verification(true);
+        assertThat(legacy.skeletonOnly()).isFalse();
+        assertThat(legacy.notes()).isEmpty();
+        String json = "{\"build\":null,\"feedbackForImplementation\":[],\"passed\":true,\"structuralChecks\":"
+                + "[{\"details\":\"ok\",\"name\":\"x\",\"passed\":true}],\"traceability\":{\"requirementsCovered\":1,"
+                + "\"requirementsTotal\":1,\"uncovered\":[]}}";
+        VerificationReport read = JsonCodec.standard().fromJson(json, VerificationReport.class);
+        assertThat(read.skeletonOnly()).isFalse();
+        assertThat(read.notes()).isEmpty();
+        read.validate();
+        VerificationReport flagged = new VerificationReport(legacy.structuralChecks(), legacy.traceability(), null,
+                true, List.of(), true, List.of(VerificationReport.NO_BUILD_NOTE));
+        assertThat(JsonCodec.standard().fromJson(JsonCodec.standard().toJson(flagged), VerificationReport.class))
+                .isEqualTo(flagged);
+        assertThat(flagged.markdown()).contains("skeleton change plan").contains(VerificationReport.NO_BUILD_NOTE);
+    }
+
+    @Test
+    void contextSummariesAreCompactAndTheChangeSetSummaryOmitsFileContents() {
+        String body = "class Feature {\n" + "    // line\n".repeat(400) + "}\n";
+        ChangeSet changeSet = Payloads.changeSet("url-shortener/src/main/java/com/example/Feature.java", body);
+        String summary = changeSet.contextSummary(1_500);
+        assertThat(summary).contains("url-shortener/src/main/java/com/example/Feature.java").contains("CREATE")
+                .doesNotContain("// line").doesNotContain("class Feature {");
+        assertThat(changeSet.markdown()).contains("// line");
+
+        String markdown = "## Title\n\n" + "- a bullet with some words\n".repeat(200);
+        assertThat(Markdown.truncate(markdown, 1_500)).hasSizeLessThanOrEqualTo(1_500 + "\n[truncated]\n".length())
+                .endsWith("\n[truncated]\n").startsWith("## Title");
+        assertThat(Markdown.truncate("short", 1_500)).isEqualTo("short");
+        DesignSpec design = Payloads.design(RiskLevel.MEDIUM);
+        assertThat(design.contextSummary(100_000)).isEqualTo(design.markdown());
+        assertThat(design.contextSummary(40)).endsWith("[truncated]\n");
     }
 
     @Test

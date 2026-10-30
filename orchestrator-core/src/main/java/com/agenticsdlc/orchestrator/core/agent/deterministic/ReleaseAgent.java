@@ -30,11 +30,27 @@ import com.agenticsdlc.orchestrator.core.model.AutonomyLevel;
 
 /**
  * Deterministic release manager ({@code release-readiness}): checklist from upstream artifacts, go/no-go
- * decision (NO_GO when verification or security failed; GO_WITH_CONDITIONS for MEDIUM findings or waived
- * items; else GO) and the change record. Approvals in the change record are left empty: the engine fills
- * them from the authoritative approval records when the run completes.
+ * decision and the change record. Approvals in the change record are left empty: the engine fills them from the
+ * authoritative approval records when the run completes.
+ *
+ * <p>Decision rules: any checklist item with status FAIL (verification, security review, documentation,
+ * traceability, rollback plan, a required design approval) gives NO_GO; the agent never waives a failure itself
+ * (a human may approve a NO_GO release with a waiver comment, policy CHG-003). Otherwise a skeleton change plan
+ * (SKELETON content, or a verification report flagged {@code skeletonOnly}) gives GO_WITH_CONDITIONS with the
+ * checklist item "Code complete (skeleton plan)" as N_A and the condition {@value #SKELETON_CONDITION}; MEDIUM
+ * security findings become conditions as well; without conditions the decision is GO.</p>
  */
 public final class ReleaseAgent implements StageAgent {
+
+    /** Condition attached to the release of a skeleton change plan. */
+    public static final String SKELETON_CONDITION = "implementation is a skeleton change plan; complete and build "
+            + "before merge";
+
+    /** Checklist item recording that the code is a skeleton change plan. */
+    public static final String SKELETON_ITEM = "Code complete (skeleton plan)";
+
+    private static final String VERIFICATION_ITEM = "Verification passed";
+    private static final String SECURITY_ITEM = "Security review passed";
 
     /**
      * Creates the agent.
@@ -91,11 +107,12 @@ public final class ReleaseAgent implements StageAgent {
                                    List<String> artifactIds) {
         List<ChecklistItem> checklist = new ArrayList<>();
         boolean verified = verification != null && verification.passed();
-        checklist.add(new ChecklistItem("Verification passed", status(verified), verification == null
+        checklist.add(new ChecklistItem(VERIFICATION_ITEM, status(verified), verification == null
                 ? "no verification report" : verification.structuralChecks().stream().filter(c -> c.passed()).count()
-                + "/" + verification.structuralChecks().size() + " checks passed"));
+                + "/" + verification.structuralChecks().size() + " checks passed"
+                + (verification.notes().isEmpty() ? "" : " (" + String.join("; ", verification.notes()) + ")")));
         boolean secure = security != null && security.passed();
-        checklist.add(new ChecklistItem("Security review passed", status(secure), security == null
+        checklist.add(new ChecklistItem(SECURITY_ITEM, status(secure), security == null
                 ? "no security review" : security.findings().size() + " findings"));
         checklist.add(new ChecklistItem("Documentation present", status(docs != null),
                 docs != null ? "README, API reference, runbook and changelog generated" : "missing"));
@@ -111,16 +128,20 @@ public final class ReleaseAgent implements StageAgent {
         checklist.add(new ChecklistItem("Design approval (when required)", !approvalRequired ? ChecklistStatus.N_A
                 : status(designApproved), approvalRequired ? "required by autonomy " + autonomy
                 + " and design risk" : "not required in " + autonomy + " autonomy"));
-        boolean skeleton = changeSet.changes().stream()
-                .anyMatch(c -> c.contentKind() == ChangeSet.ContentKind.SKELETON);
+        boolean skeleton = changeSet.changes().stream().anyMatch(c -> c.operation() != ChangeSet.Operation.DELETE
+                && c.contentKind() == ChangeSet.ContentKind.SKELETON)
+                || (verification != null && verification.skeletonOnly());
         if (skeleton) {
-            checklist.add(new ChecklistItem("Code complete", ChecklistStatus.WAIVED,
-                    "skeleton code; TODO markers must be completed before production deployment"));
+            checklist.add(new ChecklistItem(SKELETON_ITEM, ChecklistStatus.N_A, "the change set is a skeleton change "
+                    + "plan (TODO markers, failing test stubs); not compilable/complete and not built, so code "
+                    + "completeness cannot be assessed"));
         }
 
         List<String> conditions = new ArrayList<>();
+        List<ChecklistItem> failed = checklist.stream().filter(i -> i.status() == ChecklistStatus.FAIL).toList();
         GoNoGo decision;
-        if (!verified || !secure) {
+        if (!failed.isEmpty()) {
+            // a failed item is never waived by an agent: only a human can approve a NO_GO release (with a waiver)
             decision = GoNoGo.NO_GO;
             if (!verified) {
                 conditions.add("Verification must pass");
@@ -128,16 +149,17 @@ public final class ReleaseAgent implements StageAgent {
             if (!secure) {
                 conditions.add("HIGH and CRITICAL security findings must be resolved");
             }
+            failed.stream().filter(i -> !i.item().equals(VERIFICATION_ITEM) && !i.item().equals(SECURITY_ITEM))
+                    .forEach(i -> conditions.add("Resolve: " + i.item()));
         } else {
             if (security != null) {
                 security.findings().stream().filter(f -> f.severity() == Severity.MEDIUM)
                         .forEach(f -> conditions.add("Address: " + f.title()));
             }
-            checklist.stream().filter(i -> i.status() == ChecklistStatus.WAIVED)
-                    .forEach(i -> conditions.add("Waived: " + i.item() + " (" + i.evidence() + ")"));
-            checklist.stream().filter(i -> i.status() == ChecklistStatus.FAIL)
-                    .forEach(i -> conditions.add("Resolve: " + i.item()));
-            decision = conditions.isEmpty() ? GoNoGo.GO : GoNoGo.GO_WITH_CONDITIONS;
+            decision = conditions.isEmpty() && !skeleton ? GoNoGo.GO : GoNoGo.GO_WITH_CONDITIONS;
+        }
+        if (skeleton) {
+            conditions.add(SKELETON_CONDITION);
         }
         RiskLevel risk = design.risk() == null ? RiskLevel.LOW : design.risk().level();
         ChangeRecord record = new ChangeRecord(Text.shorten(spec.intent(), 200), risk, changeSet.rollbackPlan(),

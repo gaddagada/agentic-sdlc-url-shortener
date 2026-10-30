@@ -10,22 +10,68 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.TreeSet;
 
 import com.agenticsdlc.orchestrator.core.artifact.ChangeSet;
+import com.agenticsdlc.orchestrator.core.util.RepoPaths;
 
 /**
  * A disposable copy of the workspace ({@code <sandboxRoot>/<runId>}) into which a change set is
- * materialized. All writes and deletes are confined to the sandbox directory.
+ * materialized. All writes and deletes are confined to the sandbox directory and to the workload roots
+ * ({@link #ALLOWED_ROOTS}); secrets, VCS metadata and build output are never copied into it.
  */
 public final class WorkspaceSandbox {
 
     /** Compensation action that deletes a sandbox directory. */
     public static final String DELETE_ACTION = "DELETE_SANDBOX";
 
+    /**
+     * Repository roots a change set may touch: the workload (the URL shortener and its documentation). The
+     * orchestrator modules, the build wrapper and CI configuration are the control plane and are never written.
+     */
+    public static final List<String> ALLOWED_ROOTS = List.of("url-shortener/", "docs/");
+
+    /** Directory names that are never copied into a sandbox (VCS metadata, build output, runtime data, sandboxes). */
+    public static final Set<String> SKIPPED_DIRECTORIES = skippedDirectories();
+
     private final Path path;
 
     private WorkspaceSandbox(Path path) {
         this.path = path;
+    }
+
+    private static Set<String> skippedDirectories() {
+        Set<String> names = new TreeSet<>(CodebaseIndexer.SKIPPED_DIRECTORIES);
+        names.addAll(Set.of(".git", "target", "data", "sandbox"));
+        return Set.copyOf(names);
+    }
+
+    /**
+     * Returns whether a repository-relative path lies under one of the {@link #ALLOWED_ROOTS} (after
+     * normalization; {@code ..} segments are never allowed).
+     *
+     * @param relative repository-relative path
+     * @return true when a change set may touch it
+     */
+    public static boolean isAllowedPath(String relative) {
+        String normalized = RepoPaths.normalize(relative);
+        return !RepoPaths.hasParentSegment(normalized) && ALLOWED_ROOTS.stream().anyMatch(root ->
+                normalized.startsWith(root) && normalized.length() > root.length());
+    }
+
+    /**
+     * Returns whether a file must not be copied into a sandbox because it typically holds secrets
+     * ({@code .env*}, {@code *.pem}, {@code *.key}, {@code *.p12}, {@code *.jks}; case-insensitive).
+     *
+     * @param fileName file name (last path segment)
+     * @return true for secret-bearing files
+     */
+    public static boolean isSecretFile(String fileName) {
+        String name = fileName.toLowerCase(Locale.ROOT);
+        return name.startsWith(".env") || name.endsWith(".pem") || name.endsWith(".key") || name.endsWith(".p12")
+                || name.endsWith(".jks");
     }
 
     /**
@@ -41,7 +87,9 @@ public final class WorkspaceSandbox {
     }
 
     /**
-     * Copies the workspace (skipping build output, VCS and sandbox directories) into a fresh sandbox.
+     * Copies the workspace into a fresh sandbox, skipping {@link #SKIPPED_DIRECTORIES} (among them {@code .git},
+     * {@code target}, {@code data} and {@code sandbox}), {@code .env*} directories, secret-bearing files
+     * ({@link #isSecretFile(String)}) and symbolic links.
      *
      * @param workspaceRoot workspace root
      * @param sandboxRoot sandbox root directory
@@ -63,9 +111,12 @@ public final class WorkspaceSandbox {
         Files.walkFileTree(source, new SimpleFileVisitor<>() {
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException {
-                if (!dir.equals(source) && (CodebaseIndexer.SKIPPED_DIRECTORIES.contains(dir.getFileName().toString())
-                        || dir.startsWith(target))) {
-                    return FileVisitResult.SKIP_SUBTREE;
+                if (!dir.equals(source)) {
+                    String name = dir.getFileName().toString();
+                    if (SKIPPED_DIRECTORIES.contains(name) || name.toLowerCase(Locale.ROOT).startsWith(".env")
+                            || dir.startsWith(target)) {
+                        return FileVisitResult.SKIP_SUBTREE;
+                    }
                 }
                 Files.createDirectories(target.resolve(source.relativize(dir).toString()));
                 return FileVisitResult.CONTINUE;
@@ -73,7 +124,7 @@ public final class WorkspaceSandbox {
 
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-                if (attrs.isRegularFile()) {
+                if (attrs.isRegularFile() && !isSecretFile(file.getFileName().toString())) {
                     Files.copy(file, target.resolve(source.relativize(file).toString()),
                             StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
                 }
@@ -113,12 +164,17 @@ public final class WorkspaceSandbox {
      * file. Partial content of a MODIFY (SKELETON or DIFF) never overwrites the existing file; it is written
      * next to it as {@code <file>.skeleton} or {@code <file>.diff} for human completion.
      *
+     * <p>The whole change set is checked before anything is written: a CREATE of a file that already exists
+     * (agents must MODIFY existing files) and a path outside the {@link #ALLOWED_ROOTS} or outside the sandbox
+     * reject it with a {@link ChangeSetRejectedException} listing every problem.</p>
+     *
      * @param changeSet the change set
      * @return the written or deleted paths (relative)
      * @throws IOException on I/O errors
-     * @throws IllegalArgumentException when a path escapes the sandbox
+     * @throws ChangeSetRejectedException when the change set violates the workspace rules (nothing is written)
      */
     public List<String> apply(ChangeSet changeSet) throws IOException {
+        check(changeSet);
         List<String> applied = new ArrayList<>();
         for (ChangeSet.FileChange change : changeSet.changes()) {
             String relative = change.path();
@@ -142,6 +198,31 @@ public final class WorkspaceSandbox {
             applied.add(relative);
         }
         return applied;
+    }
+
+    private void check(ChangeSet changeSet) {
+        List<String> problems = new ArrayList<>();
+        for (ChangeSet.FileChange change : changeSet.changes()) {
+            if (!isAllowedPath(change.path())) {
+                problems.add(change.path() + " is outside the allowed roots (" + String.join(", ", ALLOWED_ROOTS)
+                        + ")");
+                continue;
+            }
+            Path file;
+            try {
+                file = resolveInside(change.path());
+            } catch (IllegalArgumentException e) {
+                problems.add(change.path() + " escapes the sandbox");
+                continue;
+            }
+            if (change.operation() == ChangeSet.Operation.CREATE && Files.exists(file)) {
+                problems.add("CREATE of existing file " + change.path() + " (use MODIFY, preferably with contentKind "
+                        + "DIFF)");
+            }
+        }
+        if (!problems.isEmpty()) {
+            throw new ChangeSetRejectedException(problems);
+        }
     }
 
     /**
