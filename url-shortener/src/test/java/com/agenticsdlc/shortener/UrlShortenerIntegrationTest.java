@@ -242,6 +242,7 @@ class UrlShortenerIntegrationTest {
         assertThat(mvc.get().uri("/actuator/health")).hasStatusOk()
                 .bodyJson().extractingPath("$.status").isEqualTo("UP");
         assertThat(mvc.get().uri("/actuator/metrics/shortener.links.created")).hasStatusOk();
+        assertThat(mvc.get().uri("/actuator/metrics/shortener.clicks.dropped")).hasStatusOk();
     }
 
     private String create(String body) throws Exception {

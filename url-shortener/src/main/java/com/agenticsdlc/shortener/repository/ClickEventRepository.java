@@ -2,12 +2,14 @@ package com.agenticsdlc.shortener.repository;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
+import org.springframework.transaction.annotation.Transactional;
 
 import com.agenticsdlc.shortener.domain.ClickEvent;
 
@@ -15,19 +17,30 @@ import com.agenticsdlc.shortener.domain.ClickEvent;
  * Persistence and aggregation queries for {@link ClickEvent}.
  *
  * <p>All aggregations run in the database and are bounded by {@code (link_id, occurred_at)}, which is covered by the
- * {@code idx_click_events_link_time} index; no click rows are loaded into memory.
+ * {@code idx_click_events_link_time} index; no click rows are loaded into memory. Retention queries use
+ * {@code idx_click_events_occurred_at}.
  */
 public interface ClickEventRepository extends JpaRepository<ClickEvent, Long> {
 
     /**
-     * Deletes click events that occurred before the given instant (analytics data retention).
+     * Deletes click events that occurred before the given instant (analytics data retention). Runs in its own
+     * transaction unless called inside one, so the retention job can commit one batch at a time.
      *
      * @param before exclusive upper bound
      * @return number of rows deleted
      */
+    @Transactional
     @Modifying(clearAutomatically = true, flushAutomatically = true)
     @Query("delete from ClickEvent c where c.occurredAt < :before")
     int deleteOccurredBefore(@Param("before") Instant before);
+
+    /**
+     * Returns the time of the oldest stored click event (an index lookup on {@code occurred_at}).
+     *
+     * @return the oldest {@code occurredAt}, empty when there are no click events
+     */
+    @Query("select min(c.occurredAt) from ClickEvent c")
+    Optional<Instant> findOldestOccurredAt();
 
     /**
      * Counts clicks of a link since {@code from} (inclusive).

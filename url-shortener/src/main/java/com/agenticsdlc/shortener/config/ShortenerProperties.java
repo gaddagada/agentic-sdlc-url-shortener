@@ -60,19 +60,39 @@ public record ShortenerProperties(
     /**
      * Click analytics settings.
      *
-     * @param ipSalt secret mixed into visitor IP hashes; rotate it to unlink historic hashes
-     */
-    /**
-     * Click analytics settings.
-     *
-     * @param ipSalt    secret mixed into the daily visitor hash
+     * @param ipSalt    HMAC key of the daily visitor hash; must be a secret outside local development (startup fails
+     *                  with the placeholder value under the {@code postgres} or {@code prod} profile)
      * @param retention how long click events are kept before the retention job purges them (default 90 days)
+     * @param recorder  sizing of the asynchronous click-recording executor
      */
-    public record Analytics(@NotBlank String ipSalt, @DefaultValue("90d") @NotNull Duration retention) {
+    public record Analytics(
+            @NotBlank String ipSalt,
+            @DefaultValue("90d") @NotNull Duration retention,
+            @DefaultValue @Valid @NotNull Recorder recorder) {
+
+        /** Rejects a non-positive retention window. */
         public Analytics {
             if (retention != null && (retention.isZero() || retention.isNegative())) {
                 throw new IllegalArgumentException("shortener.analytics.retention must be positive");
             }
+        }
+    }
+
+    /**
+     * Bounded executor that persists clicks off the redirect path. Every running task holds one database connection,
+     * so {@code threads} caps the connections click recording can take from the pool; clicks arriving while all
+     * threads are busy and the queue is full are dropped and counted ({@code shortener.clicks.dropped}).
+     *
+     * @param threads       maximum number of recorder threads (default 8); the core pool is half of it, rounded up
+     * @param queueCapacity clicks buffered while the core threads are busy (default 10 000)
+     */
+    public record Recorder(
+            @DefaultValue("8") @Min(1) @Max(256) int threads,
+            @DefaultValue("10000") @Min(1) int queueCapacity) {
+
+        /** {@return the core pool size: half of {@link #threads()}, rounded up} */
+        public int coreThreads() {
+            return (threads + 1) / 2;
         }
     }
 }

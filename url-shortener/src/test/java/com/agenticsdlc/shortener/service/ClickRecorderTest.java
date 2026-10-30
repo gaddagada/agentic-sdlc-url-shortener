@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
+import org.springframework.mock.env.MockEnvironment;
 
 import com.agenticsdlc.shortener.domain.ClickEvent;
 import com.agenticsdlc.shortener.domain.UserAgentFamily;
@@ -25,7 +26,7 @@ class ClickRecorderTest {
 
     private final ClickEventRepository clickEvents = mock(ClickEventRepository.class);
     private final LinkRepository links = mock(LinkRepository.class);
-    private final IpAnonymizer anonymizer = new IpAnonymizer(TestProperties.defaults());
+    private final IpAnonymizer anonymizer = new IpAnonymizer(TestProperties.defaults(), new MockEnvironment());
     private final ClickRecorder recorder = new ClickRecorder(clickEvents, links, new UserAgentClassifier(), anonymizer);
 
     @Test

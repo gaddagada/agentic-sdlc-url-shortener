@@ -8,9 +8,13 @@ spring:
     virtual:
       enabled: true
   datasource:
-    url: jdbc:h2:file:./data/url-shortener;AUTO_SERVER=TRUE
+    # Embedded file database only; no AUTO_SERVER (it would open a TCP listener accepting sa with an empty password).
+    url: jdbc:h2:file:./data/url-shortener
     username: sa
     password: ""
+    hikari:
+      # Explicit pool size; click recording is capped at shortener.analytics.recorder.threads connections.
+      maximum-pool-size: 20
   jpa:
     open-in-view: false
     hibernate:
@@ -48,5 +52,9 @@ shortener:
     capacity: 20
     refill-per-minute: 20
   analytics:
+    # HMAC key of the daily visitor hash. The placeholder is rejected at startup under the postgres/prod profiles.
     ip-salt: change-me-in-production
     retention: 90d
+    recorder:
+      threads: 8
+      queue-capacity: 10000

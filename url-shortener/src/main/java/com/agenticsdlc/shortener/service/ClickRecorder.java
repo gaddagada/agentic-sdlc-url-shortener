@@ -21,7 +21,8 @@ import com.agenticsdlc.shortener.repository.LinkRepository;
 /**
  * Persists clicks asynchronously, off the redirect path.
  *
- * <p>Handles {@link ClickRecorded} events on the {@value #EXECUTOR} executor (virtual thread per task) and, in one
+ * <p>Handles {@link ClickRecorded} events on the bounded {@value #EXECUTOR} executor (see
+ * {@code shortener.analytics.recorder.*}; clicks are dropped and counted when it is saturated) and, in one
  * transaction, stores an anonymized {@link ClickEvent} and atomically increments the link's click counter.
  * Analytics are best effort: a failure is logged and never affects the redirect that already happened.
  */

@@ -36,4 +36,17 @@ class ClickEventRetentionRepositoryTest {
         assertThat(deleted).isEqualTo(1);
         assertThat(clicks.findAll()).extracting(ClickEvent::getIpHash).containsExactlyInAnyOrder("boundary", "new");
     }
+
+    @Test
+    void findsTheOldestEventTime() {
+        clicks.deleteAllInBatch(); // rolled back with the test transaction
+        assertThat(clicks.findOldestOccurredAt()).isEmpty();
+
+        long linkId = links.save(Link.create("ret0002", "https://example.com", CUTOFF, null, false)).getId();
+        clicks.save(new ClickEvent(linkId, CUTOFF.plusSeconds(60), null, UserAgentFamily.CHROME, "later"));
+        clicks.save(new ClickEvent(linkId, CUTOFF.minusSeconds(3_600), null, UserAgentFamily.CHROME, "oldest"));
+        clicks.flush();
+
+        assertThat(clicks.findOldestOccurredAt()).contains(CUTOFF.minusSeconds(3_600));
+    }
 }

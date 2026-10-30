@@ -29,6 +29,8 @@ CREATE TABLE click_events (
 );
 
 CREATE INDEX idx_click_events_link_time ON click_events (link_id, occurred_at);
+-- Retention purge (ClickRetentionJob) deletes by occurred_at alone, which the (link_id, occurred_at) index cannot serve.
+CREATE INDEX idx_click_events_occurred_at ON click_events (occurred_at);
 
 -- body is an unbounded VARCHAR (TEXT semantics on PostgreSQL). TEXT itself is not used because H2 maps it to CLOB,
 -- which Hibernate's schema validation does not accept for a String attribute on H2, while CLOB/@Lob maps to OID
