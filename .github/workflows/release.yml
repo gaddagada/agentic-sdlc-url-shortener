@@ -1,0 +1,79 @@
+name: release
+
+# Publishes a GitHub Release for every version tag (v1.0.0, v1.1.0, ...): the two executable jars, the aggregate
+# CycloneDX SBOM and a SHA-256 checksum file are built from the tagged commit and attached to the release.
+# The release is created with the GitHub CLI that ships on the runner, so no third-party action is involved.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: maven
+      - name: Build, test and package the tagged commit
+        run: ./mvnw -B -ntp verify
+      - name: Generate CycloneDX SBOM (aggregate)
+        run: ./mvnw -B -ntp org.cyclonedx:cyclonedx-maven-plugin:2.9.3:makeAggregateBom -DoutputFormat=json -DoutputName=sbom
+      - name: Collect release artifacts
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          mkdir -p dist
+          cp url-shortener/target/url-shortener-*.jar "dist/url-shortener-${VERSION}.jar"
+          cp orchestrator-app/target/orchestrator-app-*.jar "dist/orchestrator-app-${VERSION}.jar"
+          cp target/sbom.json "dist/sbom-${VERSION}.cyclonedx.json"
+          (cd dist && sha256sum -- * > "SHA256SUMS-${VERSION}.txt")
+          ls -l dist
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          {
+            echo "## Agentic SDLC URL Shortener ${VERSION}"
+            echo
+            echo "Built from \`${GITHUB_SHA}\` by the release workflow; all tests ran before packaging."
+            echo
+            echo "### Artifacts"
+            echo
+            echo "| File | Purpose |"
+            echo "|---|---|"
+            echo "| \`url-shortener-${VERSION}.jar\` | URL shortener service (Java 25, Spring Boot). \`java -jar\` runs it on port 8080 with an embedded H2 database. |"
+            echo "| \`orchestrator-app-${VERSION}.jar\` | SDLC orchestrator control plane with the operator console on port 8090. |"
+            echo "| \`sbom-${VERSION}.cyclonedx.json\` | Aggregate CycloneDX software bill of materials for all modules. |"
+            echo "| \`SHA256SUMS-${VERSION}.txt\` | Checksums of the files above. |"
+            echo
+            echo "### Verify a download"
+            echo
+            echo '```bash'
+            echo "sha256sum -c SHA256SUMS-${VERSION}.txt"
+            echo '```'
+            echo
+            echo "See the README for configuration (security modes, providers, PostgreSQL and Redis options)."
+          } > release-notes.md
+          cat release-notes.md
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          gh release create "${TAG}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${TAG}" \
+            --notes-file release-notes.md \
+            --verify-tag
