@@ -3,7 +3,9 @@ package com.agenticsdlc.shortener.config;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Clock;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
@@ -12,6 +14,7 @@ import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.health.contributor.HealthContributor;
+import org.springframework.boot.health.contributor.ReactiveHealthContributor;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
@@ -74,7 +77,11 @@ class RedisRateLimiterIT extends RateLimiterContract {
     @Test
     void theRedisBackendIsWiredWithItsHealthIndicator() {
         assertThat(wiredLimiter).isInstanceOf(RedisRateLimiter.class);
-        assertThat(context.getBeansOfType(HealthContributor.class).keySet()).anyMatch(name -> name.contains("redis"));
+        // Lettuce brings Reactor, so Spring Boot registers the reactive Redis health contributor and the blocking
+        // one backs off; either way the contributor is named redisHealthContributor.
+        Set<String> contributors = new HashSet<>(context.getBeansOfType(HealthContributor.class).keySet());
+        contributors.addAll(context.getBeansOfType(ReactiveHealthContributor.class).keySet());
+        assertThat(contributors).anyMatch(name -> name.contains("redis"));
         assertThat(mvc.get().uri("/actuator/health")).hasStatusOk()
                 .bodyJson().extractingPath("$.status").isEqualTo("UP");
     }
