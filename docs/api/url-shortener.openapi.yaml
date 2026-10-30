@@ -1,0 +1,497 @@
+openapi: 3.1.0
+info:
+  title: URL Shortener API
+  version: v1
+  description: |
+    Create short links, follow redirects and read click analytics.
+
+    * Errors are RFC 9457 Problem Details (`application/problem+json`). Clients should branch on the
+      problem `type` URI (`https://agenticsdlc.dev/problems/<slug>`), not on `title` or `detail`.
+    * Timestamps are ISO-8601 in UTC.
+    * `POST /api/v1/links` is rate limited per client IP (token bucket, default 20 burst, 20/minute).
+    * The API is unauthenticated in this version (see docs/RISKS_AND_TRADEOFFS.md).
+
+    This contract is hand-maintained. `OpenApiContractTest` compares it with the document generated from the
+    controllers (`/v3/api-docs`) on every build: operations, operation ids, parameters, response codes and DTO
+    properties must match.
+  license:
+    name: Apache-2.0
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: Links
+    description: Short link management
+  - name: Analytics
+    description: Aggregated click analytics
+  - name: Redirect
+    description: Short link resolution
+
+paths:
+  /api/v1/links:
+    post:
+      tags: [Links]
+      operationId: createLink
+      summary: Create a short link
+      description: |
+        Creates a short link with a random Base62 code (default length 7) or a custom alias.
+
+        With an `Idempotency-Key`, a retried request with the same payload within 24 hours returns the original
+        response with `Idempotent-Replayed: true`. The same key with a different payload is rejected (422); a
+        retry while the first request is still running gets 409 with `Retry-After`. Only successful responses are
+        stored, so a failed request can be retried with the same key.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: Client-generated key (1-128 characters) making the request safe to retry.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLinkRequest'
+            examples:
+              generated:
+                summary: Random code, never expires
+                value:
+                  url: https://example.com/some/long/path
+              alias-with-ttl:
+                summary: Custom alias valid for one day
+                value:
+                  url: https://example.com/spring-sale
+                  customAlias: spring-sale
+                  ttlSeconds: 86400
+      responses:
+        '201':
+          description: Link created (or replayed for a repeated Idempotency-Key).
+          headers:
+            Location:
+              description: URI of the created link resource (relative, e.g. `/api/v1/links/aZ3kP9q`).
+              schema:
+                type: string
+                format: uri-reference
+            Idempotent-Replayed:
+              description: Present with value `true` when the stored response of an earlier request is replayed.
+              schema:
+                type: boolean
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkResponse'
+        '400':
+          description: |
+            Validation error (`validation-error`, with `errors`), malformed JSON (`malformed-request`) or an
+            expiry that is in the past or beyond the maximum TTL (`invalid-expiry`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+              example:
+                type: https://agenticsdlc.dev/problems/validation-error
+                title: Validation failed
+                status: 400
+                detail: The request is invalid; see 'errors' for details.
+                instance: /api/v1/links
+                errors:
+                  - field: url
+                    message: must not be blank
+        '409':
+          description: |
+            Custom alias already taken (`alias-conflict`), or a request with the same Idempotency-Key is still in
+            progress (`idempotency-request-in-progress`, with `Retry-After`).
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '422':
+          description: |
+            Target URL rejected by policy (`url-rejected`: scheme other than http/https, embedded credentials,
+            private/loopback/link-local/internal host), custom alias reserved (`alias-rejected`), or
+            Idempotency-Key reused with a different payload (`idempotency-key-reused`).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+              example:
+                type: https://agenticsdlc.dev/problems/url-rejected
+                title: URL not allowed
+                status: 422
+                detail: Target host '169.254.169.254' is a private, loopback or otherwise non-public address.
+                instance: /api/v1/links
+        '429':
+          description: Rate limit exceeded for this client (`rate-limited`).
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+            X-RateLimit-Limit:
+              $ref: '#/components/headers/X-RateLimit-Limit'
+            X-RateLimit-Remaining:
+              $ref: '#/components/headers/X-RateLimit-Remaining'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+              example:
+                type: https://agenticsdlc.dev/problems/rate-limited
+                title: Too many requests
+                status: 429
+                detail: Too many link creation requests from this client; retry after 3 seconds.
+                instance: /api/v1/links
+        '503':
+          description: No free short code could be allocated after 3 retries (`code-generation-failed`).
+          headers:
+            Retry-After:
+              $ref: '#/components/headers/Retry-After'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+
+  /api/v1/links/{code}:
+    get:
+      tags: [Links]
+      operationId: getLink
+      summary: Get link metadata
+      parameters:
+        - $ref: '#/components/parameters/Code'
+      responses:
+        '200':
+          description: The link.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkResponse'
+        '404':
+          $ref: '#/components/responses/LinkNotFound'
+    delete:
+      tags: [Links]
+      operationId: deactivateLink
+      summary: Deactivate a link
+      description: |
+        Soft delete: the link keeps its analytics, its status becomes `DISABLED` and redirects answer 410 Gone.
+        Idempotent.
+      parameters:
+        - $ref: '#/components/parameters/Code'
+      responses:
+        '204':
+          description: Link deactivated.
+        '404':
+          $ref: '#/components/responses/LinkNotFound'
+
+  /api/v1/links/{code}/analytics:
+    get:
+      tags: [Analytics]
+      operationId: getLinkAnalytics
+      summary: Get click analytics
+      description: |
+        Totals, unique visitors, clicks per UTC day (zero-filled), top 10 referrers and clicks per user-agent family
+        over the last `days` UTC days including today. Clicks are recorded asynchronously and appear within moments
+        of the redirect. Analytics remain available for disabled and expired links.
+      parameters:
+        - $ref: '#/components/parameters/Code'
+        - name: days
+          in: query
+          required: false
+          description: Window size in days (1..90).
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+            maximum: 90
+            default: 7
+      responses:
+        '200':
+          description: Aggregated analytics.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnalyticsResponse'
+        '400':
+          description: '`days` outside 1..90 (`validation-error`).'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+        '404':
+          $ref: '#/components/responses/LinkNotFound'
+
+  /{code}:
+    get:
+      tags: [Redirect]
+      operationId: redirect
+      summary: Follow a short link
+      description: |
+        Answers `302 Found` (not 301, so that expiry, deactivation and analytics stay effective) with
+        `Cache-Control: no-store`. The click is recorded asynchronously; `HEAD` requests are not counted.
+        Only codes matching `^[A-Za-z0-9_-]{4,32}$` are routed here.
+      parameters:
+        - $ref: '#/components/parameters/Code'
+      responses:
+        '302':
+          description: Redirect to the target URL.
+          headers:
+            Location:
+              description: Target URL.
+              schema:
+                type: string
+                format: uri
+            Cache-Control:
+              description: Always `no-store`.
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/LinkNotFound'
+        '410':
+          description: Link expired or disabled (`link-gone`); `reason` is `EXPIRED` or `DISABLED`.
+          headers:
+            Cache-Control:
+              description: Always `no-store`.
+              schema:
+                type: string
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/ProblemDetail'
+              example:
+                type: https://agenticsdlc.dev/problems/link-gone
+                title: Link no longer available
+                status: 410
+                detail: Short link 'aZ3kP9q' is no longer available (expired).
+                instance: /aZ3kP9q
+                reason: EXPIRED
+
+components:
+  parameters:
+    Code:
+      name: code
+      in: path
+      required: true
+      description: Short code or custom alias (case-sensitive).
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9_-]{4,32}$'
+        examples: [aZ3kP9q]
+
+  headers:
+    Retry-After:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+    X-RateLimit-Limit:
+      description: Capacity of the client's token bucket.
+      schema:
+        type: integer
+    X-RateLimit-Remaining:
+      description: Whole tokens left in the client's bucket after this request.
+      schema:
+        type: integer
+
+  responses:
+    LinkNotFound:
+      description: 'Unknown code (`link-not-found`). Sent with `Cache-Control: no-store`.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetail'
+          example:
+            type: https://agenticsdlc.dev/problems/link-not-found
+            title: Link not found
+            status: 404
+            detail: No short link exists for code 'aZ3kP9q'.
+            instance: /api/v1/links/aZ3kP9q
+
+  schemas:
+    CreateLinkRequest:
+      type: object
+      description: Short link to create. `ttlSeconds` and `expiresAt` are mutually exclusive.
+      required: [url]
+      properties:
+        url:
+          type: string
+          maxLength: 2048
+          description: Target URL, http or https. Private, loopback, link-local and internal hosts are rejected.
+          examples: [https://example.com/some/long/path]
+        customAlias:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{4,32}$'
+          description: |
+            Optional custom alias (case-sensitive). Reserved (case-insensitive): api, actuator, swagger-ui, v3,
+            health, admin, login, static, error.
+          examples: [spring-sale]
+        ttlSeconds:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Lifetime in seconds, at most the configured maximum TTL (default 365 days).
+          examples: [86400]
+        expiresAt:
+          type: string
+          format: date-time
+          description: Absolute expiry, in the future and at most the maximum TTL ahead.
+          examples: ['2030-01-01T00:00:00Z']
+
+    LinkResponse:
+      type: object
+      description: A short link.
+      required: [code, shortUrl, originalUrl, status, createdAt, clickCount]
+      properties:
+        code:
+          type: string
+          examples: [aZ3kP9q]
+        shortUrl:
+          type: string
+          description: Absolute short URL (`shortener.base-url` + `/` + code).
+          examples: [http://localhost:8080/aZ3kP9q]
+        originalUrl:
+          type: string
+          examples: [https://example.com/some/long/path]
+        status:
+          type: string
+          enum: [ACTIVE, DISABLED, EXPIRED]
+          description: Effective status; EXPIRED is derived from `expiresAt` at read time.
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+          description: Omitted when the link never expires.
+        clickCount:
+          type: integer
+          format: int64
+          description: Total recorded clicks (eventually consistent).
+
+    AnalyticsResponse:
+      type: object
+      description: Aggregated click analytics over whole UTC days ending today.
+      required: [code, windowDays, totalClicks, uniqueVisitors, clicksByDay, topReferrers, byUserAgentFamily]
+      properties:
+        code:
+          type: string
+        windowDays:
+          type: integer
+          format: int32
+        totalClicks:
+          type: integer
+          format: int64
+        uniqueVisitors:
+          type: integer
+          format: int64
+          description: |
+            Distinct visitor hashes in the window. Hashes are salted per UTC day for privacy, so a visitor
+            returning on another day is counted again.
+        clicksByDay:
+          type: array
+          description: One entry per UTC day of the window, oldest first, zero-filled.
+          items:
+            $ref: '#/components/schemas/DailyClicks'
+        topReferrers:
+          type: array
+          maxItems: 10
+          description: Referrer hosts by clicks; `direct` when no Referer header was sent.
+          items:
+            $ref: '#/components/schemas/ReferrerClicks'
+        byUserAgentFamily:
+          type: array
+          items:
+            $ref: '#/components/schemas/UserAgentClicks'
+
+    DailyClicks:
+      type: object
+      required: [date, clicks]
+      properties:
+        date:
+          type: string
+          format: date
+        clicks:
+          type: integer
+          format: int64
+
+    ReferrerClicks:
+      type: object
+      required: [referrer, clicks]
+      properties:
+        referrer:
+          type: string
+          examples: [news.ycombinator.com]
+        clicks:
+          type: integer
+          format: int64
+
+    UserAgentClicks:
+      type: object
+      required: [family, clicks]
+      properties:
+        family:
+          type: string
+          enum: [CHROME, EDGE, FIREFOX, SAFARI, OPERA, IE, BOT, HTTP_CLIENT, OTHER, UNKNOWN]
+        clicks:
+          type: integer
+          format: int64
+
+    ProblemDetail:
+      type: object
+      description: RFC 9457 Problem Details.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Problem type, `https://agenticsdlc.dev/problems/<slug>`.
+          enum:
+            - https://agenticsdlc.dev/problems/validation-error
+            - https://agenticsdlc.dev/problems/malformed-request
+            - https://agenticsdlc.dev/problems/link-not-found
+            - https://agenticsdlc.dev/problems/link-gone
+            - https://agenticsdlc.dev/problems/alias-conflict
+            - https://agenticsdlc.dev/problems/alias-rejected
+            - https://agenticsdlc.dev/problems/url-rejected
+            - https://agenticsdlc.dev/problems/invalid-expiry
+            - https://agenticsdlc.dev/problems/idempotency-key-reused
+            - https://agenticsdlc.dev/problems/idempotency-request-in-progress
+            - https://agenticsdlc.dev/problems/code-generation-failed
+            - https://agenticsdlc.dev/problems/rate-limited
+            - https://agenticsdlc.dev/problems/internal-error
+            - about:blank
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+          description: Request path.
+        errors:
+          type: array
+          description: Present on `validation-error`.
+          items:
+            $ref: '#/components/schemas/FieldViolation'
+        reason:
+          type: string
+          enum: [EXPIRED, DISABLED]
+          description: Present on `link-gone`.
+
+    FieldViolation:
+      type: object
+      required: [field, message]
+      properties:
+        field:
+          type: string
+          description: Offending body field, query parameter or header name.
+        message:
+          type: string

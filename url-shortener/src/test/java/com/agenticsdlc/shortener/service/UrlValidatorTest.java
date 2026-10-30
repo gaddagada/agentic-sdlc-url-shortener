@@ -1,0 +1,125 @@
+package com.agenticsdlc.shortener.service;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+
+import java.net.URI;
+
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import com.agenticsdlc.shortener.service.exception.UrlRejectedException;
+import com.agenticsdlc.shortener.support.TestProperties;
+
+class UrlValidatorTest {
+
+    private final UrlValidator validator = new UrlValidator(TestProperties.defaults());
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "https://example.com",
+        "http://example.com/path?q=1&r=two#fragment",
+        "HTTPS://Example.COM/Mixed/Case",
+        "https://sub.domain.example.co.uk:8443/a/b",
+        "https://93.184.216.34/",
+        "https://[2606:2800:220:1:248:1893:25c8:1946]/",
+        "http://localhost.example.com/",
+        "https://example.com/" + "a",
+        "  https://example.com/surrounded-by-whitespace  "
+    })
+    void acceptsPublicHttpUrls(String url) {
+        URI uri = validator.validate(url);
+
+        assertThat(uri.toString()).isEqualTo(url.strip());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+        http://127.0.0.1/                           | non-public
+        http://127.1.2.3:8080/admin                 | non-public
+        http://10.0.0.1/                            | non-public
+        http://172.16.5.4/                          | non-public
+        http://192.168.1.1/                         | non-public
+        http://169.254.169.254/latest/meta-data/    | non-public
+        http://[::1]/                               | non-public
+        http://[::]/                                | non-public
+        http://[fc00::1]/                           | non-public
+        http://[fe80::1]/                           | non-public
+        http://[::ffff:127.0.0.1]/                  | non-public
+        http://[64:ff9b::7f00:1]/                   | non-public
+        http://0.0.0.0/                             | non-public
+        http://100.64.0.1/                          | non-public
+        http://224.0.0.1/                           | non-public
+        http://255.255.255.255/                     | non-public
+        http://localhost/                           | local or internal
+        http://LOCALHOST:8080/                      | local or internal
+        http://localhost./                          | local or internal
+        http://printer.local/                       | local or internal
+        http://metadata.google.internal/            | local or internal
+        http://app.localhost/                       | local or internal
+        ftp://example.com/file.txt                  | http and https
+        file:///etc/passwd                          | http and https
+        javascript:alert(1)                         | http and https
+        mailto:someone@example.com                  | http and https
+        //example.com/scheme-relative               | http and https
+        example.com                                 | http and https
+        https://user:secret@example.com/            | credentials
+        https://user@example.com/                   | credentials
+        http:///no-host                             | host
+        http://exa mple.com/                        | valid absolute URI
+        """)
+    void rejectsUnsafeOrInvalidUrls(String url, String reason) {
+        assertThatThrownBy(() -> validator.validate(url))
+                .isInstanceOf(UrlRejectedException.class)
+                .hasMessageContaining(reason);
+    }
+
+    @Test
+    void rejectsOctalEncodedLoopbackHost() {
+        // 0177.0.0.1 is 127.0.0.1 for inet_aton-style parsers (browsers, curl): never accepted.
+        assertThatThrownBy(() -> validator.validate("http://0177.0.0.1/"))
+                .isInstanceOf(UrlRejectedException.class);
+    }
+
+    @Test
+    void rejectsUrlsLongerThan2048Characters() {
+        String base = "https://example.com/";
+        String tooLong = base + "a".repeat(UrlValidator.MAX_LENGTH - base.length() + 1);
+
+        assertThatThrownBy(() -> validator.validate(tooLong))
+                .isInstanceOf(UrlRejectedException.class)
+                .hasMessageContaining("2048");
+    }
+
+    @Test
+    void acceptsUrlOfExactly2048Characters() {
+        String base = "https://example.com/";
+        String maxLength = base + "a".repeat(UrlValidator.MAX_LENGTH - base.length());
+
+        assertThat(validator.validate(maxLength).toString()).hasSize(UrlValidator.MAX_LENGTH);
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {"   ", "\t"})
+    void rejectsBlankUrls(String url) {
+        assertThatThrownBy(() -> validator.validate(url))
+                .isInstanceOf(UrlRejectedException.class)
+                .hasMessageContaining("blank");
+    }
+
+    @Test
+    void allowsPrivateTargetsWhenBlockingIsDisabled() {
+        UrlValidator permissive = new UrlValidator(TestProperties.create(false, false));
+
+        assertThat(permissive.validate("http://127.0.0.1:8080/")).hasHost("127.0.0.1");
+        assertThat(permissive.validate("http://localhost/")).hasHost("localhost");
+        assertThatThrownBy(() -> permissive.validate("ftp://127.0.0.1/"))
+                .isInstanceOf(UrlRejectedException.class);
+        assertThatThrownBy(() -> permissive.validate("http://user:pw@localhost/"))
+                .isInstanceOf(UrlRejectedException.class);
+    }
+}

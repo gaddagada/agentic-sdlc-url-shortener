@@ -1,0 +1,51 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: url-shortener
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:h2:file:./data/url-shortener;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      # Instants are stored in TIMESTAMP columns as UTC wall-clock time (portable H2/PostgreSQL schema).
+      hibernate.type.preferred_instant_jdbc_type: TIMESTAMP
+      hibernate.jdbc.time_zone: UTC
+  mvc:
+    problemdetails:
+      enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+  # Responses are documented explicitly per operation; do not add the advice's handlers to every operation.
+  override-with-generic-response: false
+
+shortener:
+  base-url: http://localhost:8080
+  code-length: 7
+  max-ttl: 365d
+  block-private-targets: true
+  trust-forwarded-headers: false
+  rate-limit:
+    enabled: true
+    capacity: 20
+    refill-per-minute: 20
+  analytics:
+    ip-salt: change-me-in-production

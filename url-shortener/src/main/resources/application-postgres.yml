@@ -1,0 +1,7 @@
+# PostgreSQL profile: SPRING_PROFILES_ACTIVE=postgres (start the database with `docker compose up -d postgres`).
+# Credentials come from the environment; the password has no default on purpose.
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/shortener
+    username: ${SHORTENER_DB_USER}
+    password: ${SHORTENER_DB_PASSWORD}

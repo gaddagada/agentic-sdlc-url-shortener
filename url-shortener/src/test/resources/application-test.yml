@@ -1,0 +1,11 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:shortener-test;DB_CLOSE_DELAY=-1
+
+shortener:
+  base-url: https://sho.rt
+  rate-limit:
+    capacity: 2
+    refill-per-minute: 1
+  analytics:
+    ip-salt: test-salt
