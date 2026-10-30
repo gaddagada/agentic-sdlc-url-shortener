@@ -251,9 +251,9 @@ class AnthropicLlmClientTest {
         LlmProperties defaults = new Binder(new MapConfigurationPropertySource(Map.of()))
                 .bindOrCreate("sdlc.llm", LlmProperties.class);
 
-        assertThat(defaults.anthropic().maxOutputTokens()).isEqualTo(32000);
-        assertThat(defaults.anthropic().timeout()).isEqualTo(Duration.ofSeconds(300));
-        assertThat(client(defaults.anthropic(), params -> null).maxOutputTokens()).isEqualTo(32000);
+        assertThat(defaults.anthropic().maxOutputTokens()).isEqualTo(64000);
+        assertThat(defaults.anthropic().timeout()).isEqualTo(Duration.ofSeconds(900));
+        assertThat(client(defaults.anthropic(), params -> null).maxOutputTokens()).isEqualTo(64000);
     }
 
     @ParameterizedTest(name = "{0} -> retryable={1}")

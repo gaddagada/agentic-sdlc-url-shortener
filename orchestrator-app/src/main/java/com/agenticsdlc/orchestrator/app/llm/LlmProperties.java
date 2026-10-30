@@ -30,15 +30,17 @@ public record LlmProperties(
      * @param enabled whether the provider is registered
      * @param model model id
      * @param apiKey API key (usually {@code ${ANTHROPIC_API_KEY:}}); blank makes the provider unavailable
-     * @param maxOutputTokens maximum output tokens per request (default 32000; responses are streamed)
-     * @param timeout request timeout of one streamed call (default 300 s)
+     * @param maxOutputTokens maximum output tokens per request (default 64000; responses are streamed, so a long
+     *                        change set does not hit HTTP read timeouts)
+     * @param timeout request timeout of one streamed call (default 900 s; stage timeouts are scaled by
+     *                {@code sdlc.engine.llm-timeout-scale} to stay above it)
      */
     public record Anthropic(
             @DefaultValue("true") boolean enabled,
             @DefaultValue("claude-opus-5-5") @NotBlank String model,
             @DefaultValue("") String apiKey,
-            @DefaultValue("32000") @Min(256) @Max(64000) int maxOutputTokens,
-            @DefaultValue("300s") @NotNull Duration timeout) {
+            @DefaultValue("64000") @Min(256) @Max(128000) int maxOutputTokens,
+            @DefaultValue("900s") @NotNull Duration timeout) {
 
         /**
          * Returns whether an API key is configured.

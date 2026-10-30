@@ -91,7 +91,10 @@ public final class PromptTemplates {
                     + "never repeat unchanged code. Use operation CREATE with contentKind FULL only for new files "
                     + "that do not exist yet; never CREATE an existing file. Add tests with real assertions for every "
                     + "production change and a new Flyway migration for every data model change. buildCommand is "
-                    + "informational: the engine always runs its own fixed build.";
+                    + "informational: the engine always runs its own fixed build. When verification feedback is "
+                    + "present, return the complete corrected change set (same compact rules, every feedback item "
+                    + "addressed) rather than a partial delta, and keep it well under the output limit: prefer "
+                    + "fewer, essential files over exhaustive boilerplate.";
             case TEST_DESIGN -> "Test case ids are TC-n; every requirement id appears in the coverage matrix or in "
                     + "risksNotCovered. coverageMatrix values must be comma-separated test case ids only, for "
                     + "example \"TC-1, TC-4\": no prose, notes or parentheses (explanations belong in the test "

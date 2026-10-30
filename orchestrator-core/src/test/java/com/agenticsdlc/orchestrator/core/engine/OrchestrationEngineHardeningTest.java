@@ -6,9 +6,17 @@ import static org.assertj.core.api.Assertions.assertThat;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import com.agenticsdlc.orchestrator.core.agent.AgentRegistry;
 import com.agenticsdlc.orchestrator.core.agent.AgentRole;
+import com.agenticsdlc.orchestrator.core.agent.StageAgent;
+import com.agenticsdlc.orchestrator.core.agent.StageContext;
+import com.agenticsdlc.orchestrator.core.agent.StageFailure;
 import com.agenticsdlc.orchestrator.core.agent.StageResult;
 import com.agenticsdlc.orchestrator.core.artifact.ArtifactKind;
+import com.agenticsdlc.orchestrator.core.artifact.ChangeSet;
 import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
 import com.agenticsdlc.orchestrator.core.audit.AuditEventType;
 import com.agenticsdlc.orchestrator.core.graph.WorkflowDefinitions;
@@ -72,5 +80,69 @@ class OrchestrationEngineHardeningTest {
         assertThat(created.type()).isEqualTo(AuditEventType.RUN_CREATED);
         assertThat(created.actor()).isEqualTo(ALICE);
         assertThat(created.data()).containsEntry("requestedBy", "alice");
+    }
+
+    @Test
+    void skeletonChangePlansAreVerifiedStructurallyEvenWhenAnLlmProviderIsSelected() {
+        AtomicInteger llmVerifierCalls = new AtomicInteger();
+        StageAgent llmImplementer = new StageAgent() {
+            @Override
+            public AgentRole role() {
+                return AgentRole.IMPLEMENTATION;
+            }
+
+            @Override
+            public String id() {
+                return "fake-llm:impl";
+            }
+
+            @Override
+            public StageResult execute(StageContext context) {
+                return StageResult.success(skeletonPlan(), "fell back to a skeleton plan");
+            }
+        };
+        StageAgent llmVerifier = new StageAgent() {
+            @Override
+            public AgentRole role() {
+                return AgentRole.VERIFICATION;
+            }
+
+            @Override
+            public String id() {
+                return "fake-llm:verifier";
+            }
+
+            @Override
+            public StageResult execute(StageContext context) throws Exception {
+                llmVerifierCalls.incrementAndGet();
+                throw StageFailure.fatal("an LLM verifier must not review a skeleton plan");
+            }
+        };
+        harness.provider("fake-llm", llmImplementer, llmVerifier);
+        OrchestrationEngine engine = harness.start();
+        String id = engine.start(REQUIREMENT, "skeleton-verify",
+                RunOptions.defaults().withAutonomy(AutonomyLevel.FULL_AUTO).withProvider("fake-llm")).id();
+
+        Run atRelease = harness.awaitApproval(id, WorkflowDefinitions.RELEASE_READINESS);
+        assertThat(llmVerifierCalls.get()).as("the LLM verifier is bypassed for skeleton plans").isZero();
+        assertThat(atRelease.stage(WorkflowDefinitions.VERIFY).activeAgent()).isEqualTo(AgentRegistry.DETERMINISTIC);
+        assertThat(harness.events(id)).anySatisfy(e -> {
+            assertThat(e.type()).isEqualTo(AuditEventType.STAGE_STARTED);
+            assertThat(e.stageId()).isEqualTo(WorkflowDefinitions.VERIFY);
+            assertThat(String.valueOf(e.data().get("agentSelection"))).contains("structural verification");
+        });
+    }
+
+    private static ChangeSet skeletonPlan() {
+        return new ChangeSet("HEAD", List.of(
+                new ChangeSet.FileChange("url-shortener/src/main/java/com/agenticsdlc/shortener/api/BulkLinkController.java",
+                        ChangeSet.Operation.CREATE, "java", "bulk endpoint skeleton", ChangeSet.ContentKind.SKELETON,
+                        "public class BulkLinkController { /* TODO implement */ }", List.of("T1")),
+                new ChangeSet.FileChange("url-shortener/src/test/java/com/agenticsdlc/shortener/api/BulkLinkControllerTest.java",
+                        ChangeSet.Operation.CREATE, "java", "bulk endpoint test skeleton", ChangeSet.ContentKind.SKELETON,
+                        "class BulkLinkControllerTest { void t() { org.junit.jupiter.api.Assertions.fail(\"TODO\"); } }",
+                        List.of("T1"))),
+                "./mvnw -B -ntp -q verify", List.of("skeleton implementation; not compilable/complete"),
+                "Revert the commit", List.of("T1"));
     }
 }

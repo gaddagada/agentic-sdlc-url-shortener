@@ -33,6 +33,7 @@ import com.agenticsdlc.orchestrator.core.agent.StageFailure;
 import com.agenticsdlc.orchestrator.core.agent.StageResult;
 import com.agenticsdlc.orchestrator.core.artifact.Artifact;
 import com.agenticsdlc.orchestrator.core.artifact.ArtifactPayload;
+import com.agenticsdlc.orchestrator.core.artifact.ChangeSet;
 import com.agenticsdlc.orchestrator.core.artifact.InvalidArtifactException;
 import com.agenticsdlc.orchestrator.core.artifact.Provenance;
 import com.agenticsdlc.orchestrator.core.artifact.ReleaseReadiness;
@@ -880,8 +881,17 @@ public final class OrchestrationEngine implements AutoCloseable {
             return;
         }
         StageAgent agent;
+        String agentSelection = "provider agent";
         if (AgentRegistry.FALLBACK_AGENT_ID.equals(exec.activeAgent())) {
             agent = agents.deterministic(def.role());
+            agentSelection = "deterministic fallback after the primary agent was exhausted";
+        } else if (def.role() == AgentRole.VERIFICATION && skeletonChangeSet(run)) {
+            // A skeleton change plan (produced by the deterministic implementation agent, for example after a
+            // fallback) cannot be meaningfully reviewed by an LLM verifier: it would reject the plan on every
+            // feedback loop. Skeleton plans are verified structurally by the deterministic verifier instead.
+            agent = agents.deterministic(def.role());
+            exec.setActiveAgent(agent.id());
+            agentSelection = "structural verification: the change set under review is a skeleton plan";
         } else {
             agent = agents.agentFor(def.role(), run.options().providerId());
             exec.setActiveAgent(agent.id());
@@ -905,8 +915,8 @@ public final class OrchestrationEngine implements AutoCloseable {
         tx.audit(AuditEventType.STAGE_STARTED, def.id(), Actor.agent(agentId), "attempt " + exec.attempts() + " of "
                         + def.id() + " started with " + agentId,
                 RunMutation.data("attempt", exec.attempts(), "maxAttempts", def.retryPolicy().maxAttempts(), "agent",
-                        agentId, "planVersion", run.planVersion(), "derivedFrom", context.derivedFrom(),
-                        "timeoutMs", timeout.toMillis()));
+                        agentId, "agentSelection", agentSelection, "planVersion", run.planVersion(), "derivedFrom",
+                        context.derivedFrom(), "timeoutMs", timeout.toMillis()));
         String runId = run.id();
         String stageId = def.id();
         StageAgent chosen = agent;
@@ -921,6 +931,16 @@ public final class OrchestrationEngine implements AutoCloseable {
     }
 
     /** Runs off the lock on a virtual thread; re-enters the lock to apply the outcome. */
+    /**
+     * Whether the accepted change set under review is a skeleton plan (at least one change with
+     * {@link ChangeSet.ContentKind#SKELETON} content).
+     */
+    private static boolean skeletonChangeSet(Run run) {
+        return run.acceptedPayload(ChangeSet.class)
+                .map(cs -> cs.changes().stream().anyMatch(c -> c.contentKind() == ChangeSet.ContentKind.SKELETON))
+                .orElse(false);
+    }
+
     private void runAttempt(String runId, String stageId, long token, StageAgent agent, String agentId,
                             StageContext context, Duration timeout) {
         StageExecutor.AttemptOutcome outcome = stageExecutor.execute(agent, context, timeout);

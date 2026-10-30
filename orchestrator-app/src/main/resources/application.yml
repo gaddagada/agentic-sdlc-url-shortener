@@ -73,8 +73,8 @@ sdlc:
       enabled: true
       model: claude-opus-5-5
       api-key: ${ANTHROPIC_API_KEY:}
-      max-output-tokens: 32000             # responses are streamed
-      timeout: 300s
+      max-output-tokens: 64000             # responses are streamed; a full change set needs this much
+      timeout: 900s                        # one streamed call; stage timeouts are x3 for LLM attempts
     ollama:
       enabled: true
       base-url: http://localhost:11434
