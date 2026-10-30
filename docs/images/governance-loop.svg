@@ -1,0 +1,176 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1100" height="560" viewBox="0 0 1100 560" font-family="Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" fill="#1f2328" role="img" aria-labelledby="title desc">
+  <title id="title">Controlled autonomy: the per-stage governance loop</title>
+  <desc id="desc">A requirement passes a policy screen (SEC and CMP rules) at run start; a DENY safe-stops the run. Each stage agent then executes within retries, timeout and budgets, its artifact is validated, and the exit gate applies policy and risk. ALLOW accepts the artifact directly; REQUIRE_APPROVAL waits for a human approval that records operator identity; the accepted artifact enters context with a hash and provenance (lineage), and the next stage starts. Side exits: retry with backoff, fallback to the deterministic agent, rollback (compensations plus checkpoint restore) followed by SAFE_STOP, and re-plan (downstream stages STALE, approvals revoked). Budgets: attempts per stage, 2 feedback loops, 3 re-plans, 40 agent calls, 200k LLM tokens, 2 hours active time.</desc>
+  <defs>
+    <style type="text/css"><![CDATA[
+      text { font-family: Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .h1 { font-size: 20px; font-weight: 700; }
+      .lead { font-size: 13px; fill: #57606a; }
+      .ct { font-size: 14px; font-weight: 600; }
+      .cd { font-size: 12px; fill: #57606a; }
+      .card { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.2; }
+      .num { font-size: 11px; font-weight: 700; fill: #ffffff; }
+      .lbl { font-size: 12px; font-weight: 600; }
+      .tag { font-size: 11px; font-weight: 700; letter-spacing: 0.03em; }
+      .mono { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; }
+      .tile { fill: #f6f8fa; stroke: #d0d7de; }
+      .tv { font-size: 14px; font-weight: 700; }
+    ]]></style>
+    <marker id="a-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#57606a"/></marker>
+    <marker id="a-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#cf222e"/></marker>
+    <marker id="a-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9a6700"/></marker>
+    <marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker>
+    <marker id="a-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8250df"/></marker>
+    <marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#1a7f37"/></marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1.5"/>
+      <feOffset dy="1" result="blur"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.12"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="0.5" y="0.5" width="1099" height="559" rx="16" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text class="h1" x="32" y="36">Controlled autonomy: the governance loop</text>
+  <text class="lead" x="32" y="58">Agents execute, humans approve. Every stage output is validated and policy-checked before it enters downstream context.</text>
+
+  <!-- ===== edges (drawn first, under cards) ===== -->
+  <!-- entry -->
+  <path d="M107,132 V176" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#a-grey)"/>
+  <path d="M182,220 H216" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#a-grey)"/>
+  <path d="M107,262 V316" fill="none" stroke="#cf222e" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#a-red)"/>
+  <text class="tag" x="115" y="294" fill="#cf222e">DENY</text>
+
+  <!-- main loop -->
+  <path d="M430,220 H458" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#a-grey)"/>
+  <path d="M640,220 H668" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#a-grey)"/>
+  <path d="M752,262 V316" fill="none" stroke="#8250df" stroke-width="1.6" marker-end="url(#a-purple)"/>
+  <text class="tag mono" x="760" y="294" fill="#8250df">REQUIRE_APPROVAL</text>
+  <path d="M676,262 C660,300 640,358 590,358" fill="none" stroke="#1a7f37" stroke-width="1.6"/>
+  <text class="tag" x="650" y="298" text-anchor="end" fill="#1a7f37">ALLOW</text>
+  <path d="M670,358 H432" fill="none" stroke="#1a7f37" stroke-width="1.6" marker-end="url(#a-green)"/>
+  <text class="lbl" x="660" y="377" text-anchor="end" fill="#1a7f37">approve</text>
+  <path d="M324,316 V264" fill="none" stroke="#0969da" stroke-width="1.6" marker-end="url(#a-blue)"/>
+  <text class="lbl" x="332" y="295" fill="#0969da">next stage</text>
+
+  <!-- retry + fallback self-loops on the agent step -->
+  <path d="M250,178 C250,140 286,140 286,176" fill="none" stroke="#9a6700" stroke-width="1.6" marker-end="url(#a-amber)"/>
+  <text class="lbl" x="242" y="158" text-anchor="end" fill="#9a6700">retry (backoff)</text>
+  <path d="M312,178 C312,128 360,128 360,176" fill="none" stroke="#0969da" stroke-width="1.6" marker-end="url(#a-blue)"/>
+  <text class="lbl" x="336" y="122" text-anchor="middle" fill="#0969da">fallback to deterministic</text>
+
+  <!-- failure exits -->
+  <path d="M430,198 H445 V96 H967 V176" fill="none" stroke="#cf222e" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#a-red)"/>
+  <text class="lbl" x="470" y="88" fill="#cf222e">attempts exhausted, no fallback</text>
+  <path d="M834,220 H864" fill="none" stroke="#cf222e" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#a-red)"/>
+  <text class="tag" x="849" y="209" text-anchor="middle" fill="#cf222e">DENY</text>
+  <path d="M967,262 V316" fill="none" stroke="#cf222e" stroke-width="1.6" marker-end="url(#a-red)"/>
+  <text class="lbl" x="975" y="294" fill="#cf222e">always</text>
+
+  <!-- re-plan -->
+  <path d="M752,398 V426" fill="none" stroke="#8250df" stroke-width="1.6" marker-end="url(#a-purple)"/>
+
+  <!-- ===== cards ===== -->
+  <g filter="url(#shadow)">
+    <rect class="card" x="32" y="82" width="150" height="50" rx="10"/>
+    <rect class="card" x="32" y="178" width="150" height="84" rx="10"/>
+    <rect x="32" y="318" width="150" height="80" rx="10" fill="#ffebe9" stroke="#cf222e" stroke-opacity="0.55" stroke-width="1.2"/>
+    <rect class="card" x="218" y="178" width="212" height="84" rx="10" stroke="#0969da" stroke-opacity="0.7"/>
+    <rect class="card" x="460" y="178" width="180" height="84" rx="10"/>
+    <rect class="card" x="670" y="178" width="164" height="84" rx="10"/>
+    <rect class="card" x="866" y="178" width="202" height="84" rx="10" stroke="#cf222e" stroke-opacity="0.7"/>
+    <rect x="866" y="318" width="202" height="80" rx="10" fill="#ffebe9" stroke="#cf222e" stroke-opacity="0.55" stroke-width="1.2"/>
+    <rect class="card" x="670" y="318" width="164" height="80" rx="10" stroke="#8250df" stroke-opacity="0.75"/>
+    <rect class="card" x="218" y="318" width="212" height="80" rx="10" stroke="#1a7f37" stroke-opacity="0.75"/>
+  </g>
+
+  <!-- 1 requirement -->
+  <text class="ct" x="46" y="103">Requirement</text>
+  <text class="cd" x="46" y="121">free text or scenario</text>
+  <circle cx="166" cy="82" r="10" fill="#57606a" stroke="#ffffff" stroke-width="2"/>
+  <text class="num" x="166" y="86" text-anchor="middle">1</text>
+
+  <!-- 2 policy screen -->
+  <text class="ct" x="46" y="208">Policy screen</text>
+  <text class="cd" x="46" y="230">SEC / CMP rules</text>
+  <text class="cd mono" x="46" y="248" font-size="11">at RUN_START</text>
+  <circle cx="166" cy="178" r="10" fill="#57606a" stroke="#ffffff" stroke-width="2"/>
+  <text class="num" x="166" y="182" text-anchor="middle">2</text>
+
+  <!-- policy denial terminal -->
+  <text class="ct" x="46" y="346" fill="#cf222e">SAFE_STOP</text>
+  <text class="cd mono" x="46" y="366" font-size="11">POLICY_DENIED</text>
+  <text class="cd" x="46" y="384">re-plan required</text>
+
+  <!-- 3 agent executes -->
+  <text class="ct" x="232" y="208">Stage agent executes</text>
+  <text class="cd" x="232" y="230">bounded by retries, timeout</text>
+  <text class="cd" x="232" y="248">and run budgets</text>
+  <circle cx="414" cy="178" r="10" fill="#0969da" stroke="#ffffff" stroke-width="2"/>
+  <text class="num" x="414" y="182" text-anchor="middle">3</text>
+
+  <!-- 4 artifact validation -->
+  <text class="ct" x="474" y="208">Artifact validation</text>
+  <text class="cd" x="474" y="230">typed invariants;</text>
+  <text class="cd" x="474" y="248">invalid output → retry</text>
+  <circle cx="624" cy="178" r="10" fill="#57606a" stroke="#ffffff" stroke-width="2"/>
+  <text class="num" x="624" y="182" text-anchor="middle">4</text>
+
+  <!-- 5 exit gate -->
+  <text class="ct" x="684" y="208">Exit gate</text>
+  <text class="cd" x="684" y="230">policy rules + risk</text>
+  <text class="cd" x="684" y="248">autonomy-aware</text>
+  <circle cx="818" cy="178" r="10" fill="#57606a" stroke="#ffffff" stroke-width="2"/>
+  <text class="num" x="818" y="182" text-anchor="middle">5</text>
+
+  <!-- 6 human approval -->
+  <text class="ct" x="684" y="346">Human approval</text>
+  <text class="cd" x="684" y="366">operator identity</text>
+  <text class="cd" x="684" y="384">and comment recorded</text>
+  <circle cx="818" cy="318" r="10" fill="#8250df" stroke="#ffffff" stroke-width="2"/>
+  <text class="num" x="818" y="322" text-anchor="middle">6</text>
+
+  <!-- 7 accepted into context -->
+  <text class="ct" x="232" y="346">Accepted into context</text>
+  <text class="cd" x="232" y="366">SHA-256 hash + provenance</text>
+  <text class="cd" x="232" y="384">= decision lineage</text>
+  <circle cx="414" cy="318" r="10" fill="#1a7f37" stroke="#ffffff" stroke-width="2"/>
+  <text class="num" x="414" y="322" text-anchor="middle">7</text>
+
+  <!-- rollback + safe stop -->
+  <text class="ct" x="880" y="208" fill="#cf222e">Rollback</text>
+  <text class="cd" x="880" y="230">compensations (reverse)</text>
+  <text class="cd" x="880" y="248">+ checkpoint restore</text>
+  <text class="ct" x="880" y="346" fill="#cf222e">SAFE_STOP</text>
+  <text class="cd" x="880" y="366">halts the run; a human</text>
+  <text class="cd" x="880" y="384">resumes or re-plans</text>
+
+  <!-- ===== budgets ===== -->
+  <rect class="card" x="32" y="428" width="608" height="112" rx="10"/>
+  <text class="ct" x="48" y="452">Budgets</text>
+  <text class="cd" x="624" y="452" text-anchor="end">engine-enforced per run; attempts are per stage</text>
+
+  <rect class="tile" x="48" y="464" width="184" height="28" rx="6"/>
+  <text class="tv" x="60" y="483">2–3</text><text class="cd" x="104" y="482">attempts per stage</text>
+  <rect class="tile" x="244" y="464" width="184" height="28" rx="6"/>
+  <text class="tv" x="256" y="483">2</text><text class="cd" x="300" y="482">feedback loops</text>
+  <rect class="tile" x="440" y="464" width="184" height="28" rx="6"/>
+  <text class="tv" x="452" y="483">3</text><text class="cd" x="496" y="482">re-plans</text>
+
+  <rect class="tile" x="48" y="500" width="184" height="28" rx="6"/>
+  <text class="tv" x="60" y="519">40</text><text class="cd" x="104" y="518">agent calls</text>
+  <rect class="tile" x="244" y="500" width="184" height="28" rx="6"/>
+  <text class="tv" x="256" y="519">200k</text><text class="cd" x="300" y="518">LLM tokens</text>
+  <rect class="tile" x="440" y="500" width="184" height="28" rx="6"/>
+  <text class="tv" x="452" y="519">2 h</text><text class="cd" x="496" y="518">active time</text>
+
+  <!-- ===== re-plan ===== -->
+  <rect class="card" x="670" y="428" width="398" height="112" rx="10" stroke="#8250df" stroke-opacity="0.75"/>
+  <text class="ct" x="686" y="452" fill="#8250df">Re-plan</text>
+  <text class="cd" x="1052" y="452" text-anchor="end">operator command</text>
+  <text class="cd" x="686" y="476">changed requirement → plan version + 1</text>
+  <text class="cd" x="686" y="496">downstream stages become STALE</text>
+  <text class="cd" x="686" y="516">their approvals are revoked; stale stages re-run</text>
+</svg>

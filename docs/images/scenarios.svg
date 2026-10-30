@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1200" height="390" viewBox="0 0 1200 390" font-family="Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" fill="#1f2328" role="img" aria-labelledby="title desc">
+  <title id="title">Required scenarios: greenfield, brownfield, ambiguous</title>
+  <desc id="desc">Three required scenarios with their decomposition, orchestration and validation. Greenfield builds a new URL shortener service; brownfield adds a bulk link creation API to the existing shortener using impact analysis over the real source tree; ambiguous ("Make the shortener faster and more reliable.") scores at least 0.5 for ambiguity, pauses at the clarification gate, and continues on the brownfield path. Four more executable scenarios: policy-denial, fault-retry, fault-fallback and replan.</desc>
+  <defs>
+    <style type="text/css"><![CDATA[
+      text { font-family: Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .h1 { font-size: 20px; font-weight: 700; }
+      .lead { font-size: 13px; fill: #57606a; }
+      .card { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.2; }
+      .pill { font-size: 11px; font-weight: 700; fill: #ffffff; letter-spacing: 0.07em; }
+      .meta { font-size: 12px; fill: #57606a; }
+      .quote { font-size: 13px; font-style: italic; font-weight: 600; }
+      .detail { font-size: 12px; fill: #57606a; }
+      .row { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+      .body { font-size: 12px; }
+      .mono { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; }
+      .chip { fill: #ffffff; stroke: #d0d7de; }
+      .chipk { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 12px; font-weight: 700; }
+      .chipt { font-size: 12px; fill: #57606a; }
+    ]]></style>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1.5"/>
+      <feOffset dy="1" result="blur"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.12"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="0.5" y="0.5" width="1199" height="389" rx="16" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text class="h1" x="32" y="36">Scenarios</text>
+  <text class="lead" x="32" y="58">The three required scenarios, each executable from the scenario catalog (<tspan class="mono" fill="#1f2328">POST /api/v1/scenarios/{key}/run</tspan>) with deterministic agents by default.</text>
+
+  <g filter="url(#shadow)">
+    <rect class="card" x="32" y="76" width="360" height="262" rx="12"/>
+    <rect class="card" x="420" y="76" width="360" height="262" rx="12"/>
+    <rect class="card" x="808" y="76" width="360" height="262" rx="12"/>
+  </g>
+  <path d="M33.5,88 A10.5,10.5 0 0 1 44,77.5 H380 A10.5,10.5 0 0 1 390.5,88" fill="none" stroke="#1a7f37" stroke-width="3" stroke-linecap="round"/>
+  <path d="M421.5,88 A10.5,10.5 0 0 1 432,77.5 H768 A10.5,10.5 0 0 1 778.5,88" fill="none" stroke="#0969da" stroke-width="3" stroke-linecap="round"/>
+  <path d="M809.5,88 A10.5,10.5 0 0 1 820,77.5 H1156 A10.5,10.5 0 0 1 1166.5,88" fill="none" stroke="#9a6700" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- ===== greenfield ===== -->
+  <rect x="50" y="94" width="104" height="22" rx="11" fill="#1a7f37"/>
+  <text class="pill" x="102" y="109" text-anchor="middle">GREENFIELD</text>
+  <text class="meta" x="374" y="109" text-anchor="end">GUIDED · no workspace</text>
+  <text class="quote" x="50" y="142">“Build a URL shortener service …”</text>
+  <text class="detail" x="50" y="160">302 redirects · analytics · p95 &lt; 50 ms at 500 rps</text>
+  <line x1="50" y1="172" x2="374" y2="172" stroke="#eaeef2"/>
+  <text class="row" x="50" y="192" fill="#1a7f37">DECOMPOSITION</text>
+  <text class="body" x="50" y="208">Classified GREENFIELD; FRs, NFRs and acceptance</text>
+  <text class="body" x="50" y="223">criteria; design → implement → test tasks per FR</text>
+  <text class="row" x="50" y="245" fill="#1a7f37">ORCHESTRATION</text>
+  <text class="body" x="50" y="261">No codebase: impact proposes a new module. Design</text>
+  <text class="body" x="50" y="276">approval (risk ≥ MEDIUM), release approval always</text>
+  <text class="row" x="50" y="298" fill="#1a7f37">VALIDATION</text>
+  <text class="body" x="50" y="314">Structural checks, traceability, STRIDE review;</text>
+  <text class="body" x="50" y="329">approvals recorded in the release change record</text>
+
+  <!-- ===== brownfield ===== -->
+  <rect x="438" y="94" width="108" height="22" rx="11" fill="#0969da"/>
+  <text class="pill" x="492" y="109" text-anchor="middle">BROWNFIELD</text>
+  <text class="meta" x="762" y="109" text-anchor="end">GUIDED · workspace REPO</text>
+  <text class="quote" x="438" y="142">“Add a bulk link creation API to the existing …”</text>
+  <text class="detail" x="438" y="160">≤ 100 URLs · per-item results · reuse validation</text>
+  <line x1="438" y1="172" x2="762" y2="172" stroke="#eaeef2"/>
+  <text class="row" x="438" y="192" fill="#0969da">DECOMPOSITION</text>
+  <text class="body" x="438" y="208">Classified BROWNFIELD; an impact-review</text>
+  <text class="body" x="438" y="223">ANALYSIS task is planned before design</text>
+  <text class="row" x="438" y="245" fill="#0969da">ORCHESTRATION</text>
+  <text class="body" x="438" y="261">Impact reads the indexed url-shortener source;</text>
+  <text class="body" x="438" y="276">design approval for <tspan class="mono">POST /api/v1/links/bulk</tspan></text>
+  <text class="row" x="438" y="298" fill="#0969da">VALIDATION</text>
+  <text class="body" x="438" y="314">LinkController / LinkService tests flagged as</text>
+  <text class="body" x="438" y="329">regression risks; release approval completes</text>
+
+  <!-- ===== ambiguous ===== -->
+  <rect x="826" y="94" width="104" height="22" rx="11" fill="#9a6700"/>
+  <text class="pill" x="878" y="109" text-anchor="middle">AMBIGUOUS</text>
+  <text class="meta" x="1150" y="109" text-anchor="end">GUIDED · workspace REPO</text>
+  <text class="quote" x="826" y="142">“Make the shortener faster and more reliable.”</text>
+  <text class="detail" x="826" y="160">vague qualifiers · no measurable target</text>
+  <line x1="826" y1="172" x2="1150" y2="172" stroke="#eaeef2"/>
+  <text class="row" x="826" y="192" fill="#9a6700">DECOMPOSITION</text>
+  <text class="body" x="826" y="208">Ambiguity score ≥ 0.5 → AMBIGUOUS; questions per</text>
+  <text class="body" x="826" y="223">finding; planning waits for the answers</text>
+  <text class="row" x="826" y="245" fill="#9a6700">ORCHESTRATION</text>
+  <text class="body" x="826" y="261">Clarification gate: the operator answers; intake</text>
+  <text class="body" x="826" y="276">re-runs with the answers merged into the statement</text>
+  <text class="row" x="826" y="298" fill="#9a6700">VALIDATION</text>
+  <text class="body" x="826" y="314">Normalized requirement → brownfield path;</text>
+  <text class="body" x="826" y="329">answers kept as authoritative assumptions</text>
+
+  <!-- footer: extra executable scenarios -->
+  <text class="row" x="32" y="366" fill="#57606a">ALSO EXECUTABLE</text>
+  <rect class="chip" x="158" y="350" width="248" height="24" rx="12"/>
+  <text x="172" y="366"><tspan class="chipk" fill="#cf222e">policy-denial</tspan><tspan class="chipt" dx="8">DENY → SAFE_STOP</tspan></text>
+  <rect class="chip" x="416" y="350" width="204" height="24" rx="12"/>
+  <text x="430" y="366"><tspan class="chipk" fill="#9a6700">fault-retry</tspan><tspan class="chipt" dx="8">retries recover</tspan></text>
+  <rect class="chip" x="630" y="350" width="262" height="24" rx="12"/>
+  <text x="644" y="366"><tspan class="chipk" fill="#0969da">fault-fallback</tspan><tspan class="chipt" dx="8">deterministic fallback</tspan></text>
+  <rect class="chip" x="902" y="350" width="226" height="24" rx="12"/>
+  <text x="916" y="366"><tspan class="chipk" fill="#8250df">replan</tspan><tspan class="chipt" dx="8">STALE, approvals revoked</tspan></text>
+</svg>

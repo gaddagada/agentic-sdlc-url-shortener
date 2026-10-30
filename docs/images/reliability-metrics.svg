@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1200" height="310" viewBox="0 0 1200 310" font-family="Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" fill="#1f2328" role="img" aria-labelledby="title desc">
+  <title id="title">Reliability metrics</title>
+  <desc id="desc">Six reliability metrics computed over all runs: success rate (completed divided by completed plus aborted), retry rate (retries divided by stage executions), rollback frequency (rollbacks divided by runs), MTTR (mean of recoveredAt minus firstFailureAt), end-to-end latency p50 and p95 versus active time (end-to-end minus human wait), and approval decision time (mean time from request to decision). The charts are decorative.</desc>
+  <defs>
+    <style type="text/css"><![CDATA[
+      text { font-family: Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .h1 { font-size: 20px; font-weight: 700; }
+      .lead { font-size: 13px; fill: #57606a; }
+      .tile { fill: #ffffff; stroke: #d0d7de; stroke-width: 1.2; }
+      .cat { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+      .name { font-size: 15px; font-weight: 700; }
+      .f { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 11.5px; }
+      .n { font-size: 11px; fill: #57606a; }
+      .axis { stroke: #d0d7de; stroke-width: 1; }
+    ]]></style>
+    <pattern id="wait" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="5" height="5" fill="#fbefff"/>
+      <line x1="0" y1="0" x2="0" y2="5" stroke="#8250df" stroke-width="2" stroke-opacity="0.55"/>
+    </pattern>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1.5"/>
+      <feOffset dy="1" result="blur"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.12"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="0.5" y="0.5" width="1199" height="309" rx="16" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text class="h1" x="32" y="36">Reliability metrics</text>
+  <text class="lead" x="32" y="58">Computed by MetricsCalculator over all runs, served at <tspan font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" fill="#1f2328">GET /api/v1/metrics/reliability</tspan> and shown in the console's Metrics tab. Charts are illustrative.</text>
+
+  <g filter="url(#shadow)">
+    <rect class="tile" x="32" y="78" width="176" height="212" rx="12"/>
+    <rect class="tile" x="224" y="78" width="176" height="212" rx="12"/>
+    <rect class="tile" x="416" y="78" width="176" height="212" rx="12"/>
+    <rect class="tile" x="608" y="78" width="176" height="212" rx="12"/>
+    <rect class="tile" x="800" y="78" width="176" height="212" rx="12"/>
+    <rect class="tile" x="992" y="78" width="176" height="212" rx="12"/>
+  </g>
+  <!-- accent bars -->
+  <path d="M33.5,90 A10.5,10.5 0 0 1 44,79.5 H196 A10.5,10.5 0 0 1 206.5,90" fill="none" stroke="#1a7f37" stroke-width="3" stroke-linecap="round"/>
+  <path d="M225.5,90 A10.5,10.5 0 0 1 236,79.5 H388 A10.5,10.5 0 0 1 398.5,90" fill="none" stroke="#9a6700" stroke-width="3" stroke-linecap="round"/>
+  <path d="M417.5,90 A10.5,10.5 0 0 1 428,79.5 H580 A10.5,10.5 0 0 1 590.5,90" fill="none" stroke="#cf222e" stroke-width="3" stroke-linecap="round"/>
+  <path d="M609.5,90 A10.5,10.5 0 0 1 620,79.5 H772 A10.5,10.5 0 0 1 782.5,90" fill="none" stroke="#0969da" stroke-width="3" stroke-linecap="round"/>
+  <path d="M801.5,90 A10.5,10.5 0 0 1 812,79.5 H964 A10.5,10.5 0 0 1 974.5,90" fill="none" stroke="#0969da" stroke-width="3" stroke-linecap="round"/>
+  <path d="M993.5,90 A10.5,10.5 0 0 1 1004,79.5 H1156 A10.5,10.5 0 0 1 1166.5,90" fill="none" stroke="#8250df" stroke-width="3" stroke-linecap="round"/>
+
+  <!-- 1 success rate -->
+  <text class="cat" x="46" y="104" fill="#1a7f37">RUNS</text>
+  <text class="name" x="46" y="126">Success rate</text>
+  <path d="M74,198 A46,46 0 0 1 166,198" fill="none" stroke="#eaeef2" stroke-width="10" stroke-linecap="round"/>
+  <path d="M74,198 A46,46 0 0 1 152.5,165.5" fill="none" stroke="#1a7f37" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="120" cy="198" r="4" fill="#1a7f37"/>
+  <text class="f" x="46" y="228">completed ÷</text>
+  <text class="f" x="46" y="244">(completed + aborted)</text>
+  <text class="n" x="46" y="270">0 when no terminal runs</text>
+
+  <!-- 2 retry rate -->
+  <text class="cat" x="238" y="104" fill="#9a6700">STAGES</text>
+  <text class="name" x="238" y="126">Retry rate</text>
+  <line class="axis" x1="238" y1="199" x2="386" y2="199"/>
+  <g fill="#9a6700">
+    <rect x="243" y="184" width="12" height="14" rx="2" fill-opacity="0.35"/>
+    <rect x="261" y="176" width="12" height="22" rx="2" fill-opacity="0.35"/>
+    <rect x="279" y="188" width="12" height="10" rx="2" fill-opacity="0.35"/>
+    <rect x="297" y="168" width="12" height="30" rx="2" fill-opacity="0.35"/>
+    <rect x="315" y="180" width="12" height="18" rx="2" fill-opacity="0.35"/>
+    <rect x="333" y="186" width="12" height="12" rx="2" fill-opacity="0.35"/>
+    <rect x="351" y="172" width="12" height="26" rx="2" fill-opacity="0.35"/>
+    <rect x="369" y="182" width="12" height="16" rx="2"/>
+  </g>
+  <text class="f" x="238" y="228">retries ÷</text>
+  <text class="f" x="238" y="244">stage executions</text>
+  <text class="n" x="238" y="270">executions = attempts</text>
+
+  <!-- 3 rollback frequency -->
+  <text class="cat" x="430" y="104" fill="#cf222e">RUNS</text>
+  <text class="name" x="430" y="126">Rollback frequency</text>
+  <line class="axis" x1="430" y1="199" x2="578" y2="199"/>
+  <polyline points="432,192 452,190 472,192 492,172 512,191 532,190 552,160 576,188" fill="none" stroke="#cf222e" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="552" cy="160" r="3.5" fill="#cf222e"/>
+  <circle cx="492" cy="172" r="3" fill="#ffffff" stroke="#cf222e" stroke-width="1.5"/>
+  <text class="f" x="430" y="228">rollbacks ÷</text>
+  <text class="f" x="430" y="244">total runs</text>
+  <text class="n" x="430" y="270">each ends in a safe-stop</text>
+
+  <!-- 4 MTTR -->
+  <text class="cat" x="622" y="104" fill="#0969da">RECOVERY</text>
+  <text class="name" x="622" y="126">MTTR</text>
+  <path d="M632,156 V150 H760 V156" fill="none" stroke="#0969da" stroke-width="1.2"/>
+  <line x1="632" y1="176" x2="760" y2="176" stroke="#d0d7de" stroke-width="3" stroke-linecap="round"/>
+  <line x1="632" y1="176" x2="760" y2="176" stroke="#0969da" stroke-width="3" stroke-linecap="round" stroke-dasharray="1 7"/>
+  <circle cx="676" cy="176" r="4" fill="#9a6700"/>
+  <circle cx="716" cy="176" r="4" fill="#9a6700"/>
+  <circle cx="632" cy="176" r="6" fill="#cf222e"/>
+  <circle cx="760" cy="176" r="6" fill="#1a7f37"/>
+  <text class="n" x="622" y="198">first failure</text>
+  <text class="n" x="770" y="198" text-anchor="end">recovered</text>
+  <text class="f" x="622" y="228">mean(recoveredAt</text>
+  <text class="f" x="622" y="244">  − firstFailureAt)</text>
+  <text class="n" x="622" y="270">recovery via retry or fallback</text>
+
+  <!-- 5 latency -->
+  <text class="cat" x="814" y="104" fill="#0969da">LATENCY</text>
+  <text class="name" x="814" y="126">End-to-end vs active</text>
+  <text class="n" x="814" y="148">end-to-end</text>
+  <rect x="814" y="153" width="54" height="11" rx="2" fill="#0969da"/>
+  <rect x="868" y="153" width="40" height="11" fill="url(#wait)"/>
+  <rect x="908" y="153" width="54" height="11" rx="2" fill="#0969da"/>
+  <text class="n" x="814" y="182">active</text>
+  <text class="n" x="962" y="182" text-anchor="end" fill="#8250df">human wait</text>
+  <rect x="814" y="187" width="108" height="11" rx="2" fill="#0969da" fill-opacity="0.75"/>
+  <text class="f" x="814" y="228">p50 / p95 of</text>
+  <text class="f" x="814" y="244">endedAt − startedAt</text>
+  <text class="n" x="814" y="270">active = minus human wait</text>
+
+  <!-- 6 approval decision time -->
+  <text class="cat" x="1006" y="104" fill="#8250df">APPROVALS</text>
+  <text class="name" x="1006" y="126">Decision time</text>
+  <line x1="1018" y1="176" x2="1142" y2="176" stroke="#8250df" stroke-width="2" stroke-dasharray="4 4"/>
+  <circle cx="1018" cy="176" r="6" fill="#ffffff" stroke="#8250df" stroke-width="2"/>
+  <circle cx="1142" cy="176" r="6" fill="#8250df"/>
+  <circle cx="1080" cy="160" r="11" fill="#ffffff" stroke="#8250df" stroke-width="1.6"/>
+  <path d="M1080,153 V160 L1085,163" fill="none" stroke="#8250df" stroke-width="1.6" stroke-linecap="round"/>
+  <text class="n" x="1006" y="198">requested</text>
+  <text class="n" x="1154" y="198" text-anchor="end">decided</text>
+  <text class="f" x="1006" y="228">mean time from</text>
+  <text class="f" x="1006" y="244">request to decision</text>
+  <text class="n" x="1006" y="270">approve or reject</text>
+</svg>

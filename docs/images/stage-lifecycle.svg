@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1100" height="500" viewBox="0 0 1100 500" font-family="Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" fill="#1f2328" role="img" aria-labelledby="title desc">
+  <title id="title">Stage state machine</title>
+  <desc id="desc">States PENDING, RUNNING, RETRY_SCHEDULED, AWAITING_APPROVAL (entry and exit), AWAITING_CLARIFICATION, SUCCEEDED, FAILED, STALE and CANCELLED. PENDING or STALE moves to RUNNING when dependencies have SUCCEEDED and the entry gate allows; an entry gate requiring approval moves PENDING to AWAITING_APPROVAL until approved. RUNNING moves to SUCCEEDED on agent success with exit gate ALLOW, or to AWAITING_APPROVAL (exit) when approval is required; approve leads to SUCCEEDED, reject REWORK back to RUNNING, reject ABORT to CANCELLED. RUNNING moves to AWAITING_CLARIFICATION when intake needs clarification and back on clarify; to RETRY_SCHEDULED on a retryable failure with attempts left and back when backoff elapses; stays RUNNING with the deterministic fallback agent when attempts are exhausted and fallback is available; otherwise moves to FAILED, which triggers rollback and a run safe-stop. SUCCEEDED becomes STALE when upstream changes.</desc>
+  <defs>
+    <style type="text/css"><![CDATA[
+      text { font-family: Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .h1 { font-size: 20px; font-weight: 700; }
+      .lead { font-size: 13px; fill: #57606a; }
+      .st { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 13px; font-weight: 700; }
+      .mono { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 11px; }
+      .t { font-size: 12px; }
+      .tb { font-size: 12px; font-weight: 600; }
+      .q { font-size: 11px; fill: #57606a; font-weight: 600; letter-spacing: 0.03em; }
+      .e { fill: none; stroke-width: 1.6; }
+    ]]></style>
+    <marker id="m-grey" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#57606a"/></marker>
+    <marker id="m-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8250df"/></marker>
+    <marker id="m-red" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#cf222e"/></marker>
+    <marker id="m-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#9a6700"/></marker>
+    <marker id="m-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#0969da"/></marker>
+    <pattern id="hatch" width="7" height="7" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+      <rect width="7" height="7" fill="#f6f8fa"/>
+      <line x1="0" y1="0" x2="0" y2="7" stroke="#d0d7de" stroke-width="3"/>
+    </pattern>
+    <filter id="shadow" x="-10%" y="-20%" width="120%" height="160%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1.5"/>
+      <feOffset dy="1" result="blur"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.12"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="0.5" y="0.5" width="1099" height="499" rx="16" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text class="h1" x="32" y="36">Stage state machine</text>
+  <text class="lead" x="32" y="58">Each of the ten stages moves through these states. Every transition is written to the append-only audit log.</text>
+
+  <!-- legend -->
+  <line x1="742" y1="31" x2="770" y2="31" stroke="#57606a" stroke-width="1.6"/>
+  <text class="t" x="776" y="35" fill="#57606a">engine event</text>
+  <line x1="866" y1="31" x2="894" y2="31" stroke="#8250df" stroke-width="1.6"/>
+  <text class="t" x="900" y="35" fill="#8250df">human command</text>
+  <line x1="742" y1="51" x2="770" y2="51" stroke="#cf222e" stroke-width="1.6"/>
+  <text class="t" x="776" y="55" fill="#cf222e">failure path</text>
+  <line x1="866" y1="51" x2="894" y2="51" stroke="#57606a" stroke-width="1.6" stroke-dasharray="5 4"/>
+  <text class="t" x="900" y="55" fill="#57606a">invalidation</text>
+
+  <!-- ===== edges ===== -->
+  <!-- PENDING / STALE -> RUNNING -->
+  <path class="e" d="M156,272 H436" stroke="#57606a" marker-end="url(#m-grey)"/>
+  <path class="e" d="M151,412 H163 Q175,412 175,400 V273" stroke="#57606a"/>
+  <circle cx="175" cy="272" r="3.5" fill="#57606a"/>
+  <text class="t" x="290" y="264" text-anchor="middle">deps SUCCEEDED + entry gate ALLOW</text>
+  <text class="t" x="167" y="340" text-anchor="end" fill="#57606a">re-runs as a</text>
+  <text class="t" x="167" y="354" text-anchor="end" fill="#57606a">new version</text>
+
+  <!-- PENDING -> AWAITING_APPROVAL (entry) -> RUNNING -->
+  <path class="e" d="M96,252 V146 Q96,132 110,132 H210" stroke="#57606a" marker-end="url(#m-grey)"/>
+  <text class="tb" x="104" y="110" fill="#57606a">entry gate</text>
+  <text class="mono" x="104" y="124" fill="#57606a">REQUIRE_APPROVAL</text>
+  <path class="e" d="M372,152 C372,226 396,258 436,258" stroke="#8250df" marker-end="url(#m-purple)"/>
+  <text class="tb" x="364" y="214" text-anchor="end" fill="#8250df">approve</text>
+
+  <!-- fallback self-loop -->
+  <path class="e" d="M478,248 C478,206 514,206 514,246" stroke="#0969da" marker-end="url(#m-blue)"/>
+  <text class="tb" x="496" y="178" text-anchor="middle" fill="#0969da">attempts exhausted + fallback</text>
+  <text class="mono" x="496" y="194" text-anchor="middle" fill="#0969da">agent → fallback:deterministic</text>
+
+  <!-- RUNNING <-> AWAITING_APPROVAL (exit) -->
+  <path class="e" d="M640,256 C680,256 705,200 722,155" stroke="#57606a" marker-end="url(#m-grey)"/>
+  <text class="tb" x="714" y="207" fill="#57606a">exit gate</text>
+  <text class="mono" x="714" y="221" fill="#57606a">REQUIRE_APPROVAL</text>
+  <path class="e" d="M700,154 C690,200 612,200 612,246" stroke="#8250df" marker-end="url(#m-purple)"/>
+  <text class="tb" x="622" y="216" text-anchor="end" fill="#8250df">reject REWORK</text>
+  <path class="e" d="M850,152 C860,210 930,220 958,250" stroke="#8250df" marker-end="url(#m-purple)"/>
+  <text class="tb" x="912" y="238" text-anchor="end" fill="#8250df">approve</text>
+  <path class="e" d="M866,132 H938" stroke="#8250df" marker-end="url(#m-purple)"/>
+  <text class="tb" x="902" y="124" text-anchor="middle" fill="#8250df">reject ABORT</text>
+
+  <!-- RUNNING -> SUCCEEDED -->
+  <path class="e" d="M640,272 H932" stroke="#57606a" marker-end="url(#m-grey)"/>
+  <text class="t" x="786" y="266" text-anchor="middle">agent success + exit gate ALLOW</text>
+
+  <!-- RUNNING -> FAILED -> rollback -->
+  <path class="e" d="M640,288 C700,288 760,330 776,390" stroke="#cf222e" marker-end="url(#m-red)"/>
+  <text class="tb" x="756" y="322" fill="#cf222e">attempts exhausted, no fallback</text>
+  <text class="tb" x="756" y="338" fill="#cf222e">or exit gate DENY (policy)</text>
+  <path class="e" d="M845,412 H874" stroke="#cf222e" marker-end="url(#m-red)"/>
+
+  <!-- RUNNING <-> RETRY_SCHEDULED -->
+  <path class="e" d="M590,296 V390" stroke="#9a6700" marker-end="url(#m-amber)"/>
+  <path class="e" d="M614,390 V298" stroke="#9a6700" marker-end="url(#m-amber)"/>
+  <text class="tb" x="582" y="334" text-anchor="end" fill="#9a6700">retryable failure,</text>
+  <text class="tb" x="582" y="348" text-anchor="end" fill="#9a6700">attempts left</text>
+  <text class="tb" x="622" y="342" fill="#9a6700">backoff elapsed</text>
+
+  <!-- RUNNING <-> AWAITING_CLARIFICATION -->
+  <path class="e" d="M458,296 L373,389" stroke="#57606a" marker-end="url(#m-grey)"/>
+  <path class="e" d="M396,390 L481,299" stroke="#8250df" marker-end="url(#m-purple)"/>
+  <text class="tb" x="417" y="326" text-anchor="end" fill="#57606a">intake needs</text>
+  <text class="tb" x="417" y="340" text-anchor="end" fill="#57606a">clarification</text>
+  <text class="tb" x="422" y="378" fill="#8250df">clarify</text>
+
+  <!-- SUCCEEDED -> STALE (invalidation) -->
+  <path class="e" d="M1064,280 H1072 Q1080,280 1080,290 V468 Q1080,478 1070,478 H106 Q96,478 96,468 V434" stroke="#57606a" stroke-dasharray="5 4" marker-end="url(#m-grey)"/>
+  <text class="t" x="588" y="469" text-anchor="middle" fill="#57606a">upstream changed (re-plan or rework): SUCCEEDED → STALE, approvals revoked</text>
+
+  <!-- ===== states ===== -->
+  <g filter="url(#shadow)">
+    <rect x="36" y="252" width="120" height="40" rx="20" fill="#eaeef2" stroke="#57606a" stroke-width="1.5"/>
+    <rect x="41" y="392" width="110" height="40" rx="20" fill="url(#hatch)" stroke="#57606a" stroke-width="1.5"/>
+    <rect x="212" y="112" width="176" height="40" rx="20" fill="#fbefff" stroke="#8250df" stroke-width="1.5"/>
+    <rect x="195" y="392" width="210" height="40" rx="20" fill="#fbefff" stroke="#8250df" stroke-width="1.5"/>
+    <rect x="438" y="248" width="202" height="48" rx="24" fill="#ddf4ff" stroke="#0969da" stroke-width="1.8"/>
+    <rect x="520" y="392" width="164" height="40" rx="20" fill="#fff8c5" stroke="#9a6700" stroke-width="1.5"/>
+    <rect x="690" y="112" width="176" height="40" rx="20" fill="#fbefff" stroke="#8250df" stroke-width="1.5"/>
+    <rect x="735" y="392" width="110" height="40" rx="20" fill="#ffebe9" stroke="#cf222e" stroke-width="1.5"/>
+    <rect x="940" y="112" width="124" height="40" rx="20" fill="#6e7781" stroke="#424a53" stroke-width="1.5"/>
+    <rect x="934" y="252" width="130" height="40" rx="20" fill="#dafbe1" stroke="#1a7f37" stroke-width="1.5"/>
+    <rect x="876" y="380" width="188" height="64" rx="10" fill="#ffffff" stroke="#cf222e" stroke-opacity="0.6" stroke-dasharray="4 3"/>
+  </g>
+
+  <text class="st" x="96" y="277" text-anchor="middle" fill="#424a53">PENDING</text>
+  <text class="st" x="96" y="417" text-anchor="middle" fill="#424a53">STALE</text>
+  <text class="q" x="300" y="104" text-anchor="middle">ENTRY APPROVAL</text>
+  <text class="st" x="300" y="137" text-anchor="middle" fill="#8250df">AWAITING_APPROVAL</text>
+  <text class="st" x="300" y="417" text-anchor="middle" fill="#8250df">AWAITING_CLARIFICATION</text>
+  <text class="st" x="539" y="277" text-anchor="middle" fill="#0969da" font-size="14">RUNNING</text>
+  <text class="st" x="602" y="417" text-anchor="middle" fill="#9a6700">RETRY_SCHEDULED</text>
+  <text class="q" x="778" y="104" text-anchor="middle">EXIT APPROVAL</text>
+  <text class="st" x="778" y="137" text-anchor="middle" fill="#8250df">AWAITING_APPROVAL</text>
+  <text class="st" x="790" y="417" text-anchor="middle" fill="#cf222e">FAILED</text>
+  <text class="st" x="1002" y="137" text-anchor="middle" fill="#ffffff">CANCELLED</text>
+  <text class="t" x="1002" y="176" text-anchor="middle" fill="#57606a">+ PENDING / STALE</text>
+  <text class="t" x="1002" y="190" text-anchor="middle" fill="#57606a">on run abort</text>
+  <text class="st" x="999" y="277" text-anchor="middle" fill="#1a7f37">SUCCEEDED</text>
+
+  <text class="tb" x="892" y="401" fill="#cf222e">rollback</text>
+  <text class="mono" x="892" y="417" fill="#cf222e">⇒ run SAFE_STOPPED</text>
+  <text class="t" x="892" y="434" fill="#57606a" font-size="11">resume: FAILED → PENDING</text>
+</svg>

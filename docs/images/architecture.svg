@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" version="1.1" width="1200" height="640" viewBox="0 0 1200 640" font-family="Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" fill="#1f2328" role="img" aria-labelledby="title desc">
+  <title id="title">System architecture: control plane and workload</title>
+  <desc id="desc">The orchestrator-app control plane on port 8090 (REST API, operator console, orchestrator-core engine, stage agents, H2/JPA persistence) reads the source tree of the url-shortener workload on port 8080 for codebase reasoning. A human operator uses the console for approvals, clarifications, re-plans and stop/resume.</desc>
+  <defs>
+    <style type="text/css"><![CDATA[
+      text { font-family: Inter, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+      .h1 { font-size: 20px; font-weight: 700; }
+      .lead { font-size: 13px; fill: #57606a; }
+      .pill { font-size: 11px; font-weight: 700; fill: #ffffff; letter-spacing: 0.06em; }
+      .ptitle { font-size: 16px; font-weight: 700; }
+      .note { font-size: 12px; fill: #57606a; }
+      .ct { font-size: 15px; font-weight: 600; }
+      .cd { font-size: 12px; fill: #57606a; }
+      .chip { font-size: 13px; }
+      .tag { font-size: 11px; font-weight: 600; }
+      .mono { font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace; font-size: 12px; }
+      .card { fill: #ffffff; stroke: #d0d7de; stroke-width: 1; }
+      .edge { fill: none; stroke: #57606a; stroke-width: 1.5; }
+    ]]></style>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8250df"/>
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#1a7f37"/>
+    </marker>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="1.5"/>
+      <feOffset dy="1" result="blur"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.10"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- canvas -->
+  <rect x="0.5" y="0.5" width="1199" height="639" rx="16" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text class="h1" x="32" y="46">System architecture</text>
+  <text class="lead" x="32" y="68">Two planes, one repository. The control plane governs the SDLC; the workload is an independently deployable service.</text>
+
+  <!-- operator -->
+  <g>
+    <rect x="24" y="144" width="152" height="232" rx="12" fill="#ffffff" stroke="#8250df" stroke-opacity="0.55" filter="url(#shadow)"/>
+    <circle cx="100" cy="184" r="14" fill="#8250df"/>
+    <path d="M74,230 C74,212 86,203 100,203 C114,203 126,212 126,230 Z" fill="#8250df"/>
+    <text class="ct" x="100" y="256" text-anchor="middle">Operator</text>
+    <text class="cd" x="100" y="278" text-anchor="middle">approvals,</text>
+    <text class="cd" x="100" y="294" text-anchor="middle">clarifications,</text>
+    <text class="cd" x="100" y="310" text-anchor="middle">re-plans,</text>
+    <text class="cd" x="100" y="326" text-anchor="middle">stop / resume</text>
+    <rect x="38" y="340" width="124" height="22" rx="6" fill="#fbefff" stroke="#8250df" stroke-opacity="0.4"/>
+    <text class="mono" x="100" y="355" text-anchor="middle" fill="#8250df">X-Operator-Id</text>
+  </g>
+
+  <!-- control plane -->
+  <rect x="208" y="92" width="968" height="332" rx="14" fill="#f1f8ff" stroke="#0969da" stroke-opacity="0.45" stroke-width="1.5"/>
+  <rect x="228" y="107" width="120" height="22" rx="11" fill="#0969da"/>
+  <text class="pill" x="288" y="122" text-anchor="middle">CONTROL PLANE</text>
+  <text class="ptitle" x="362" y="124">orchestrator-app <tspan class="mono" font-size="14" fill="#57606a">:8090</tspan></text>
+  <text class="note" x="1156" y="123" text-anchor="end">Spring Boot · virtual threads · per-run lock</text>
+
+  <!-- column A: console + REST -->
+  <rect class="card" x="232" y="144" width="200" height="118" rx="10" filter="url(#shadow)"/>
+  <rect x="248" y="160" width="22" height="16" rx="3" fill="none" stroke="#0969da" stroke-width="1.5"/>
+  <line x1="248" y1="165" x2="270" y2="165" stroke="#0969da" stroke-width="1.5"/>
+  <text class="ct" x="280" y="174">Operator console</text>
+  <text class="cd" x="248" y="202">Pending actions</text>
+  <text class="cd" x="248" y="220">Pipeline graph · audit</text>
+  <text class="cd" x="248" y="238">Lineage · metrics · policy</text>
+
+  <rect class="card" x="232" y="290" width="200" height="118" rx="10" filter="url(#shadow)"/>
+  <text class="ct" x="248" y="318">REST API <tspan class="mono" fill="#57606a">/api/v1</tspan></text>
+  <text class="cd" x="248" y="344">runs · artifacts · audit</text>
+  <text class="cd" x="248" y="362">lineage · metrics</text>
+  <text class="cd" x="248" y="380">approve · clarify · re-plan</text>
+
+  <line class="edge" x1="332" y1="263" x2="332" y2="288" marker-end="url(#arrow)"/>
+  <text class="note" x="340" y="280">polls</text>
+
+  <!-- column B: engine -->
+  <rect class="card" x="460" y="144" width="376" height="264" rx="10" stroke="#0969da" stroke-opacity="0.6" filter="url(#shadow)"/>
+  <text class="ct" x="476" y="172">orchestrator-core engine</text>
+  <text class="cd" x="476" y="192">framework-independent Java library (no Spring)</text>
+  <g>
+    <rect x="476" y="206" width="166" height="40" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="492" cy="226" r="4" fill="#0969da"/>
+    <text class="chip" x="504" y="231">Dependency graph</text>
+    <rect x="654" y="206" width="166" height="40" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="670" cy="226" r="4" fill="#0969da"/>
+    <text class="chip" x="682" y="231">Entry / exit gates</text>
+
+    <rect x="476" y="253" width="166" height="40" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="492" cy="273" r="4" fill="#0969da"/>
+    <text class="chip" x="504" y="278">Retries + fallback</text>
+    <rect x="654" y="253" width="166" height="40" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="670" cy="273" r="4" fill="#0969da"/>
+    <text class="chip" x="682" y="278">Rollback (saga)</text>
+
+    <rect x="476" y="300" width="166" height="40" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="492" cy="320" r="4" fill="#0969da"/>
+    <text class="chip" x="504" y="325">Re-planning</text>
+    <rect x="654" y="300" width="166" height="40" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="670" cy="320" r="4" fill="#0969da"/>
+    <text class="chip" x="682" y="325">Policy engine</text>
+
+    <rect x="476" y="347" width="166" height="40" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="492" cy="367" r="4" fill="#0969da"/>
+    <text class="chip" x="504" y="372">Audit log</text>
+    <rect x="654" y="347" width="166" height="40" rx="8" fill="#f6f8fa" stroke="#d0d7de"/>
+    <circle cx="670" cy="367" r="4" fill="#0969da"/>
+    <text class="chip" x="682" y="372">Reliability metrics</text>
+  </g>
+
+  <line class="edge" x1="433" y1="349" x2="458" y2="349" marker-end="url(#arrow)"/>
+
+  <!-- column C: agents + persistence -->
+  <rect class="card" x="864" y="144" width="288" height="152" rx="10" filter="url(#shadow)"/>
+  <text class="ct" x="880" y="172">Stage agents</text>
+  <text class="cd" x="880" y="190">same typed artifacts, same validation</text>
+  <rect x="880" y="202" width="256" height="26" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text class="chip" x="892" y="220" font-weight="600">Deterministic</text>
+  <text class="tag" x="1126" y="219" text-anchor="end" fill="#0969da">default · fallback</text>
+  <rect x="880" y="233" width="256" height="26" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text class="chip" x="892" y="251" font-weight="600">Anthropic Claude</text>
+  <text class="tag" x="1126" y="250" text-anchor="end" fill="#57606a">optional</text>
+  <rect x="880" y="264" width="256" height="26" rx="6" fill="#f6f8fa" stroke="#d0d7de"/>
+  <text class="chip" x="892" y="282" font-weight="600">Ollama</text>
+  <text class="tag" x="1126" y="281" text-anchor="end" fill="#57606a">optional</text>
+
+  <rect class="card" x="864" y="314" width="288" height="94" rx="10" filter="url(#shadow)"/>
+  <text class="ct" x="880" y="340">Persistence <tspan class="cd">H2 / JPA</tspan></text>
+  <text class="cd" x="880" y="359">run snapshot + append-only audit</text>
+  <rect x="880" y="372" width="48" height="24" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-opacity="0.35"/>
+  <text class="mono" x="904" y="388" text-anchor="middle" fill="#0969da">runs</text>
+  <rect x="936" y="372" width="106" height="24" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-opacity="0.35"/>
+  <text class="mono" x="989" y="388" text-anchor="middle" fill="#0969da">audit_events</text>
+  <rect x="1050" y="372" width="86" height="24" rx="6" fill="#ddf4ff" stroke="#0969da" stroke-opacity="0.35"/>
+  <text class="mono" x="1093" y="388" text-anchor="middle" fill="#0969da">artifacts</text>
+
+  <line class="edge" x1="837" y1="226" x2="862" y2="226" marker-end="url(#arrow)"/>
+  <line class="edge" x1="837" y1="361" x2="862" y2="361" marker-end="url(#arrow)"/>
+
+  <!-- operator -> console -->
+  <line x1="177" y1="203" x2="230" y2="203" stroke="#8250df" stroke-width="1.75" marker-end="url(#arrow-purple)"/>
+
+  <!-- control plane -> workload (codebase reasoning) -->
+  <line x1="648" y1="409" x2="648" y2="482" stroke="#1a7f37" stroke-width="1.75" stroke-dasharray="6 4" marker-end="url(#arrow-green)"/>
+  <text x="662" y="450" font-size="13" font-weight="600">reads source tree (codebase reasoning)</text>
+  <text class="note" x="662" y="467">CodebaseIndexer indexes the module from disk (<tspan class="mono">sdlc.workspace.root</tspan>)</text>
+
+  <!-- workload -->
+  <rect x="208" y="484" width="968" height="132" rx="14" fill="#f0fbf3" stroke="#1a7f37" stroke-opacity="0.45" stroke-width="1.5"/>
+  <rect x="228" y="499" width="96" height="22" rx="11" fill="#1a7f37"/>
+  <text class="pill" x="276" y="514" text-anchor="middle">WORKLOAD</text>
+  <text class="ptitle" x="338" y="516">url-shortener <tspan class="mono" font-size="14" fill="#57606a">:8080</tspan></text>
+  <text class="note" x="1156" y="515" text-anchor="end">Spring Boot · no dependency on the orchestrator</text>
+
+  <rect class="card" x="232" y="534" width="172" height="66" rx="10" filter="url(#shadow)"/>
+  <text x="248" y="560" font-size="14" font-weight="600">Links API</text>
+  <text class="mono" x="248" y="584" fill="#57606a">/api/v1/links</text>
+
+  <rect class="card" x="419" y="534" width="172" height="66" rx="10" filter="url(#shadow)"/>
+  <text x="435" y="560" font-size="14" font-weight="600">Redirect</text>
+  <text class="mono" x="435" y="584" fill="#57606a">GET /{code} → 302</text>
+
+  <rect class="card" x="606" y="534" width="172" height="66" rx="10" filter="url(#shadow)"/>
+  <text x="622" y="560" font-size="14" font-weight="600">Click analytics</text>
+  <text class="cd" x="622" y="584">async · salted IP hash</text>
+
+  <rect class="card" x="793" y="534" width="172" height="66" rx="10" filter="url(#shadow)"/>
+  <text x="809" y="560" font-size="14" font-weight="600">H2 or PostgreSQL</text>
+  <text class="cd" x="809" y="584">Flyway migrations</text>
+
+  <rect class="card" x="980" y="534" width="172" height="66" rx="10" filter="url(#shadow)"/>
+  <text x="996" y="560" font-size="14" font-weight="600">Actuator</text>
+  <text class="cd" x="996" y="584">health · info · metrics</text>
+</svg>
