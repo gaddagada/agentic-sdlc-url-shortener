@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.agenticsdlc.orchestrator.core.engine.InvalidCommandException;
 import com.agenticsdlc.orchestrator.core.engine.InvalidRunStateException;
 import com.agenticsdlc.orchestrator.core.engine.OrchestrationEngine;
+import com.agenticsdlc.orchestrator.core.engine.ProviderCircuit;
 import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
 import com.tngtech.archunit.base.DescribedPredicate;
 import com.tngtech.archunit.core.domain.JavaClass;
@@ -52,14 +53,27 @@ class AppArchitectureTest {
                     call -> call.getTargetOwner().isAssignableTo(OrchestrationEngine.class)))
             .as("only config/startup construct the OrchestrationEngine");
 
-    /** The engine package is used only through its facade and exceptions (outside the wiring). */
+    /**
+     * The engine package is used only through its facade, its exceptions and the read models the facade returns
+     * ({@link ProviderCircuit} from {@code providerCircuits()}), outside the wiring.
+     */
     @ArchTest
     static final ArchRule coreEngineIsUsedOnlyViaTheFacade = noClasses()
             .that().resideOutsideOfPackages(ROOT + ".config..")
             .should().dependOnClassesThat(are(resideInAPackage(CORE_ENGINE)).and(DescribedPredicate.not(
                     JavaClass.Predicates.belongToAnyOf(OrchestrationEngine.class, RunNotFoundException.class,
-                            InvalidCommandException.class, InvalidRunStateException.class))))
+                            InvalidCommandException.class, InvalidRunStateException.class, ProviderCircuit.class))))
             .as("core engine internals are only used via OrchestrationEngine");
+
+    /**
+     * Spring Security is confined to the security package: the API layer reads verified identities through
+     * {@code OperatorIdentitySource}, the configuration through {@code ApiAuthorizationRules}.
+     */
+    @ArchTest
+    static final ArchRule springSecurityIsConfinedToTheSecurityPackage = noClasses()
+            .that().resideOutsideOfPackage(ROOT + ".security..")
+            .should().dependOnClassesThat().resideInAPackage("org.springframework.security..")
+            .as("only the security package depends on Spring Security");
 
     /** Controllers live in the api package. */
     @ArchTest

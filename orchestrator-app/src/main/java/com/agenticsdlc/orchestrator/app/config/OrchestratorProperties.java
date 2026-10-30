@@ -1,6 +1,8 @@
 package com.agenticsdlc.orchestrator.app.config;
 
 import java.nio.file.Path;
+import java.util.List;
+import java.util.Locale;
 
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.DecimalMax;
@@ -19,7 +21,7 @@ import org.springframework.validation.annotation.Validated;
  *
  * @param workspace the repository workspace the orchestrator reasons over
  * @param engine engine tuning
- * @param security API protection
+ * @param security API authentication and authorization ({@code open}, {@code api-key} or {@code oidc})
  * @param console operator console
  * @param agents agent provider selection
  * @param governance governance rules enforced by the control plane on top of the engine's policies
@@ -77,20 +79,170 @@ public record OrchestratorProperties(
     }
 
     /**
-     * API protection.
+     * API authentication and authorization (ADR 0009 as amended by the security modes).
      *
-     * @param apiKey when non-blank, every {@code /api/**} request must carry it in {@code X-Api-Key}
+     * @param mode how API callers are authenticated; when unset, {@link Mode#API_KEY} if {@code apiKey} is set (the
+     *             behaviour before modes existed) and {@link Mode#OPEN} otherwise, see {@link #effectiveMode()}
+     * @param apiKey the shared key every {@code /api/**} request must send in {@code X-Api-Key} in
+     *               {@link Mode#API_KEY} mode (ignored in the other modes)
+     * @param publicDocs whether the OpenAPI document ({@code /v3/api-docs/**}) and Swagger UI
+     *                   ({@code /swagger-ui/**}) are served without authentication; false requires the same
+     *                   authentication as a {@code GET /api/**} request
+     * @param oidc JWT resource-server settings of {@link Mode#OIDC} mode
      */
-    public record Security(@DefaultValue("") String apiKey) {
+    public record Security(
+            @Nullable Mode mode,
+            @DefaultValue("") String apiKey,
+            @DefaultValue("true") boolean publicDocs,
+            @DefaultValue @Valid @NotNull Oidc oidc) {
 
         /**
-         * Returns whether API-key authentication is enabled.
+         * Returns the mode in force: the configured one, else {@code api-key} when a key is configured (backwards
+         * compatibility with deployments that only set {@code sdlc.security.api-key}), else {@code open}.
          *
-         * @return true when a key is configured
+         * @return the effective mode
          */
-        public boolean apiKeyEnabled() {
+        public Mode effectiveMode() {
+            return Mode.resolve(mode, apiKey);
+        }
+
+        /**
+         * Returns whether the mode was derived from the presence of an API key rather than configured.
+         *
+         * @return true when {@code sdlc.security.mode} is unset and a key is configured
+         */
+        public boolean modeInferredFromApiKey() {
+            return mode == null && hasApiKey();
+        }
+
+        /**
+         * Returns whether a non-blank API key is configured (whatever the mode).
+         *
+         * @return true when {@code sdlc.security.api-key} is set
+         */
+        public boolean hasApiKey() {
             return apiKey != null && !apiKey.isBlank();
         }
+
+        /**
+         * Returns whether API-key authentication is in force.
+         *
+         * @return true in {@link Mode#API_KEY} mode
+         */
+        public boolean apiKeyEnabled() {
+            return effectiveMode() == Mode.API_KEY;
+        }
+
+        /**
+         * Describes the settings without the API key.
+         *
+         * @return a description safe to log
+         */
+        @Override
+        public String toString() {
+            return "Security[mode=" + mode + ", apiKey=" + (hasApiKey() ? "<redacted>" : "<none>") + ", publicDocs="
+                    + publicDocs + ", oidc=" + oidc + "]";
+        }
+
+        /**
+         * Security modes ({@code sdlc.security.mode}).
+         */
+        public enum Mode {
+            /** No authentication: every caller holds every role (local evaluation; refused by the prod profile). */
+            OPEN,
+            /** A shared key in {@code X-Api-Key} on {@code /api/**}; a caller with the key holds every role. */
+            API_KEY,
+            /** OAuth 2.0 bearer JWTs verified against an OIDC provider; roles and identity come from the token. */
+            OIDC;
+
+            /**
+             * Resolves the effective mode.
+             *
+             * @param configured the configured mode, or null
+             * @param apiKey the configured API key, or null
+             * @return {@code configured} when set, else {@link #API_KEY} for a non-blank key, else {@link #OPEN}
+             */
+            public static Mode resolve(@Nullable Mode configured, @Nullable String apiKey) {
+                if (configured != null) {
+                    return configured;
+                }
+                return apiKey != null && !apiKey.isBlank() ? API_KEY : OPEN;
+            }
+
+            /**
+             * Parses a property value the way Spring Boot binds enums ({@code api-key}, {@code API_KEY} and
+             * {@code apiKey} name the same mode).
+             *
+             * @param value the raw property value, or null
+             * @return the mode, or null when the value is null or blank
+             * @throws IllegalArgumentException when the value names no mode
+             */
+            public static @Nullable Mode parse(@Nullable String value) {
+                if (value == null || value.isBlank()) {
+                    return null;
+                }
+                String canonical = canonical(value);
+                for (Mode mode : values()) {
+                    if (canonical(mode.name()).equals(canonical)) {
+                        return mode;
+                    }
+                }
+                throw new IllegalArgumentException("unknown sdlc.security.mode '" + value.strip()
+                        + "' (expected open, api-key or oidc)");
+            }
+
+            /**
+             * Returns the property spelling of the mode.
+             *
+             * @return {@code open}, {@code api-key} or {@code oidc}
+             */
+            public String propertyValue() {
+                return name().toLowerCase(Locale.ROOT).replace('_', '-');
+            }
+
+            private static String canonical(String value) {
+                return value.replaceAll("[^A-Za-z0-9]", "").toLowerCase(Locale.ROOT);
+            }
+        }
+    }
+
+    /**
+     * JWT resource-server settings of {@code oidc} mode. {@code issuerUri} (signing keys discovered from the
+     * issuer's OpenID configuration on first use, {@code iss} validated) or {@code jwkSetUri} (keys fetched from
+     * this URL) is required; when both are set the keys come from {@code jwkSetUri} and {@code iss} is still
+     * validated against {@code issuerUri}. Tokens must be RS256-signed.
+     *
+     * @param issuerUri OIDC issuer, for example {@code https://idp.example.com/realms/sdlc}
+     * @param jwkSetUri JWK set URL of the issuer
+     * @param audience value the {@code aud} claim must contain (required in oidc mode)
+     * @param rolesClaim claim holding the caller's roles: a top-level claim name (dots allowed, for namespaced
+     *                   claims) or a dotted path into nested objects such as {@code realm_access.roles}; its value
+     *                   is a list of strings or one space or comma separated string
+     * @param identityClaim top-level claim used as the operator id ({@code sub}, often {@code preferred_username});
+     *                      tokens without it are rejected
+     * @param roleMapping claim values granting each control-plane role
+     */
+    public record Oidc(
+            @Nullable String issuerUri,
+            @Nullable String jwkSetUri,
+            @Nullable String audience,
+            @DefaultValue("roles") @NotBlank String rolesClaim,
+            @DefaultValue("sub") @NotBlank String identityClaim,
+            @DefaultValue @Valid @NotNull RoleMapping roleMapping) {
+    }
+
+    /**
+     * Claim values granting the control-plane roles in {@code oidc} mode (each may list several values, comma
+     * separated; matched exactly). Roles are independent: an admin is not implicitly an operator or approver.
+     *
+     * @param operator values granting OPERATOR (start runs and scenarios, clarify, re-plan, stop, resume)
+     * @param approver values granting APPROVER (approve and reject gates)
+     * @param admin values granting ADMIN (re-index the workspace)
+     */
+    public record RoleMapping(
+            @DefaultValue("operator") @NotNull List<String> operator,
+            @DefaultValue("approver") @NotNull List<String> approver,
+            @DefaultValue("admin") @NotNull List<String> admin) {
     }
 
     /**

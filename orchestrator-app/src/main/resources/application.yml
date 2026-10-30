@@ -4,6 +4,10 @@ server:
 spring:
   application:
     name: sdlc-orchestrator
+  profiles:
+    # Without an active profile the "local" posture applies (application-local.yml): open API, four-eyes off.
+    # Production: --spring.profiles.active=prod (application-prod.yml; SecurityPostureValidator refuses unsafe settings).
+    default: local
   threads:
     virtual:
       enabled: true
@@ -60,7 +64,20 @@ sdlc:
     llm-timeout-scale: 3.0               # stage timeouts x3 when an LLM provider executes the attempt
     build-command: ./mvnw -B -ntp -q verify   # the only command a sandbox build may run
   security:
-    api-key: ""
+    # open (default; every caller holds every role) | api-key | oidc. When unset and api-key is set, api-key applies.
+    # mode: open
+    api-key: ""                          # X-Api-Key value required on /api/** in api-key mode (SDLC_SECURITY_API_KEY)
+    public-docs: true                    # false: /v3/api-docs/** and /swagger-ui/** need the same authentication as GET /api/**
+    oidc:
+      # issuer-uri: https://idp.example.com/realms/sdlc   # keys discovered on first use; iss validated
+      # jwk-set-uri: https://idp.example.com/realms/sdlc/protocol/openid-connect/certs
+      # audience: sdlc-orchestrator                       # required in oidc mode: aud must contain it
+      roles-claim: roles                 # claim name or dotted path, e.g. realm_access.roles
+      identity-claim: sub                # operator id claim, often preferred_username
+      role-mapping:                      # claim values granting each role (comma separated lists allowed)
+        operator: operator
+        approver: approver
+        admin: admin
   console:
     enabled: true
   agents:

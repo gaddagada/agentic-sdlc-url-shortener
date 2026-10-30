@@ -15,10 +15,14 @@ public final class ProblemTypes {
     public static final URI VALIDATION_ERROR = of("validation-error");
     /** The body is missing or not valid JSON. */
     public static final URI MALFORMED_REQUEST = of("malformed-request");
-    /** {@code X-Operator-Id} missing or malformed. */
+    /** {@code X-Operator-Id} missing or malformed (or, in oidc mode, the token's identity claim is not a valid id). */
     public static final URI OPERATOR_IDENTITY_REQUIRED = of("operator-identity-required");
-    /** {@code X-Api-Key} missing or wrong. */
+    /** {@code X-Operator-Id} names someone else than the identity of the verified bearer token (oidc mode). */
+    public static final URI OPERATOR_IDENTITY_MISMATCH = of("operator-identity-mismatch");
+    /** Authentication missing or failed: no or wrong {@code X-Api-Key}, or a missing, expired or invalid token. */
     public static final URI UNAUTHORIZED = of("unauthorized");
+    /** Authenticated, but the caller does not hold the role the operation requires (oidc mode). */
+    public static final URI FORBIDDEN = of("forbidden");
     /** Unknown run. */
     public static final URI RUN_NOT_FOUND = of("run-not-found");
     /** Unknown artifact stage or version. */

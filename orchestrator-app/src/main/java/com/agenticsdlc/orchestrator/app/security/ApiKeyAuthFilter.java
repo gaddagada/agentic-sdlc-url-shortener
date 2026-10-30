@@ -14,6 +14,7 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 import org.jspecify.annotations.Nullable;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.util.StringUtils;
 import org.springframework.web.filter.OncePerRequestFilter;
@@ -22,9 +23,9 @@ import org.springframework.web.util.UriUtils;
 import tools.jackson.databind.json.JsonMapper;
 
 /**
- * Protects {@code /api/**} with a shared API key sent in {@code X-Api-Key} (prototype security model, ADR 0009):
- * a missing or wrong key is answered with a 401 Problem Detail. The static console, actuator and OpenAPI endpoints
- * are never behind the key. Keys are compared as SHA-256 digests with {@link MessageDigest#isEqual} (constant time,
+ * Protects {@code /api/**} with a shared API key sent in {@code X-Api-Key} ({@code sdlc.security.mode=api-key},
+ * ADR 0009): a missing or wrong key is answered with a 401 Problem Detail and a {@code WWW-Authenticate} challenge
+ * naming the header. The static console, actuator and OpenAPI endpoints are never behind the key. Keys are compared as SHA-256 digests with {@link MessageDigest#isEqual} (constant time,
  * no length leak) and never logged.
  *
  * <p>The filter is registered for every path ({@code /*}) and decides itself whether a request is an API request,
@@ -37,6 +38,9 @@ public final class ApiKeyAuthFilter extends OncePerRequestFilter {
 
     /** Header carrying the API key. */
     public static final String HEADER = "X-Api-Key";
+
+    /** {@code WWW-Authenticate} challenge of a 401 answer (names the header to send). */
+    public static final String CHALLENGE = "ApiKey realm=\"sdlc-orchestrator\", header=\"" + HEADER + "\"";
 
     /** Problem type of a 401 answer. */
     static final String PROBLEM_TYPE = "https://agenticsdlc.dev/problems/unauthorized";
@@ -155,6 +159,7 @@ public final class ApiKeyAuthFilter extends OncePerRequestFilter {
         problem.put("detail", "A valid " + HEADER + " header is required for /api/** requests.");
         problem.put("instance", request.getRequestURI());
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+        response.setHeader(HttpHeaders.WWW_AUTHENTICATE, CHALLENGE);
         response.setContentType(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
         response.setCharacterEncoding(StandardCharsets.UTF_8.name());
         response.getWriter().write(mapper.writeValueAsString(problem));

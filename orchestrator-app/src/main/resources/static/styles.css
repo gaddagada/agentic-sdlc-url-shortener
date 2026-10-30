@@ -147,6 +147,12 @@ fieldset { border: 0; margin: 0; padding: 0; min-width: 0; }
 .provider.down { color: var(--muted); }
 .provider.down .dot { background: var(--c-pending); }
 .provider .model { color: var(--muted); font-family: var(--mono); font-size: 11.5px; }
+.provider .circuit {
+  --c: var(--c-halt); font-size: 11.5px; line-height: 1; padding: 2px 7px; border-radius: 999px; white-space: nowrap;
+  color: color-mix(in srgb, var(--c) 80%, var(--text)); background: color-mix(in srgb, var(--c) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--c) 45%, transparent);
+}
+.provider .circuit.half-open { --c: var(--c-retry); border-style: dashed; }
 .topbar-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-left: auto; }
 .conn {
   color: #fff; background: var(--btn-danger); border-radius: 999px; padding: 3px 10px;

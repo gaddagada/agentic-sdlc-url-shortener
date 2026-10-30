@@ -99,6 +99,21 @@ class OllamaLlmClientTest {
     }
 
     @Test
+    void theStableContextIsSentBeforeTheUserPromptInTheSingleUserMessage() throws Exception {
+        LlmRequest request = new LlmRequest("system prompt", "REQUIREMENT: shorten links", "user prompt", 4000,
+                Duration.ofSeconds(60));
+        server.expect(once(), requestTo(BASE + "/api/chat"))
+                .andExpect(jsonPath("$.messages.length()").value(2))
+                .andExpect(jsonPath("$.messages[0].content").value("system prompt"))
+                .andExpect(jsonPath("$.messages[1].role").value("user"))
+                .andExpect(jsonPath("$.messages[1].content").value("REQUIREMENT: shorten links\nuser prompt"))
+                .andRespond(withSuccess(chatResponse(CODEC.toJson(BUNDLE), "stop"), MediaType.APPLICATION_JSON));
+
+        assertThat(client.complete(request, DocumentationBundle.class).output()).isEqualTo(BUNDLE);
+        server.verify();
+    }
+
+    @Test
     void serverErrorsAreRetryable() {
         server.expect(requestTo(BASE + "/api/chat")).andRespond(withServerError().body("model crashed"));
 

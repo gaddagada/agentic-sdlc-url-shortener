@@ -5,6 +5,7 @@ import java.util.Locale;
 
 import org.springframework.stereotype.Component;
 
+import com.agenticsdlc.orchestrator.app.llm.PromptCacheListener;
 import com.agenticsdlc.orchestrator.core.agent.AgentRole;
 import com.agenticsdlc.orchestrator.core.metrics.MetricsRecorder;
 import com.agenticsdlc.orchestrator.core.model.StageStatus;
@@ -20,12 +21,15 @@ import io.micrometer.core.instrument.Timer;
  * and {@code sdlc.stage.fallbacks} (counters; tag {@code stage}), {@code sdlc.run.rollbacks} (counter),
  * {@code sdlc.run.completed} and {@code sdlc.run.active} (timers of end-to-end and active time of completed runs),
  * {@code sdlc.agent.call} (timer; tags {@code provider}, {@code role}), {@code sdlc.llm.tokens} (counter; tags
- * {@code provider}, {@code direction}) and {@code sdlc.approval.decision} (timer; tag {@code outcome}). Run ids are
+ * {@code provider}, {@code direction}; input counts every prompt token, cached or not), {@code sdlc.llm.cache.read.tokens}
+ * and {@code sdlc.llm.cache.creation.tokens} (counters of prompt-cache reads and writes; tags {@code provider},
+ * {@code model}; reported by the LLM clients through {@link PromptCacheListener}) and {@code sdlc.approval.decision}
+ * (timer; tag {@code outcome}). Run ids are
  * deliberately not used as tags (unbounded cardinality). The engine calls these methods while holding a run lock;
  * Micrometer meters are lock-free and cheap.</p>
  */
 @Component
-public class MicrometerMetricsRecorder implements MetricsRecorder {
+public class MicrometerMetricsRecorder implements MetricsRecorder, PromptCacheListener {
 
     private final MeterRegistry registry;
 
@@ -88,6 +92,21 @@ public class MicrometerMetricsRecorder implements MetricsRecorder {
         Timer.builder("sdlc.approval.decision").description("Time from approval request to human decision")
                 .tag("outcome", approved ? "approved" : "rejected").register(registry)
                 .record(Duration.ofMillis(Math.max(0L, decisionMs)));
+    }
+
+    @Override
+    public void cacheUsage(String providerId, String model, long cacheReadTokens, long cacheCreationTokens) {
+        Counter read = Counter.builder("sdlc.llm.cache.read.tokens").description("LLM input tokens read from the "
+                + "prompt cache").baseUnit("tokens").tag("provider", providerId).tag("model", model).register(registry);
+        Counter creation = Counter.builder("sdlc.llm.cache.creation.tokens").description("LLM input tokens written to "
+                + "the prompt cache").baseUnit("tokens").tag("provider", providerId).tag("model", model)
+                .register(registry);
+        if (cacheReadTokens > 0) {
+            read.increment(cacheReadTokens);
+        }
+        if (cacheCreationTokens > 0) {
+            creation.increment(cacheCreationTokens);
+        }
     }
 
     private Counter tokens(String providerId, String direction) {

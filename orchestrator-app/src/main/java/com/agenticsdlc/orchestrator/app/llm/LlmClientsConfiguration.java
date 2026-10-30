@@ -33,13 +33,16 @@ public class LlmClientsConfiguration {
      *
      * @param properties LLM configuration
      * @param codec JSON codec
+     * @param cacheListener receiver of prompt-cache token counts (the Micrometer metrics recorder)
      * @return the client
      */
     @Bean
     @ConditionalOnProperty(prefix = "sdlc.llm.anthropic", name = "enabled", havingValue = "true",
             matchIfMissing = true)
-    AnthropicLlmClient anthropicLlmClient(LlmProperties properties, JsonCodec codec) {
-        return new AnthropicLlmClient(properties.anthropic(), codec);
+    AnthropicLlmClient anthropicLlmClient(LlmProperties properties, JsonCodec codec,
+                                          ObjectProvider<PromptCacheListener> cacheListener) {
+        return new AnthropicLlmClient(properties.anthropic(), codec,
+                cacheListener.getIfUnique(() -> PromptCacheListener.NONE));
     }
 
     /**

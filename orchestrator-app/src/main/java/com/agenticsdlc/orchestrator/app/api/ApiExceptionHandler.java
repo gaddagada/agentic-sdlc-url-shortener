@@ -39,7 +39,8 @@ import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
 /**
  * Maps exceptions to RFC 9457 Problem Details ({@code application/problem+json}).
  *
- * <p>Validation failures and a missing or reserved operator identity are 400 (validation problems carry an
+ * <p>Validation failures, a missing or reserved operator identity and an {@code X-Operator-Id} that disagrees with
+ * the verified token identity are 400 (validation problems carry an
  * {@code errors} array of {@code {field, message}}); other {@link IllegalArgumentException}s are 400 with a generic
  * detail (only {@link InvalidRequestException} messages, written by the control plane, are returned); unknown runs,
  * artifacts and scenarios are 404; commands the engine refuses ({@link InvalidRunStateException} for the wrong
@@ -57,6 +58,12 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     ResponseEntity<ProblemDetail> handleOperatorIdentity(OperatorIdentityException ex) {
         return respond(problem(HttpStatus.BAD_REQUEST, ProblemTypes.OPERATOR_IDENTITY_REQUIRED,
                 "Operator identity required", ex.getMessage()));
+    }
+
+    @ExceptionHandler(OperatorIdentityMismatchException.class)
+    ResponseEntity<ProblemDetail> handleOperatorIdentityMismatch(OperatorIdentityMismatchException ex) {
+        return respond(problem(HttpStatus.BAD_REQUEST, ProblemTypes.OPERATOR_IDENTITY_MISMATCH,
+                "Operator identity mismatch", ex.getMessage()));
     }
 
     @ExceptionHandler(RunNotFoundException.class)

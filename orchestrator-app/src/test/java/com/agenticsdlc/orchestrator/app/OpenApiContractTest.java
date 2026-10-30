@@ -127,6 +127,33 @@ class OpenApiContractTest {
                 .containsEntry("name", "X-Api-Key").containsEntry("in", "header");
     }
 
+    @Test
+    void securitySchemesRequiredRolesAndAuthenticationErrorsAreDocumented() throws IOException {
+        for (Map<String, Object> document : List.of(committed(), generated())) {
+            Map<String, Object> schemes = asMap(asMap(document.get("components")).get("securitySchemes"));
+            assertThat(asMap(schemes.get("bearerAuth"))).containsEntry("type", "http")
+                    .containsEntry("scheme", "bearer").containsEntry("bearerFormat", "JWT");
+            Map<String, Object> approve = operation(document, "/api/v1/runs/{id}/stages/{stageId}/approve", "post");
+            assertThat(asList(approve.get("x-required-roles"))).containsExactly("APPROVER");
+            assertThat(asMap(approve.get("responses"))).containsKeys("401", "403");
+            assertThat(asList(operation(document, "/api/v1/runs", "post").get("x-required-roles")))
+                    .containsExactly("OPERATOR");
+            assertThat(asList(operation(document, "/api/v1/workspace/reindex", "post").get("x-required-roles")))
+                    .containsExactly("ADMIN");
+            assertThat(asList(operation(document, "/api/v1/runs", "get").get("x-required-roles")))
+                    .containsExactly("OPERATOR", "APPROVER", "ADMIN");
+        }
+    }
+
+    @Test
+    void providersDocumentTheirCircuitBreakerState() throws IOException {
+        Map<String, Object> schemas = asMap(asMap(committed().get("components")).get("schemas"));
+
+        assertThat(asMap(asMap(schemas.get("ProviderView")).get("properties"))).containsKey("circuit");
+        assertThat(asMap(asMap(schemas.get("ProviderCircuitView")).get("properties"))).containsKeys("providerId",
+                "state", "consecutiveFailures", "openedAt", "retryAt", "lastFailure");
+    }
+
     /**
      * Rewrites the committed contract from the generated document (opt-in with {@code -Dopenapi.regenerate=true}).
      */

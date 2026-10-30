@@ -52,4 +52,18 @@ class MicrometerMetricsRecorderTest {
         assertThat(registry.get("sdlc.approval.decision").tag("outcome", "approved").timer().count()).isEqualTo(1);
         assertThat(registry.get("sdlc.approval.decision").tag("outcome", "rejected").timer().count()).isEqualTo(1);
     }
+
+    @Test
+    void recordsPromptCacheReadsAndWritesPerProviderAndModel() {
+        recorder.cacheUsage("anthropic", "claude-opus-5-5", 4000, 1200);
+        recorder.cacheUsage("anthropic", "claude-opus-5-5", 4000, 0);
+        recorder.cacheUsage("anthropic", "claude-sonnet-5", 0, 0);
+
+        assertThat(registry.get("sdlc.llm.cache.read.tokens").tags("provider", "anthropic", "model", "claude-opus-5-5")
+                .counter().count()).isEqualTo(8000.0);
+        assertThat(registry.get("sdlc.llm.cache.creation.tokens").tags("provider", "anthropic", "model",
+                "claude-opus-5-5").counter().count()).isEqualTo(1200.0);
+        assertThat(registry.get("sdlc.llm.cache.read.tokens").tag("model", "claude-sonnet-5").counter().count())
+                .as("registered at zero").isEqualTo(0.0);
+    }
 }

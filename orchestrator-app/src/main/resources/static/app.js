@@ -4,7 +4,7 @@
 // js/views.js and js/graph.js. Every screen region re-renders only when its data
 // signature changes, so a poll never interrupts someone typing into a form.
 import { api, onReachability } from './js/api.js';
-import { h, mount, store, shortId, humanize, isNum, asList, clip } from './js/util.js';
+import { h, mount, store, shortId, humanize, isNum, asList, clip, fmtTime, fmtDateTime } from './js/util.js';
 import { renderPipeline, renderLineage, renderLegend } from './js/graph.js';
 import * as V from './js/views.js';
 
@@ -38,7 +38,8 @@ const App = {
   metrics: null, // ReliabilityMetricsView
   metricsAt: null,
   artifactSel: { stageId: null, version: null }, // version null = accepted (else latest)
-  artifactViews: new Map(), // `${runId}|${stageId}|${version}` -> { status, view?, error? }
+  artifactViews: new Map(), // `${runId}|${stageId}|${version}` -> { status, view?, error?, stale?, refreshing? }
+  artifactStateSig: null, // approvals and artifact summaries of the selected run when the cached views were last valid
   detailsOpen: { payload: false, provenance: false },
   tab: TABS.includes(store.get('sdlc.tab')) ? store.get('sdlc.tab') : 'artifacts',
   drafts: {}, // values typed into the pending-actions card, keyed by data-draft
@@ -246,7 +247,35 @@ async function refreshSelectedRun() {
   settle(artifacts, (list) => { App.artifacts = asList(list).filter((a) => a?.stageId); });
   settle(audit, () => {});
   settle(lineage, (l) => { App.lineage = l; });
+  invalidateViewsOnChange();
   renderRunView();
+}
+
+/**
+ * What a cached artifact view can go stale on: a decided or revoked approval flips the accepted flag of a version,
+ * a rework or replan adds versions. The payload and Markdown of a version never change.
+ */
+function artifactStateSignature() {
+  const approvals = asList(App.run?.pendingActions).filter((a) => a?.type === 'APPROVAL').map((a) => [a.approvalId, a.stageId, a.reviewVersion]);
+  const accepted = asList(App.run?.stages).map((s) => [s?.id, s?.acceptedVersion]);
+  const summaries = App.artifacts.map((a) => [a.stageId, a.version, a.accepted, a.hash]);
+  return JSON.stringify([approvals, accepted, summaries]);
+}
+
+/** Marks the cached views of the selected run stale when its approvals or artifact summaries changed. */
+function invalidateViewsOnChange() {
+  const sig = artifactStateSignature();
+  if (App.artifactStateSig !== null && App.artifactStateSig !== sig) invalidateArtifactViews(App.selectedId);
+  App.artifactStateSig = sig;
+}
+
+/** Ready views stay on screen and are refetched in the background; failed ones are dropped so they load again. */
+function invalidateArtifactViews(runId) {
+  for (const [key, state] of App.artifactViews) {
+    if (!key.startsWith(`${runId}|`)) continue;
+    if (state.status === 'ready') state.stale = true;
+    else if (state.status === 'error') App.artifactViews.delete(key);
+  }
 }
 
 async function refreshMetrics() {
@@ -295,7 +324,7 @@ function selectRun(id, { fromHash = false } = {}) {
     selectedId: next,
     runCtl: next ? new AbortController() : null,
     run: null, graph: null, artifacts: [], lineage: null, drafts: {},
-    artifactSel: { stageId: null, version: null },
+    artifactSel: { stageId: null, version: null }, artifactStateSig: null,
     audit: { events: [], lastSeq: 0, filter: new Set(), follow: App.audit.follow, open: new Set() },
     sigs: { providers: App.sigs.providers },
   });
@@ -331,14 +360,22 @@ const viewKey = (summary) => `${App.selectedId}|${summary.stageId}|${summary.ver
 async function ensureArtifactView(summary, { force = false } = {}) {
   const key = viewKey(summary);
   const existing = App.artifactViews.get(key);
-  if (existing && !(force && existing.status === 'error')) return;
+  const refresh = Boolean(existing?.stale && !existing.refreshing);
+  if (existing && !(force && existing.status === 'error') && !refresh) return;
   const ctl = App.runCtl;
-  App.artifactViews.set(key, { status: 'loading' });
+  // A stale view stays visible while it is refetched; a first load shows the loading placeholder.
+  if (refresh) existing.refreshing = true;
+  else App.artifactViews.set(key, { status: 'loading' });
   const query = isNum(summary.version) ? `?version=${summary.version}` : '';
   try {
     const view = await api(`${runPath()}/artifacts/${enc(summary.stageId)}${query}`, { signal: ctl?.signal });
     App.artifactViews.set(key, { status: 'ready', view: view ?? {} });
   } catch (err) {
+    if (refresh) {
+      existing.refreshing = false; // keep the stale view; the next render retries
+      if (!err.aborted) pollError(err);
+      return;
+    }
     if (err.aborted) {
       App.artifactViews.delete(key);
       return;
@@ -463,17 +500,32 @@ const commands = {
 
 // ---------------------------------------------------------------- rendering
 
+/** Chip for an LLM provider whose circuit breaker is not closed (its attempts run the deterministic agents). */
+function circuitChip(circuit) {
+  if (!circuit || !circuit.state || circuit.state === 'CLOSED') return null;
+  const open = circuit.state === 'OPEN';
+  const failures = isNum(circuit.consecutiveFailures) ? `${circuit.consecutiveFailures} consecutive failure${circuit.consecutiveFailures === 1 ? '' : 's'}` : null;
+  const title = [
+    open ? `Attempts use the deterministic agents until ${fmtDateTime(circuit.retryAt)}` : 'The next attempt tries the provider again',
+    failures, circuit.lastFailure ? `Last failure: ${circuit.lastFailure}` : null,
+  ].filter(Boolean).join('\n');
+  return h('span', { class: `circuit ${open ? 'open' : 'half-open'}`, title },
+    open ? `circuit open until ${fmtTime(circuit.retryAt)}` : 'circuit half-open');
+}
+
 function renderProviders() {
   renderIfChanged('providers', App.providers, () => {
     mount($('providers'), App.providers.map((p) =>
       h('span', { class: `provider ${p.available ? 'up' : 'down'}`, title: [p.model, p.detail].filter(Boolean).join(' \u2014 ') || null },
         h('span', { class: 'dot', 'aria-hidden': 'true' }), p.id,
         p.model ? h('span', { class: 'model' }, p.model) : null,
+        circuitChip(p.circuit),
         h('span', { class: 'sr-only' }, p.available ? ' (available)' : ' (unavailable)'))));
     const select = $('nr-provider');
     const current = select.value;
+    const circuitNote = (p) => (p.circuit && p.circuit.state !== 'CLOSED' ? ` (circuit ${humanize(p.circuit.state).toLowerCase()})` : '');
     mount(select, h('option', { value: '' }, 'default'), App.providers.map((p) =>
-      h('option', { value: p.id, disabled: !p.available }, `${p.id}${p.model ? ` \u00b7 ${p.model}` : ''}${p.available ? '' : ' (unavailable)'}`)));
+      h('option', { value: p.id, disabled: !p.available }, `${p.id}${p.model ? ` \u00b7 ${p.model}` : ''}${p.available ? circuitNote(p) : ' (unavailable)'}`)));
     select.value = App.providers.some((p) => p.id === current && p.available) ? current : '';
   });
 }
@@ -553,7 +605,7 @@ function renderArtifactsTab() {
     ?? stages.find((s) => s.id === App.artifactSel.stageId) ?? null;
   const state = summary ? App.artifactViews.get(viewKey(summary)) : null;
   const underReview = Boolean(summary && reviewing.get(summary.stageId) === summary.version);
-  renderIfChanged('tab:artifacts:detail', [stage, summary, state?.status, underReview], () => mount($('art-detail'), V.renderArtifactDetail({
+  renderIfChanged('tab:artifacts:detail', [stage, summary, state?.status, state?.view?.accepted, underReview], () => mount($('art-detail'), V.renderArtifactDetail({
     stage, summary, state, underReview, open: App.detailsOpen,
     onToggle: (name, open) => { App.detailsOpen[name] = open; },
   })));

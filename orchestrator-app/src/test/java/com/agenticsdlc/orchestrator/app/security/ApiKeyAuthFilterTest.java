@@ -39,6 +39,8 @@ class ApiKeyAuthFilterTest {
 
             assertThat(chain.getRequest()).as("key %s", key).isNull();
             assertThat(response.getStatus()).isEqualTo(401);
+            assertThat(response.getHeader("WWW-Authenticate")).isEqualTo(ApiKeyAuthFilter.CHALLENGE)
+                    .contains("header=\"X-Api-Key\"");
             assertThat(response.getContentType()).startsWith(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
             JsonNode body = MAPPER.readTree(response.getContentAsString());
             assertThat(body.path("status").asInt()).isEqualTo(401);

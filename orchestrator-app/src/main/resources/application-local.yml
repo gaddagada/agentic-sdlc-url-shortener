@@ -1,0 +1,14 @@
+# Local evaluation posture: the default profile when no profile is active (spring.profiles.default=local).
+# Nothing here is required to run; it states the local choices explicitly. The security mode is deliberately not
+# set: it stays open (a WARN is logged at startup), or api-key when SDLC_SECURITY_API_KEY is set (docker-compose).
+sdlc:
+  security:
+    public-docs: true
+  governance:
+    # one person can walk through every scenario, including approving a release they started
+    four-eyes: false
+
+management:
+  endpoint:
+    health:
+      show-components: always

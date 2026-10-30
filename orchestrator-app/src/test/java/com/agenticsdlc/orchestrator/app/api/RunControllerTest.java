@@ -31,6 +31,7 @@ import org.springframework.test.web.servlet.assertj.MvcTestResult;
 
 import com.agenticsdlc.orchestrator.app.llm.ProviderCatalog;
 import com.agenticsdlc.orchestrator.app.llm.ProviderUnavailableException;
+import com.agenticsdlc.orchestrator.app.security.SecuritySliceConfiguration;
 import com.agenticsdlc.orchestrator.core.audit.Actor;
 import com.agenticsdlc.orchestrator.core.engine.InvalidCommandException;
 import com.agenticsdlc.orchestrator.core.engine.InvalidRunStateException;
@@ -50,7 +51,7 @@ import com.agenticsdlc.orchestrator.core.model.WorkspaceMode;
  * exceptions and the mapping of requests to engine commands (engine mocked).
  */
 @WebMvcTest(RunController.class)
-@Import({RunViewMapper.class, RunLauncher.class, RunControllerTest.Fixtures.class})
+@Import({RunViewMapper.class, RunLauncher.class, RunControllerTest.Fixtures.class, SecuritySliceConfiguration.class})
 class RunControllerTest {
 
     private static final Instant NOW = Instant.parse("2026-10-01T10:00:00Z");

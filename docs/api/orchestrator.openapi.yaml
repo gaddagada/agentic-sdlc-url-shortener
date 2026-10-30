@@ -3,8 +3,11 @@ info:
   title: SDLC Orchestrator API
   description: "Control plane of the agentic SDLC orchestrator: start runs, govern\
     \ them (approve, reject, clarify, re-plan, stop, resume) and inspect artifacts,\
-    \ lineage, audit trail and reliability metrics. Every POST requires the X-Operator-Id\
-    \ header. Errors are RFC 9457 Problem Details."
+    \ lineage, audit trail and reliability metrics. Every POST names the operator:\
+    \ the X-Operator-Id header (open and api-key mode) or the identity claim of the\
+    \ bearer token (oidc mode). Roles: OPERATOR starts and steers runs, APPROVER decides\
+    \ gates, ADMIN re-indexes the workspace, any role reads (see x-required-roles).\
+    \ Errors are RFC 9457 Problem Details."
   license:
     name: Apache-2.0
   version: v1
@@ -13,6 +16,7 @@ servers:
   description: Generated server url
 security:
 - apiKey: []
+- bearerAuth: []
 - {}
 tags:
 - name: Scenarios
@@ -40,7 +44,9 @@ paths:
       - name: X-Operator-Id
         in: header
         description: "Id of the human operator issuing the request (recorded in the\
-          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
+          \ audit trail; engine, system, deterministic and fallback:* are reserved).\
+          \ Required in open and api-key mode; optional in oidc mode, where the operator\
+          \ is the token's identity claim and a different value is refused with 400"
         required: true
         schema:
           type: string
@@ -52,6 +58,22 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/WorkspaceIndexView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - ADMIN
   /api/v1/scenarios/{key}/run:
     post:
       tags:
@@ -79,7 +101,9 @@ paths:
       - name: X-Operator-Id
         in: header
         description: "Id of the human operator issuing the request (recorded in the\
-          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
+          \ audit trail; engine, system, deterministic and fallback:* are reserved).\
+          \ Required in open and api-key mode; optional in oidc mode, where the operator\
+          \ is the token's identity claim and a different value is refused with 400"
         required: true
         schema:
           type: string
@@ -98,7 +122,22 @@ paths:
                 $ref: "#/components/schemas/RunView"
         "400":
           description: "Invalid request: validation failed (see errors), malformed\
-            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
           content:
             application/problem+json:
               schema:
@@ -123,6 +162,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
   /api/v1/runs:
     get:
       tags:
@@ -138,6 +179,24 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/RunSummaryView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
     post:
       tags:
       - Runs
@@ -147,7 +206,9 @@ paths:
       - name: X-Operator-Id
         in: header
         description: "Id of the human operator issuing the request (recorded in the\
-          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
+          \ audit trail; engine, system, deterministic and fallback:* are reserved).\
+          \ Required in open and api-key mode; optional in oidc mode, where the operator\
+          \ is the token's identity claim and a different value is refused with 400"
         required: true
         schema:
           type: string
@@ -167,7 +228,22 @@ paths:
                 $ref: "#/components/schemas/RunView"
         "400":
           description: "Invalid request: validation failed (see errors), malformed\
-            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
           content:
             application/problem+json:
               schema:
@@ -186,6 +262,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
   /api/v1/runs/{id}/stop:
     post:
       tags:
@@ -201,7 +279,9 @@ paths:
       - name: X-Operator-Id
         in: header
         description: "Id of the human operator issuing the request (recorded in the\
-          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
+          \ audit trail; engine, system, deterministic and fallback:* are reserved).\
+          \ Required in open and api-key mode; optional in oidc mode, where the operator\
+          \ is the token's identity claim and a different value is refused with 400"
         required: true
         schema:
           type: string
@@ -220,7 +300,22 @@ paths:
                 $ref: "#/components/schemas/RunView"
         "400":
           description: "Invalid request: validation failed (see errors), malformed\
-            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
           content:
             application/problem+json:
               schema:
@@ -245,6 +340,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
   /api/v1/runs/{id}/stages/{stageId}/reject:
     post:
       tags:
@@ -267,7 +364,9 @@ paths:
       - name: X-Operator-Id
         in: header
         description: "Id of the human operator issuing the request (recorded in the\
-          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
+          \ audit trail; engine, system, deterministic and fallback:* are reserved).\
+          \ Required in open and api-key mode; optional in oidc mode, where the operator\
+          \ is the token's identity claim and a different value is refused with 400"
         required: true
         schema:
           type: string
@@ -287,7 +386,22 @@ paths:
                 $ref: "#/components/schemas/RunView"
         "400":
           description: "Invalid request: validation failed (see errors), malformed\
-            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
           content:
             application/problem+json:
               schema:
@@ -312,6 +426,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - APPROVER
   /api/v1/runs/{id}/stages/{stageId}/approve:
     post:
       tags:
@@ -335,7 +451,9 @@ paths:
       - name: X-Operator-Id
         in: header
         description: "Id of the human operator issuing the request (recorded in the\
-          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
+          \ audit trail; engine, system, deterministic and fallback:* are reserved).\
+          \ Required in open and api-key mode; optional in oidc mode, where the operator\
+          \ is the token's identity claim and a different value is refused with 400"
         required: true
         schema:
           type: string
@@ -354,7 +472,22 @@ paths:
                 $ref: "#/components/schemas/RunView"
         "400":
           description: "Invalid request: validation failed (see errors), malformed\
-            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
           content:
             application/problem+json:
               schema:
@@ -379,6 +512,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - APPROVER
   /api/v1/runs/{id}/resume:
     post:
       tags:
@@ -394,7 +529,9 @@ paths:
       - name: X-Operator-Id
         in: header
         description: "Id of the human operator issuing the request (recorded in the\
-          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
+          \ audit trail; engine, system, deterministic and fallback:* are reserved).\
+          \ Required in open and api-key mode; optional in oidc mode, where the operator\
+          \ is the token's identity claim and a different value is refused with 400"
         required: true
         schema:
           type: string
@@ -408,7 +545,22 @@ paths:
                 $ref: "#/components/schemas/RunView"
         "400":
           description: "Invalid request: validation failed (see errors), malformed\
-            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
           content:
             application/problem+json:
               schema:
@@ -433,6 +585,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
   /api/v1/runs/{id}/replan:
     post:
       tags:
@@ -448,7 +602,9 @@ paths:
       - name: X-Operator-Id
         in: header
         description: "Id of the human operator issuing the request (recorded in the\
-          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
+          \ audit trail; engine, system, deterministic and fallback:* are reserved).\
+          \ Required in open and api-key mode; optional in oidc mode, where the operator\
+          \ is the token's identity claim and a different value is refused with 400"
         required: true
         schema:
           type: string
@@ -468,7 +624,22 @@ paths:
                 $ref: "#/components/schemas/RunView"
         "400":
           description: "Invalid request: validation failed (see errors), malformed\
-            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
           content:
             application/problem+json:
               schema:
@@ -493,6 +664,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
   /api/v1/runs/{id}/clarify:
     post:
       tags:
@@ -508,7 +681,9 @@ paths:
       - name: X-Operator-Id
         in: header
         description: "Id of the human operator issuing the request (recorded in the\
-          \ audit trail; engine, system, deterministic and fallback:* are reserved)"
+          \ audit trail; engine, system, deterministic and fallback:* are reserved).\
+          \ Required in open and api-key mode; optional in oidc mode, where the operator\
+          \ is the token's identity claim and a different value is refused with 400"
         required: true
         schema:
           type: string
@@ -528,7 +703,22 @@ paths:
                 $ref: "#/components/schemas/RunView"
         "400":
           description: "Invalid request: validation failed (see errors), malformed\
-            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
           content:
             application/problem+json:
               schema:
@@ -553,6 +743,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
   /api/v1/workspace/index:
     get:
       tags:
@@ -566,6 +758,24 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/WorkspaceIndexView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/workflows/default:
     get:
       tags:
@@ -579,6 +789,24 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/WorkflowView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/scenarios:
     get:
       tags:
@@ -594,6 +822,24 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/ScenarioView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/runs/{id}:
     get:
       tags:
@@ -613,12 +859,30 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/RunView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
         "404":
           description: "Unknown run, scenario or artifact"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/runs/{id}/lineage:
     get:
       tags:
@@ -638,12 +902,30 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/LineageView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
         "404":
           description: "Unknown run, scenario or artifact"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/runs/{id}/graph:
     get:
       tags:
@@ -663,12 +945,30 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/GraphView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
         "404":
           description: "Unknown run, scenario or artifact"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/runs/{id}/audit:
     get:
       tags:
@@ -711,7 +1011,22 @@ paths:
                   $ref: "#/components/schemas/AuditEventView"
         "400":
           description: "Invalid request: validation failed (see errors), malformed\
-            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
           content:
             application/problem+json:
               schema:
@@ -722,6 +1037,10 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/runs/{id}/artifacts:
     get:
       tags:
@@ -743,12 +1062,30 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/ArtifactSummaryView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
         "404":
           description: "Unknown run, scenario or artifact"
           content:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/runs/{id}/artifacts/{stageId}:
     get:
       tags:
@@ -787,7 +1124,22 @@ paths:
                 $ref: "#/components/schemas/ArtifactView"
         "400":
           description: "Invalid request: validation failed (see errors), malformed\
-            \ JSON, or a missing, malformed or reserved X-Operator-Id"
+            \ JSON, a missing, malformed or reserved X-Operator-Id, or (oidc mode)\
+            \ an X-Operator-Id that differs from the token identity"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
           content:
             application/problem+json:
               schema:
@@ -798,11 +1150,21 @@ paths:
             application/problem+json:
               schema:
                 $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/providers:
     get:
       tags:
       - Providers
-      summary: List agent providers and their availability
+      summary: "List agent providers, their availability and circuit-breaker state"
+      description: "circuit is the engine-wide circuit breaker of an LLM provider\
+        \ (null for the deterministic agents and for providers disabled by configuration).\
+        \ While it is OPEN, new attempts run the deterministic agents instead of the\
+        \ provider until retryAt; then it is HALF_OPEN and the next attempt tries\
+        \ the provider again. lastFailure has credential-like tokens redacted and\
+        \ is at most 200 characters."
       operationId: listProviders
       responses:
         "200":
@@ -813,6 +1175,24 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/ProviderView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
   /api/v1/metrics/reliability:
     get:
       tags:
@@ -826,6 +1206,24 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/ReliabilityMetricsView"
+        "401":
+          description: "Not authenticated: X-Api-Key missing or wrong (api-key mode),\
+            \ bearer token missing, expired or invalid (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+        "403":
+          description: "Authenticated, but the caller does not hold a role in x-required-roles\
+            \ (oidc mode)"
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+      x-required-roles:
+      - OPERATOR
+      - APPROVER
+      - ADMIN
 components:
   schemas:
     EndpointView:
@@ -1685,6 +2083,29 @@ components:
           additionalProperties: {}
         markdown:
           type: string
+    ProviderCircuitView:
+      type: object
+      description: Circuit-breaker state of an LLM provider
+      properties:
+        providerId:
+          type: string
+        state:
+          type: string
+          enum:
+          - CLOSED
+          - OPEN
+          - HALF_OPEN
+        consecutiveFailures:
+          type: integer
+          format: int32
+        openedAt:
+          type: string
+          format: date-time
+        retryAt:
+          type: string
+          format: date-time
+        lastFailure:
+          type: string
     ProviderView:
       type: object
       properties:
@@ -1696,6 +2117,8 @@ components:
           type: string
         detail:
           type: string
+        circuit:
+          $ref: "#/components/schemas/ProviderCircuitView"
     Approvals:
       type: object
       properties:
@@ -1872,7 +2295,14 @@ components:
   securitySchemes:
     apiKey:
       type: apiKey
-      description: Required on /api/** when sdlc.security.api-key is configured; not
-        checked otherwise (local development mode)
+      description: "Shared key required on /api/** in api-key mode (sdlc.security.mode=api-key,\
+        \ or sdlc.security.api-key set without a mode); not checked in the other modes"
       name: X-Api-Key
       in: header
+    bearerAuth:
+      type: http
+      description: "OIDC access token required in oidc mode: RS256-signed by the configured\
+        \ issuer, aud containing sdlc.security.oidc.audience; roles from sdlc.security.oidc.roles-claim,\
+        \ operator id from sdlc.security.oidc.identity-claim"
+      scheme: bearer
+      bearerFormat: JWT

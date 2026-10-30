@@ -1,6 +1,8 @@
 package com.agenticsdlc.orchestrator.app.llm;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
@@ -28,6 +30,8 @@ import com.anthropic.errors.InternalServerException;
 import com.anthropic.errors.RateLimitException;
 import com.anthropic.errors.SseException;
 import com.anthropic.helpers.MessageAccumulator;
+import com.anthropic.models.messages.CacheControlEphemeral;
+import com.anthropic.models.messages.ContentBlockParam;
 import com.anthropic.models.messages.JsonOutputFormat;
 import com.anthropic.models.messages.Message;
 import com.anthropic.models.messages.MessageCreateParams;
@@ -35,6 +39,8 @@ import com.anthropic.models.messages.OutputConfig;
 import com.anthropic.models.messages.RawMessageStreamEvent;
 import com.anthropic.models.messages.StopReason;
 import com.anthropic.models.messages.TextBlock;
+import com.anthropic.models.messages.TextBlockParam;
+import com.anthropic.models.messages.Usage;
 
 import tools.jackson.databind.JsonNode;
 
@@ -54,6 +60,15 @@ import tools.jackson.databind.JsonNode;
  * until a read timeout, and the stop reason and usage are read from the accumulated message exactly as from a
  * non-streaming response.</p>
  *
+ * <p>Prompt caching: the prompt is sent most-stable first with two ephemeral cache breakpoints. The system prompt
+ * is one text block with {@code cache_control} (identical for every call of a role); the user message carries the
+ * run-stable context ({@link LlmRequest#stableContext()}: requirement, clarification answers, accepted
+ * specification, codebase index) as a first text block with its own {@code cache_control}, followed by the
+ * per-attempt user text without one. Without a stable context the user message is that single text block. A
+ * prefix shorter than the model's minimum cacheable length is simply not cached. Cache reads and writes are logged
+ * at DEBUG and reported to the {@link PromptCacheListener}; the {@link LlmUsage} handed to the engine counts all
+ * input tokens (uncached + cache writes + cache reads), so token budgets mean the same with and without caching.</p>
+ *
  * <p>Thinking, temperature and effort are left at the model defaults. The SDK's own retries are disabled
  * ({@code maxRetries(0)}): retries, backoff and the deterministic fallback are owned by the engine, and SDK-level
  * retries would multiply the per-attempt stage timeout. Error mapping: rate limits, 408/409/429/5xx, errors sent
@@ -69,6 +84,9 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
 
     private static final String MAP_NOTE = "\n\nOutput encoding note: JSON objects with free-form keys (for example "
             + "coverageMatrix) must be returned as arrays of {\"key\": ..., \"value\": ...} entries.";
+
+    /** Ephemeral (5 minute) cache breakpoint. */
+    private static final CacheControlEphemeral CACHE_BREAKPOINT = CacheControlEphemeral.builder().build();
 
     /**
      * Sends a Messages API request and returns the complete response message (the streaming SDK call in
@@ -89,6 +107,7 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
 
     private final LlmProperties.Anthropic settings;
     private final JsonCodec codec;
+    private final PromptCacheListener cacheListener;
     private final @Nullable MessageSender overrideSender;
     private final Map<Class<?>, StructuredOutputSchema> schemas = new ConcurrentHashMap<>();
     private volatile @Nullable AnthropicClient sdkClient;
@@ -100,7 +119,18 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
      * @param codec JSON codec used to parse outputs
      */
     public AnthropicLlmClient(LlmProperties.Anthropic settings, JsonCodec codec) {
-        this(settings, codec, null);
+        this(settings, codec, PromptCacheListener.NONE, null);
+    }
+
+    /**
+     * Creates the client with a prompt-cache listener; the SDK client is built lazily on the first request.
+     *
+     * @param settings Anthropic settings
+     * @param codec JSON codec used to parse outputs
+     * @param cacheListener receives the cache read and write token counts of every call
+     */
+    public AnthropicLlmClient(LlmProperties.Anthropic settings, JsonCodec codec, PromptCacheListener cacheListener) {
+        this(settings, codec, cacheListener, null);
     }
 
     /**
@@ -111,8 +141,22 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
      * @param sender sender, or null for the SDK
      */
     AnthropicLlmClient(LlmProperties.Anthropic settings, JsonCodec codec, @Nullable MessageSender sender) {
+        this(settings, codec, PromptCacheListener.NONE, sender);
+    }
+
+    /**
+     * Creates the client with a prompt-cache listener and a custom sender (tests).
+     *
+     * @param settings Anthropic settings
+     * @param codec JSON codec
+     * @param cacheListener prompt-cache listener
+     * @param sender sender, or null for the SDK
+     */
+    AnthropicLlmClient(LlmProperties.Anthropic settings, JsonCodec codec, PromptCacheListener cacheListener,
+                       @Nullable MessageSender sender) {
         this.settings = settings;
         this.codec = codec;
+        this.cacheListener = cacheListener;
         this.overrideSender = sender;
     }
 
@@ -159,8 +203,11 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
         MessageCreateParams params = MessageCreateParams.builder()
                 .model(settings.model())
                 .maxTokens(Math.min(request.maxOutputTokens(), settings.maxOutputTokens()))
-                .system(request.system())
-                .addUserMessage(schema.hasMaps() ? request.userWithContext() + MAP_NOTE : request.userWithContext())
+                .systemOfTextBlockParams(List.of(TextBlockParam.builder()
+                        .text(request.system())
+                        .cacheControl(CACHE_BREAKPOINT)
+                        .build()))
+                .addUserMessageOfContentBlockParams(userBlocks(request, schema.hasMaps()))
                 .outputConfig(OutputConfig.builder().format(outputFormat(schema)).build())
                 .build();
         long started = System.nanoTime();
@@ -187,10 +234,45 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
         }
         JsonNode tree = schema.restore(codec.readTree(text));
         T output = codec.mapper().treeToValue(tree, outputType);
-        LlmUsage usage = new LlmUsage(message.usage().inputTokens(), message.usage().outputTokens());
-        LOG.debug("anthropic call model={} latencyMs={} inputTokens={} outputTokens={}", settings.model(), latencyMs,
-                usage.inputTokens(), usage.outputTokens());
-        return new LlmResponse<>(output, text, usage, latencyMs, message.model().asString());
+        Usage reported = message.usage();
+        long cacheRead = reported.cacheReadInputTokens().orElse(0L);
+        long cacheCreation = reported.cacheCreationInputTokens().orElse(0L);
+        // input_tokens excludes the cached prefix: the engine is given every input token the call processed
+        LlmUsage usage = new LlmUsage(reported.inputTokens() + cacheCreation + cacheRead, reported.outputTokens());
+        String answeringModel = message.model().asString();
+        LOG.debug("anthropic call model={} latencyMs={} inputTokens={} uncachedInputTokens={} cacheReadTokens={} "
+                        + "cacheCreationTokens={} outputTokens={}", answeringModel, latencyMs, usage.inputTokens(),
+                reported.inputTokens(), cacheRead, cacheCreation, usage.outputTokens());
+        try {
+            cacheListener.cacheUsage(PROVIDER_ID, answeringModel, cacheRead, cacheCreation);
+        } catch (RuntimeException e) {
+            // metrics must never fail a completed call
+            LOG.warn("prompt cache usage could not be recorded: {}", e.toString());
+        }
+        return new LlmResponse<>(output, text, usage, latencyMs, answeringModel);
+    }
+
+    /**
+     * Builds the content of the user message: the run-stable context as a cached block (when there is one), then
+     * the per-attempt user text (with the map encoding note when the schema has maps) without a breakpoint.
+     *
+     * @param request the request
+     * @param hasMaps whether the output schema encodes maps as entry arrays
+     * @return one or two text blocks
+     */
+    static List<ContentBlockParam> userBlocks(LlmRequest request, boolean hasMaps) {
+        List<ContentBlockParam> blocks = new ArrayList<>(2);
+        if (request.hasStableContext()) {
+            blocks.add(ContentBlockParam.ofText(TextBlockParam.builder()
+                    .text(request.stableContext())
+                    .cacheControl(CACHE_BREAKPOINT)
+                    .build()));
+        }
+        String user = hasMaps ? request.user() + MAP_NOTE : request.user();
+        if (!user.isBlank() || blocks.isEmpty()) {
+            blocks.add(ContentBlockParam.ofText(TextBlockParam.builder().text(user).build()));
+        }
+        return blocks;
     }
 
     private static JsonOutputFormat outputFormat(StructuredOutputSchema schema) {

@@ -14,6 +14,9 @@ import org.springframework.core.MethodParameter;
 import com.agenticsdlc.orchestrator.app.api.OperatorId;
 import com.agenticsdlc.orchestrator.app.api.OperatorIdentityResolver;
 import com.agenticsdlc.orchestrator.app.api.ProblemResponses;
+import com.agenticsdlc.orchestrator.app.config.OrchestratorProperties.Security.Mode;
+import com.agenticsdlc.orchestrator.app.security.ApiAuthorizationRules;
+import com.agenticsdlc.orchestrator.app.security.ControlPlaneRole;
 
 import io.swagger.v3.oas.annotations.OpenAPIDefinition;
 import io.swagger.v3.oas.annotations.enums.SecuritySchemeIn;
@@ -22,6 +25,8 @@ import io.swagger.v3.oas.annotations.info.Info;
 import io.swagger.v3.oas.annotations.info.License;
 import io.swagger.v3.oas.annotations.security.SecurityScheme;
 import io.swagger.v3.oas.models.Components;
+import io.swagger.v3.oas.models.Operation;
+import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.oas.models.media.Content;
 import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.Schema;
@@ -37,10 +42,13 @@ import io.swagger.v3.oas.models.security.SecurityRequirement;
  * sync.
  *
  * <p>{@link OperatorId @OperatorId} parameters are resolved from a header by a custom argument resolver, so
- * springdoc is told to ignore them and every such operation documents the required {@code X-Operator-Id} header
- * instead. Operations annotated with {@link ProblemResponses @ProblemResponses} document their RFC 9457 error
- * responses with the {@code ProblemDetail} schema. The {@code X-Api-Key} scheme applies to every operation: it is
- * documented as required when {@code sdlc.security.api-key} is set and as optional otherwise.</p>
+ * springdoc is told to ignore them and every such operation documents the {@code X-Operator-Id} header instead
+ * (required in {@code open} and {@code api-key} mode, optional in {@code oidc} mode where the identity comes from
+ * the token). Operations annotated with {@link ProblemResponses @ProblemResponses} document their RFC 9457 error
+ * responses with the {@code ProblemDetail} schema, and every {@code /api} operation documents 401 and 403 and
+ * names the roles it needs in the {@value #REQUIRED_ROLES_EXTENSION} extension. Two security schemes are
+ * described: the {@code X-Api-Key} header ({@code api-key} mode) and bearer JWTs ({@code oidc} mode); the global
+ * requirement lists the scheme of the running mode (both, optional, in {@code open} mode).</p>
  */
 @Configuration(proxyBeanMethods = false)
 @OpenAPIDefinition(info = @Info(
@@ -48,24 +56,40 @@ import io.swagger.v3.oas.models.security.SecurityRequirement;
         version = "v1",
         description = "Control plane of the agentic SDLC orchestrator: start runs, govern them (approve, reject, "
                 + "clarify, re-plan, stop, resume) and inspect artifacts, lineage, audit trail and reliability "
-                + "metrics. Every POST requires the X-Operator-Id header. Errors are RFC 9457 Problem Details.",
+                + "metrics. Every POST names the operator: the X-Operator-Id header (open and api-key mode) or the "
+                + "identity claim of the bearer token (oidc mode). Roles: OPERATOR starts and steers runs, APPROVER "
+                + "decides gates, ADMIN re-indexes the workspace, any role reads (see x-required-roles). Errors are "
+                + "RFC 9457 Problem Details.",
         license = @License(name = "Apache-2.0")))
 @SecurityScheme(name = OpenApiConfig.API_KEY_SCHEME, type = SecuritySchemeType.APIKEY, in = SecuritySchemeIn.HEADER,
-        paramName = "X-Api-Key", description = "Required on /api/** when sdlc.security.api-key is configured; "
-        + "not checked otherwise (local development mode)")
+        paramName = "X-Api-Key", description = "Shared key required on /api/** in api-key mode "
+        + "(sdlc.security.mode=api-key, or sdlc.security.api-key set without a mode); not checked in the other modes")
+@SecurityScheme(name = OpenApiConfig.BEARER_SCHEME, type = SecuritySchemeType.HTTP, scheme = "bearer",
+        bearerFormat = "JWT", description = "OIDC access token required in oidc mode: RS256-signed by the configured "
+        + "issuer, aud containing sdlc.security.oidc.audience; roles from sdlc.security.oidc.roles-claim, operator id "
+        + "from sdlc.security.oidc.identity-claim")
 public class OpenApiConfig {
 
     /** Name of the API-key security scheme. */
     static final String API_KEY_SCHEME = "apiKey";
 
+    /** Name of the bearer-token security scheme. */
+    static final String BEARER_SCHEME = "bearerAuth";
+
     /** Name of the Problem Detail schema in the components. */
     static final String PROBLEM_SCHEMA = "ProblemDetail";
+
+    /** Operation extension listing the roles that may call the operation (any one suffices). */
+    static final String REQUIRED_ROLES_EXTENSION = "x-required-roles";
 
     private static final String PROBLEM_VIOLATION_SCHEMA = "ProblemViolation";
     private static final String PROBLEM_JSON = "application/problem+json";
     private static final Map<Integer, String> PROBLEM_DESCRIPTIONS = Map.of(
-            400, "Invalid request: validation failed (see errors), malformed JSON, or a missing, malformed or "
-                    + "reserved X-Operator-Id",
+            400, "Invalid request: validation failed (see errors), malformed JSON, a missing, malformed or "
+                    + "reserved X-Operator-Id, or (oidc mode) an X-Operator-Id that differs from the token identity",
+            401, "Not authenticated: X-Api-Key missing or wrong (api-key mode), bearer token missing, expired or "
+                    + "invalid (oidc mode)",
+            403, "Authenticated, but the caller does not hold a role in x-required-roles (oidc mode)",
             404, "Unknown run, scenario or artifact",
             409, "Refused in the current state: wrong run or stage state, stale approvalId, invalid command "
                     + "(exhausted budget, missing waiver, ...), four-eyes rule or unavailable agent provider",
@@ -74,19 +98,23 @@ public class OpenApiConfig {
     /**
      * Documents the {@code X-Operator-Id} header on every operation that resolves the operator identity.
      *
+     * @param properties configuration
      * @return the customizer
      */
     @Bean
-    OperationCustomizer operatorIdHeaderCustomizer() {
+    OperationCustomizer operatorIdHeaderCustomizer(OrchestratorProperties properties) {
         SpringDocUtils.getConfig().addAnnotationsToIgnore(OperatorId.class);
+        boolean tokenIdentity = properties.security().effectiveMode() == Mode.OIDC;
         return (operation, handlerMethod) -> {
             for (MethodParameter parameter : handlerMethod.getMethodParameters()) {
                 if (parameter.hasParameterAnnotation(OperatorId.class)) {
                     operation.addParametersItem(new HeaderParameter()
                             .name(OperatorIdentityResolver.HEADER)
-                            .required(true)
+                            .required(!tokenIdentity)
                             .description("Id of the human operator issuing the request (recorded in the audit "
-                                    + "trail; engine, system, deterministic and fallback:* are reserved)")
+                                    + "trail; engine, system, deterministic and fallback:* are reserved). Required "
+                                    + "in open and api-key mode; optional in oidc mode, where the operator is the "
+                                    + "token's identity claim and a different value is refused with 400")
                             .schema(new StringSchema().pattern(OperatorIdentityResolver.PATTERN)));
                 }
             }
@@ -106,27 +134,23 @@ public class OpenApiConfig {
             if (problems == null) {
                 return operation;
             }
-            ApiResponses responses = operation.getResponses() == null ? new ApiResponses() : operation.getResponses();
             for (int status : problems.value()) {
-                responses.addApiResponse(String.valueOf(status), new ApiResponse()
-                        .description(PROBLEM_DESCRIPTIONS.getOrDefault(status, "Error (Problem Detail)"))
-                        .content(new Content().addMediaType(PROBLEM_JSON,
-                                new MediaType().schema(ref(PROBLEM_SCHEMA)))));
+                addProblemResponse(operation, status);
             }
-            operation.setResponses(responses);
             return operation;
         };
     }
 
     /**
-     * Adds the {@code ProblemDetail} schema and the global API-key security requirement.
+     * Adds the {@code ProblemDetail} schema, the global security requirement of the running mode, and to every
+     * {@code /api} operation its 401 and 403 responses and its required roles.
      *
      * @param properties configuration
      * @return the customizer
      */
     @Bean
     OpenApiCustomizer problemSchemaAndSecurityCustomizer(OrchestratorProperties properties) {
-        boolean keyRequired = properties.security().apiKeyEnabled();
+        Mode mode = properties.security().effectiveMode();
         return openApi -> {
             Components components = openApi.getComponents() == null ? new Components() : openApi.getComponents();
             components.addSchemas(PROBLEM_VIOLATION_SCHEMA, typed("object")
@@ -145,9 +169,49 @@ public class OpenApiConfig {
                             .description("Validation failures (validation-error only)")));
             openApi.setComponents(components);
             SecurityRequirement apiKey = new SecurityRequirement().addList(API_KEY_SCHEME);
-            // an empty requirement makes the key optional (it is not checked without sdlc.security.api-key)
-            openApi.setSecurity(keyRequired ? List.of(apiKey) : List.of(apiKey, new SecurityRequirement()));
+            SecurityRequirement bearer = new SecurityRequirement().addList(BEARER_SCHEME);
+            openApi.setSecurity(switch (mode) {
+                case API_KEY -> List.of(apiKey);
+                case OIDC -> List.of(bearer);
+                // an empty requirement makes both optional: open mode checks neither
+                case OPEN -> List.of(apiKey, bearer, new SecurityRequirement());
+            });
+            if (openApi.getPaths() != null) {
+                openApi.getPaths().forEach(OpenApiConfig::documentAuthorization);
+            }
         };
+    }
+
+    private static void documentAuthorization(String path, PathItem item) {
+        if (!path.startsWith("/api/")) {
+            return;
+        }
+        String concretePath = path.replaceAll("\\{[^/}]+}", "x");
+        item.readOperationsMap().forEach((method, operation) -> {
+            List<String> roles = ApiAuthorizationRules.allowedRoles(method.name(), concretePath).stream()
+                    .map(ControlPlaneRole::name).toList();
+            operation.addExtension(REQUIRED_ROLES_EXTENSION, roles);
+            addProblemResponse(operation, 401);
+            addProblemResponse(operation, 403);
+            sortResponses(operation);
+        });
+    }
+
+    /** Orders the responses by status code (they are added by several customizers). */
+    private static void sortResponses(Operation operation) {
+        ApiResponses sorted = new ApiResponses();
+        operation.getResponses().entrySet().stream().sorted(Map.Entry.comparingByKey())
+                .forEach(entry -> sorted.addApiResponse(entry.getKey(), entry.getValue()));
+        sorted.setExtensions(operation.getResponses().getExtensions());
+        operation.setResponses(sorted);
+    }
+
+    private static void addProblemResponse(Operation operation, int status) {
+        ApiResponses responses = operation.getResponses() == null ? new ApiResponses() : operation.getResponses();
+        responses.addApiResponse(String.valueOf(status), new ApiResponse()
+                .description(PROBLEM_DESCRIPTIONS.getOrDefault(status, "Error (Problem Detail)"))
+                .content(new Content().addMediaType(PROBLEM_JSON, new MediaType().schema(ref(PROBLEM_SCHEMA)))));
+        operation.setResponses(responses);
     }
 
     private static Schema<Object> typed(String type) {

@@ -1,0 +1,27 @@
+# Production posture: run with --spring.profiles.active=prod (combine with "postgres" for PostgreSQL persistence).
+#
+# SecurityPostureValidator refuses to start this profile when the API is open, an API key is shorter than
+# 32 characters, the four-eyes rule is off, or the console is enabled without authentication.
+#
+# Required settings (environment variables shown):
+#   SDLC_SECURITY_OIDC_ISSUERURI     OIDC issuer, e.g. https://idp.example.com/realms/sdlc
+#                                    (or SDLC_SECURITY_OIDC_JWKSETURI for a JWK set URL)
+#   SDLC_SECURITY_OIDC_AUDIENCE      value the aud claim of access tokens must contain
+# Usually also: SDLC_SECURITY_OIDC_ROLESCLAIM (e.g. realm_access.roles), SDLC_SECURITY_OIDC_IDENTITYCLAIM
+# (e.g. preferred_username) and SDLC_SECURITY_OIDC_ROLEMAPPING_{OPERATOR,APPROVER,ADMIN}.
+# A deployment without an identity provider may use SDLC_SECURITY_MODE=api-key with a key of at least 32 characters.
+sdlc:
+  security:
+    mode: oidc
+    # the OpenAPI document and Swagger UI need a token too
+    public-docs: false
+  governance:
+    # the release cannot be approved by the operator who started the run or approved its design
+    four-eyes: true
+
+management:
+  endpoint:
+    health:
+      # /actuator/health is public: report only the aggregate status
+      show-components: never
+      show-details: never

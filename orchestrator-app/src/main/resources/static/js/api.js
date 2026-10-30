@@ -2,6 +2,15 @@
 // optional cancellation by the caller, and RFC 9457 Problem Details mapped to ApiError.
 import { store } from './util.js';
 
+/** sessionStorage can throw like localStorage; the access token is kept per tab only. */
+function sessionValue(key) {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 export class ApiError extends Error {
   constructor({ status = 0, title = 'Request failed', detail = '', errors = [], network = false, aborted = false }) {
     super(detail || title);
@@ -29,8 +38,12 @@ function toApiError(res, body) {
   const problem = body && typeof body === 'object' && (type.includes('problem+json') || 'title' in body || 'detail' in body);
   const statusLine = `HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ''}`;
   let detail = problem ? String(body.detail ?? body.message ?? '') : '';
-  if (res.status === 401 && !detail) {
-    detail = 'The API key is missing or wrong. Store it with localStorage.setItem("sdlc.apiKey", "<key>") and reload.';
+  if (res.status === 401) {
+    const bearer = (res.headers.get('www-authenticate') ?? '').toLowerCase().startsWith('bearer');
+    const hint = bearer
+      ? 'Store an access token with sessionStorage.setItem("sdlc.accessToken", "<token>") and reload.'
+      : 'Store the API key with localStorage.setItem("sdlc.apiKey", "<key>") and reload.';
+    detail = detail ? `${detail} ${hint}` : `The credentials are missing or wrong. ${hint}`;
   }
   const errors = problem && Array.isArray(body.errors)
     ? body.errors.map((e) => (typeof e === 'string' ? e : [e?.field, e?.message ?? e?.defaultMessage].filter(Boolean).join(': ')))
@@ -58,6 +71,8 @@ export async function api(path, { method = 'GET', body, operatorId, signal, time
   if (method !== 'GET' && operatorId) headers['X-Operator-Id'] = operatorId;
   const apiKey = store.get('sdlc.apiKey');
   if (apiKey) headers['X-Api-Key'] = apiKey;
+  const accessToken = sessionValue('sdlc.accessToken'); // oidc mode: an access token obtained from the identity provider
+  if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
 
   try {
     const res = await fetch(path, {

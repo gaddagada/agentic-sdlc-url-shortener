@@ -19,6 +19,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.context.properties.source.MapConfigurationPropertySource;
 
+import com.agenticsdlc.orchestrator.app.metrics.MicrometerMetricsRecorder;
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmException;
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmRequest;
 import com.agenticsdlc.orchestrator.core.agent.llm.LlmResponse;
@@ -48,18 +49,22 @@ import com.anthropic.models.messages.StopReason;
 import com.anthropic.models.messages.TextBlock;
 import com.anthropic.models.messages.Usage;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import tools.jackson.core.JacksonException;
 import tools.jackson.databind.JsonNode;
 
 /**
- * Unit tests of {@link AnthropicLlmClient} without network: availability, request construction, response parsing
- * (including entry-array maps) and SDK error classification.
+ * Unit tests of {@link AnthropicLlmClient} without network: availability, request construction (including the prompt
+ * cache breakpoints on the system prompt and the run-stable context), response parsing (including entry-array maps),
+ * cache usage reporting and SDK error classification.
  */
 class AnthropicLlmClientTest {
 
     private static final JsonCodec CODEC = JsonCodec.standard();
     private static final LlmRequest REQUEST = new LlmRequest("system prompt", "user prompt", 8000,
             Duration.ofSeconds(60));
+    private static final LlmRequest STABLE_REQUEST = new LlmRequest("system prompt",
+            "REQUIREMENT: shorten links\nCODEBASE: index", "user prompt", 8000, Duration.ofSeconds(60));
     private static final String TEST_PLAN_JSON = """
             {"strategy": "risk based", "levels": [{"level": "UNIT", "scope": "services", "tooling": "JUnit"}],
              "cases": [{"id": "TC-1", "title": "creates a link", "level": "UNIT", "type": "POSITIVE",
@@ -134,9 +139,9 @@ class AnthropicLlmClientTest {
         assertThat(params.model().asString()).isEqualTo("claude-opus-5-5");
         assertThat(params.maxTokens()).isEqualTo(8000L);
         JsonNode body = CODEC.readTree(ObjectMappers.jsonMapper().writeValueAsString(params._body()));
-        assertThat(body.path("system").asString()).isEqualTo("system prompt");
-        assertThat(body.path("messages").get(0).path("content").asString()).startsWith("user prompt")
-                .contains("arrays of {\"key\"");
+        assertThat(body.path("system").get(0).path("text").asString()).isEqualTo("system prompt");
+        assertThat(body.path("messages").get(0).path("content").get(0).path("text").asString())
+                .startsWith("user prompt").contains("arrays of {\"key\"");
         assertThat(body.has("thinking")).isFalse();
         assertThat(body.has("temperature")).isFalse();
         JsonNode format = body.path("output_config").path("format");
@@ -144,6 +149,88 @@ class AnthropicLlmClientTest {
         JsonNode coverage = format.path("schema").path("properties").path("coverageMatrix");
         assertThat(coverage.path("type").asString()).isEqualTo("array");
         assertThat(coverage.path("items").path("additionalProperties").asBoolean(true)).isFalse();
+    }
+
+    @Test
+    void theSystemPromptAndTheStableContextCarryCacheBreakpointsAndTheAttemptTextDoesNot() throws Exception {
+        AtomicReference<MessageCreateParams> sent = new AtomicReference<>();
+        AnthropicLlmClient client = client(settings(true, "sk-test"), params -> {
+            sent.set(params);
+            return message(TEST_PLAN_JSON, StopReason.END_TURN);
+        });
+
+        client.complete(STABLE_REQUEST, TestPlan.class);
+
+        JsonNode body = body(sent.get());
+        JsonNode system = body.path("system");
+        assertThat(system.isArray()).as("system sent as text blocks").isTrue();
+        assertThat(system.size()).isEqualTo(1);
+        assertThat(system.get(0).path("type").asString()).isEqualTo("text");
+        assertThat(system.get(0).path("text").asString()).isEqualTo("system prompt");
+        assertThat(system.get(0).path("cache_control").path("type").asString()).isEqualTo("ephemeral");
+
+        assertThat(body.path("messages").size()).isEqualTo(1);
+        JsonNode message = body.path("messages").get(0);
+        assertThat(message.path("role").asString()).isEqualTo("user");
+        JsonNode content = message.path("content");
+        assertThat(content.size()).as("stable context block + attempt block").isEqualTo(2);
+        assertThat(content.get(0).path("type").asString()).isEqualTo("text");
+        assertThat(content.get(0).path("text").asString()).isEqualTo("REQUIREMENT: shorten links\nCODEBASE: index");
+        assertThat(content.get(0).path("cache_control").path("type").asString()).isEqualTo("ephemeral");
+        assertThat(content.get(1).path("text").asString()).startsWith("user prompt")
+                .contains("arrays of {\"key\"").doesNotContain("REQUIREMENT");
+        assertThat(content.get(1).has("cache_control")).as("per-attempt text is not cached").isFalse();
+        assertThat(body.path("output_config").path("format").path("type").asString()).isEqualTo("json_schema");
+    }
+
+    @Test
+    void withoutAStableContextTheUserMessageIsOneUncachedBlock() throws Exception {
+        AtomicReference<MessageCreateParams> sent = new AtomicReference<>();
+        AnthropicLlmClient client = client(settings(true, "sk-test"), params -> {
+            sent.set(params);
+            return message(LOWER_CASE_SPEC_JSON, StopReason.END_TURN);
+        });
+
+        client.complete(new LlmRequest("system prompt", "  ", "user prompt", 8000, Duration.ofSeconds(60)),
+                RequirementSpec.class);
+
+        JsonNode body = body(sent.get());
+        assertThat(body.path("system").get(0).path("cache_control").path("type").asString()).isEqualTo("ephemeral");
+        JsonNode content = body.path("messages").get(0).path("content");
+        assertThat(content.size()).isEqualTo(1);
+        assertThat(content.get(0).path("text").asString()).isEqualTo("user prompt");
+        assertThat(content.get(0).has("cache_control")).isFalse();
+    }
+
+    @Test
+    void cacheReadsAndWritesAreReportedAndCountedAsInputTokens() throws Exception {
+        List<Object[]> reported = new ArrayList<>();
+        AnthropicLlmClient client = new AnthropicLlmClient(settings(true, "k"), CODEC,
+                (provider, model, read, creation) -> reported.add(new Object[] {provider, model, read, creation}),
+                params -> message(TEST_PLAN_JSON, StopReason.END_TURN, 200L, 4800L, 300L));
+
+        LlmResponse<TestPlan> response = client.complete(STABLE_REQUEST, TestPlan.class);
+
+        assertThat(response.usage().inputTokens()).as("uncached + cache writes + cache reads").isEqualTo(5300L);
+        assertThat(response.usage().outputTokens()).isEqualTo(340L);
+        assertThat(reported).singleElement().satisfies(call ->
+                assertThat(call).containsExactly("anthropic", "claude-opus-5-5", 4800L, 300L));
+    }
+
+    @Test
+    void cacheUsageReachesTheMicrometerCounters() throws Exception {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        AnthropicLlmClient client = new AnthropicLlmClient(settings(true, "k"), CODEC,
+                new MicrometerMetricsRecorder(registry), params -> message(TEST_PLAN_JSON, StopReason.END_TURN,
+                100L, 4000L, 0L));
+
+        client.complete(STABLE_REQUEST, TestPlan.class);
+        client.complete(STABLE_REQUEST, TestPlan.class);
+
+        assertThat(registry.get("sdlc.llm.cache.read.tokens").tags("provider", "anthropic", "model", "claude-opus-5-5")
+                .counter().count()).isEqualTo(8000.0);
+        assertThat(registry.get("sdlc.llm.cache.creation.tokens").tags("provider", "anthropic", "model",
+                "claude-opus-5-5").counter().count()).isEqualTo(0.0);
     }
 
     @Test
@@ -341,7 +428,16 @@ class AnthropicLlmClientTest {
                 + "\"text\": " + ObjectMappers.jsonMapper().writeValueAsString(text) + "}}";
     }
 
+    private static JsonNode body(MessageCreateParams params) throws Exception {
+        return CODEC.readTree(ObjectMappers.jsonMapper().writeValueAsString(params._body()));
+    }
+
     private static Message message(String text, StopReason stopReason) {
+        return message(text, stopReason, 1200L, 0L, 0L);
+    }
+
+    private static Message message(String text, StopReason stopReason, long inputTokens, long cacheRead,
+                                   long cacheCreation) {
         return Message.builder()
                 .id("msg_test")
                 .content(List.of(ContentBlock.ofText(TextBlock.builder().text(text).citations(List.of()).build())))
@@ -351,8 +447,9 @@ class AnthropicLlmClientTest {
                 .stopDetails(Optional.empty())
                 .container(Optional.empty())
                 .diagnostics(Optional.empty())
-                .usage(Usage.builder().inputTokens(1200L).outputTokens(340L).cacheCreationInputTokens(0L)
-                        .cacheReadInputTokens(0L).cacheCreation(Optional.empty()).inferenceGeo(Optional.empty())
+                .usage(Usage.builder().inputTokens(inputTokens).outputTokens(340L)
+                        .cacheCreationInputTokens(cacheCreation).cacheReadInputTokens(cacheRead)
+                        .cacheCreation(Optional.empty()).inferenceGeo(Optional.empty())
                         .serverToolUse(Optional.empty()).serviceTier(Optional.empty())
                         .outputTokensDetails(Optional.empty()).speed(Optional.empty()).build())
                 .build();

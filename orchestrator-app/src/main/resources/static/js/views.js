@@ -268,6 +268,8 @@ export function renderArtifactDetail({ stage, summary, state, underReview = fals
   if (!stage && !summary) return placeholder('Select a stage or a version chip, or click a node in the pipeline graph.');
   const s = stage ?? {};
   const art = state?.view ?? summary;
+  // Acceptance changes when a gate is decided: the polled summary is authoritative, a cached view may predate it.
+  const accepted = typeof summary?.accepted === 'boolean' ? summary.accepted : art?.accepted;
   const acceptance = (accepted) => {
     if (accepted) return chip('accepted', 'chip-ok');
     return underReview ? chip('under review', 'chip-review', 'Accepted only once the pending approval is granted') : chip('superseded', 'chip-muted');
@@ -277,7 +279,7 @@ export function renderArtifactDetail({ stage, summary, state, underReview = fals
       h('h3', {}, s.name || s.id || summary?.stageId),
       art ? chip(`v${art.version ?? '?'}`, 'mono') : null,
       art?.kind ? chip(humanize(art.kind)) : null,
-      typeof art?.accepted === 'boolean' ? acceptance(art.accepted) : null,
+      typeof accepted === 'boolean' ? acceptance(accepted) : null,
       art?.hash ? h('span', { class: 'mono muted small', title: art.hash }, `#${String(art.hash).slice(0, 12)}`) : null,
       art?.createdAt ? h('span', { class: 'muted small', title: fmtDateTime(art.createdAt) }, fmtWhen(art.createdAt)) : null),
     stage ? facts([['Status', statusPill(s.status)], ['Attempts', fmtNum(s.attempts)], ['Agent', s.activeAgent || DASH], ['Duration', fmtMs(s.durationMs)]]) : null,
