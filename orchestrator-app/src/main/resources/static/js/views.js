@@ -529,12 +529,15 @@ export function renderPolicyChip(policy, onOpen) {
     text, pack?.hash ? h('span', { class: 'mono muted' }, ` #${String(pack.hash).slice(0, 8)}`) : null);
 }
 
-/** The policy in force, above the findings of the selected run. */
-export function renderPolicyInForce(policy) {
+/**
+ * The policy in force, above the findings of the selected run. `open` and `onToggle` keep the expanded state across
+ * re-renders (new findings, another run), like the other collapsible sections.
+ */
+export function renderPolicyInForce(policy, { open = false, onToggle = () => {} } = {}) {
   if (!policy || typeof policy !== 'object') return null;
   const pack = policy.pack;
   const disabled = new Set(asList(pack?.disabledRules));
-  return h('details', { class: 'raw policy-in-force' },
+  return h('details', { class: 'raw policy-in-force', open, ontoggle: (e) => onToggle(e.currentTarget.open) },
     h('summary', {}, pack ? `Policy in force: pack ${pack.name} ${pack.version} (#${String(pack.hash ?? '').slice(0, 12)}) and the built-in rules` : 'Policy in force: built-in rules'),
     h('p', { class: 'muted small' }, 'Built-in rules: ',
       asList(policy.builtInRules).map((r) => chip(r.id, disabled.has(r.id) || r.active === false ? 'mono chip-muted' : 'mono',

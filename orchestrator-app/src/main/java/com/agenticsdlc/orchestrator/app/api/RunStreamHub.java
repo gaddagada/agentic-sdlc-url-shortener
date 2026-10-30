@@ -50,10 +50,12 @@ import com.agenticsdlc.orchestrator.core.model.Run;
  * also polls (runs whose {@code nodeId} differs from this node's id, and a slow safety poll for every stream).</p>
  *
  * <p><strong>Run streams.</strong> On connect the stream sends the run's audit events after {@code Last-Event-ID}
- * (all of them without one) as {@code audit} events whose SSE id is the event's sequence number, then the current
- * {@code run} view. After that each committed change sends its new audit events and then the new run view; a client
- * that reconnects with the last id it saw receives exactly the events it missed. Live changes that arrive while the
- * initial state is being read are buffered and de-duplicated by sequence number and run version. When the run is
+ * (all of them without one, or when the id is beyond the run's last sequence number, as after a database reset) as
+ * {@code audit} events whose SSE id is the event's sequence number, then the current {@code run} view. After that
+ * each committed change sends its new audit events (first those another node committed meanwhile, read page by page)
+ * and then the new run view; a client that reconnects with the last id it saw receives exactly the events it missed.
+ * Live changes that arrive while the initial state is being read are buffered and de-duplicated by sequence number
+ * and run version. When the run is
  * terminal (COMPLETED or ABORTED) and its events are sent, the stream ends with that final {@code run} event.</p>
  *
  * <p><strong>Resources.</strong> At most {@code sdlc.console.max-sse-connections} streams are open at a time (more
@@ -100,6 +102,7 @@ public class RunStreamHub implements DisposableBean {
     private final Clock clock;
     private final Settings settings;
     private final LongFunction<SseEmitter> emitters;
+    private final int auditPage;
     private final AtomicInteger connections = new AtomicInteger();
     private final ConcurrentMap<String, Set<RunStream>> runStreams = new ConcurrentHashMap<>();
     private final Set<ListStream> listStreams = ConcurrentHashMap.newKeySet();
@@ -144,7 +147,7 @@ public class RunStreamHub implements DisposableBean {
                         JsonCodec codec, RunEventBus bus, TaskScheduler scheduler, OrchestratorProperties properties,
                         Clock clock) {
         this(engine, auditSink, mapper, graph, codec, bus, scheduler,
-                new BoundedSendExecutor(properties.console().maxSseConnections()),
+                BoundedSendExecutor.forStreams(properties.console().maxSseConnections()),
                 Settings.of(properties.console()), clock);
     }
 
@@ -165,11 +168,13 @@ public class RunStreamHub implements DisposableBean {
     public RunStreamHub(OrchestrationEngine engine, AuditSink auditSink, RunViewMapper mapper, WorkflowGraph graph,
                         JsonCodec codec, RunEventBus bus, TaskScheduler scheduler, Executor sendExecutor,
                         Settings settings, Clock clock) {
-        this(engine, auditSink, mapper, graph, codec, bus, scheduler, sendExecutor, settings, clock, SseEmitter::new);
+        this(engine, auditSink, mapper, graph, codec, bus, scheduler, sendExecutor, settings, clock, SseEmitter::new,
+                AUDIT_PAGE);
     }
 
     /**
-     * Creates the hub with a given write executor and emitter factory (tests pass emitters whose writes block).
+     * Creates the hub with a given write executor, emitter factory and audit page size (tests pass emitters whose
+     * writes block, and small pages).
      *
      * @param engine the engine
      * @param auditSink the audit sink
@@ -182,11 +187,16 @@ public class RunStreamHub implements DisposableBean {
      * @param settings limits
      * @param clock clock of the heartbeat data
      * @param emitters creates the emitter of a stream from its timeout in milliseconds
+     * @param auditPage page size of the audit reads (backlog and gaps), at least 1
      */
     RunStreamHub(OrchestrationEngine engine, AuditSink auditSink, RunViewMapper mapper, WorkflowGraph graph,
                  JsonCodec codec, RunEventBus bus, TaskScheduler scheduler, Executor sendExecutor, Settings settings,
-                 Clock clock, LongFunction<SseEmitter> emitters) {
+                 Clock clock, LongFunction<SseEmitter> emitters, int auditPage) {
+        if (auditPage < 1) {
+            throw new IllegalArgumentException("auditPage must be positive");
+        }
         this.emitters = emitters;
+        this.auditPage = auditPage;
         this.engine = engine;
         this.auditSink = auditSink;
         this.mapper = mapper;
@@ -225,6 +235,12 @@ public class RunStreamHub implements DisposableBean {
             });
             Run run = engine.get(runId);
             long afterSeq = parseLastEventId(lastEventId);
+            if (afterSeq > run.auditSeq()) {
+                // the client saw events this run does not have (a reset database): resume from the start
+                LOG.debug("Last-Event-ID {} is beyond the last audit seq {} of run {}; sending the whole trail",
+                        afterSeq, run.auditSeq(), runId);
+                afterSeq = 0L;
+            }
             stream.initialize(run, mapper.toView(run), backlog(runId, afterSeq), afterSeq);
         } catch (RuntimeException e) {
             stream.release();
@@ -285,9 +301,9 @@ public class RunStreamHub implements DisposableBean {
         List<AuditEvent> events = new ArrayList<>();
         long cursor = afterSeq;
         while (events.size() < MAX_BACKLOG) {
-            List<AuditEvent> page = auditSink.forRun(runId, cursor, Math.min(AUDIT_PAGE, MAX_BACKLOG - events.size()));
+            List<AuditEvent> page = auditSink.forRun(runId, cursor, Math.min(auditPage, MAX_BACKLOG - events.size()));
             events.addAll(page);
-            if (page.size() < AUDIT_PAGE || page.isEmpty()) {
+            if (page.size() < auditPage || page.isEmpty()) {
                 break;
             }
             cursor = page.getLast().seq();
@@ -426,9 +442,20 @@ public class RunStreamHub implements DisposableBean {
         private volatile boolean closed;
 
         Stream() {
-            emitter.onCompletion(this::release);
+            emitter.onCompletion(this::dropped);
             emitter.onTimeout(this::finish);
-            emitter.onError(error -> release());
+            emitter.onError(error -> dropped());
+        }
+
+        /**
+         * The container ended the response (completed or failed, for example a reset connection). The emitter is
+         * done, so it is not completed again; the slot is released now, or by the writer when a blocked write is in
+         * progress (its write task holds a permit of the write executor until the write returns, so the slot is
+         * freed together with it and a new stream never finds the executor exhausted).
+         */
+        private void dropped() {
+            completed.set(true);
+            finish();
         }
 
         /** Queues a live event; a stream that is too far behind is closed (its client reconnects). */
@@ -651,14 +678,27 @@ public class RunStreamHub implements DisposableBean {
             }
         }
 
-        /** Sends the audit events committed by another node (or dropped by a full bus) before {@code nextSeq}. */
+        /**
+         * Sends the audit events committed by another node (or dropped by a full bus) before {@code nextSeq}, page
+         * by page until the stream has caught up (at most {@value #MAX_BACKLOG} events, like the backlog on connect,
+         * and like it not counted against the live event limit). Stops early when the store has no further events.
+         */
         private void fillGap(long nextSeq) {
             try {
-                for (AuditEvent event : auditSink.forRun(runId, lastSeq, (int) Math.min(AUDIT_PAGE,
-                        nextSeq - lastSeq - 1))) {
-                    if (event.seq() > lastSeq && event.seq() < nextSeq) {
-                        enqueue(auditEvent(event));
-                        lastSeq = event.seq();
+                int filled = 0;
+                while (lastSeq < nextSeq - 1 && filled < MAX_BACKLOG) {
+                    int wanted = (int) Math.min(Math.min(auditPage, nextSeq - lastSeq - 1), MAX_BACKLOG - filled);
+                    List<AuditEvent> page = auditSink.forRun(runId, lastSeq, wanted);
+                    long before = lastSeq;
+                    for (AuditEvent event : page) {
+                        if (event.seq() > lastSeq && event.seq() < nextSeq) {
+                            enqueueBacklog(auditEvent(event));
+                            lastSeq = event.seq();
+                            filled++;
+                        }
+                    }
+                    if (page.size() < wanted || lastSeq == before) {
+                        break;
                     }
                 }
             } catch (RuntimeException e) {

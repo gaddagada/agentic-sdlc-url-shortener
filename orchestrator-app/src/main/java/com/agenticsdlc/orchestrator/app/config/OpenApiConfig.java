@@ -95,8 +95,9 @@ public class OpenApiConfig {
                     + "feature-disabled)",
             409, "Refused in the current state: wrong run or stage state, stale approvalId, invalid command "
                     + "(exhausted budget, missing waiver, ...), four-eyes rule, unavailable agent provider, the run "
-                    + "is executing on another engine node (type run-leased-elsewhere, with holder and runId), or an "
-                    + "evaluation suite run is already in progress (type evaluation-in-progress)",
+                    + "is executing on another engine node (type run-leased-elsewhere, with holder and runId), the run "
+                    + "was written by another node first so the command was not applied (type run-conflict, with "
+                    + "runId), or an evaluation suite run is already in progress (type evaluation-in-progress)",
             503, "The control plane is shutting down, or (event streams) this node serves the maximum number of "
                     + "streams (type stream-limit-reached, with Retry-After)");
 

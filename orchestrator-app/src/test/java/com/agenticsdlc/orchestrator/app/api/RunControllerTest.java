@@ -22,6 +22,7 @@ import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -31,6 +32,7 @@ import org.springframework.test.web.servlet.assertj.MvcTestResult;
 
 import com.agenticsdlc.orchestrator.app.llm.ProviderCatalog;
 import com.agenticsdlc.orchestrator.app.llm.ProviderUnavailableException;
+import com.agenticsdlc.orchestrator.app.runs.RunConflictException;
 import com.agenticsdlc.orchestrator.app.runs.RunListItem;
 import com.agenticsdlc.orchestrator.app.runs.RunListPage;
 import com.agenticsdlc.orchestrator.app.runs.RunListQuery;
@@ -320,6 +322,63 @@ class RunControllerTest {
         assertThat(result).bodyJson().extractingPath("$.type").isEqualTo(ProblemTypes.INVALID_STATE.toString());
         assertThat(result).bodyJson().extractingPath("$.detail").asString()
                 .startsWith("a policy denial cannot be resumed");
+    }
+
+    @Test
+    void aStoreWriteConflictIs409RunConflictWhetherRawOrWrappedByTheEngine() {
+        InvalidRunStateException wrapped = new InvalidRunStateException("run run-1 could not be persisted "
+                + "(org.springframework.orm.ObjectOptimisticLockingFailureException: Row was updated)");
+        wrapped.initCause(new OptimisticLockingFailureException("Row was updated or deleted by another transaction"));
+        when(engine.approve(eq("run-1"), eq("design"), any(), any(), any()))
+                .thenThrow(new OptimisticLockingFailureException("Row was updated or deleted by another transaction"))
+                .thenThrow(wrapped);
+
+        for (int call = 0; call < 2; call++) {
+            MvcTestResult result = post("/api/v1/runs/run-1/stages/design/approve", "{}");
+
+            assertThat(result).as("call %s", call).hasStatus(HttpStatus.CONFLICT)
+                    .hasContentTypeCompatibleWith(MediaType.APPLICATION_PROBLEM_JSON);
+            assertThat(result).bodyJson().extractingPath("$.type").isEqualTo(ProblemTypes.RUN_CONFLICT.toString());
+            assertThat(result).bodyJson().extractingPath("$.title").isEqualTo("Run changed concurrently");
+            assertThat(result).bodyJson().extractingPath("$.runId").isEqualTo("run-1");
+            assertThat(result).bodyJson().extractingPath("$.detail").asString().contains("run-1")
+                    .contains("another engine node").doesNotContain("Row was updated");
+        }
+    }
+
+    @Test
+    void aRawRunConflictOrAnIllegalStateCausedByOneIs409RunConflict() {
+        when(engine.stop(eq("run-1"), any(), any()))
+                .thenThrow(new RunConflictException("audit batch of run run-1 does not continue the stored hash chain"))
+                .thenThrow(new IllegalStateException("commit failed",
+                        new OptimisticLockingFailureException("Row was updated or deleted by another transaction")));
+
+        for (int call = 0; call < 2; call++) {
+            MvcTestResult result = post("/api/v1/runs/run-1/stop", "{}");
+
+            assertThat(result).as("call %s", call).hasStatus(HttpStatus.CONFLICT);
+            assertThat(result).bodyJson().extractingPath("$.type").isEqualTo(ProblemTypes.RUN_CONFLICT.toString());
+            assertThat(result).bodyJson().extractingPath("$.runId").isEqualTo("run-1");
+            assertThat(result).bodyJson().extractingPath("$.detail").asString().doesNotContain("hash chain")
+                    .doesNotContain("Row was updated");
+        }
+    }
+
+    @Test
+    void anInvalidRunStateWithoutAStoreConflictStaysAnInvalidStateAndAPlainIllegalStateA503() {
+        InvalidRunStateException unrelated = new InvalidRunStateException("stage design is not awaiting approval");
+        unrelated.initCause(new IllegalArgumentException("not a store conflict"));
+        when(engine.approve(eq("run-1"), eq("design"), any(), any(), any())).thenThrow(unrelated)
+                .thenThrow(new IllegalStateException("engine is closed"));
+
+        MvcTestResult state = post("/api/v1/runs/run-1/stages/design/approve", "{}");
+        MvcTestResult closed = post("/api/v1/runs/run-1/stages/design/approve", "{}");
+
+        assertThat(state).hasStatus(HttpStatus.CONFLICT);
+        assertThat(state).bodyJson().extractingPath("$.type").isEqualTo(ProblemTypes.INVALID_STATE.toString());
+        assertThat(closed).hasStatus(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(closed).bodyJson().extractingPath("$.type")
+                .isEqualTo(ProblemTypes.SERVICE_UNAVAILABLE.toString());
     }
 
     @Test

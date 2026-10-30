@@ -15,9 +15,9 @@ import org.springframework.test.web.servlet.assertj.MockMvcTester;
 import org.springframework.test.web.servlet.assertj.MvcTestResult;
 
 /**
- * {@code api-key} mode with {@code sdlc.security.public-docs=false} (what the prod profile sets): the OpenAPI document
- * and Swagger UI need the API key like {@code GET /api/**}, in every spelling of their paths, while the console and
- * the health endpoint stay public.
+ * {@code api-key} mode with {@code sdlc.security.public-docs=false} (what the prod profile sets): the OpenAPI document,
+ * Swagger UI and the management endpoints other than health need the API key like {@code GET /api/**}, in every
+ * spelling of their paths, while the console and the health endpoint (with its probes) stay public.
  */
 @SpringBootTest(properties = {"sdlc.security.mode=api-key", "sdlc.security.api-key=" + ApiKeyModeTest.KEY,
         "sdlc.security.public-docs=false"})
@@ -42,8 +42,18 @@ class ApiKeyModePrivateDocsTest {
     }
 
     @Test
+    void theManagementEndpointsOtherThanHealthNeedTheKey() {
+        for (String path : List.of("/actuator", "/actuator/metrics", "/actuator/metrics/jvm.threads.live",
+                "/actuator/info", "/ACTUATOR/metrics", "/actuator/health/../metrics")) {
+            assertThat(mvc.get().uri(path).exchange()).as(path).hasStatus(HttpStatus.UNAUTHORIZED);
+        }
+        assertThat(mvc.get().uri("/actuator/metrics").header(ApiKeyAuthFilter.HEADER, ApiKeyModeTest.KEY)
+                .exchange()).hasStatus(HttpStatus.OK);
+    }
+
+    @Test
     void theConsoleAndHealthStayPublic() {
-        for (String path : List.of("/", "/index.html", "/js/api.js", "/actuator/health")) {
+        for (String path : List.of("/", "/index.html", "/js/api.js", "/actuator/health", "/actuator/health/liveness")) {
             assertThat(mvc.get().uri(path).exchange()).as(path).hasStatus(HttpStatus.OK);
         }
     }

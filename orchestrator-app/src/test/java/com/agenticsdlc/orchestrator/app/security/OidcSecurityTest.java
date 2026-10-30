@@ -209,6 +209,15 @@ class OidcSecurityTest {
     }
 
     @Test
+    void theProdProfileExposesOnlyTheHealthEndpoint() {
+        String admin = token("root", List.of("admin", "operator", "approver"));
+        for (String path : List.of("/actuator/metrics", "/actuator/info")) {
+            assertThat(get(path, admin)).as(path).hasStatus(HttpStatus.NOT_FOUND);
+        }
+        assertThat(get("/actuator/health", admin)).hasStatus(HttpStatus.OK);
+    }
+
+    @Test
     void theSuiteNeedsAdminAndIsDisabledInProdWhileStreamsPolicyAndEvaluationServeAnyRole() {
         assertThat(post("/api/v1/evaluation/suite/run", token("alice", List.of("operator"))).exchange())
                 .hasStatus(HttpStatus.FORBIDDEN);

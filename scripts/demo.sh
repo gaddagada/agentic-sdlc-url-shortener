@@ -14,6 +14,7 @@
 #   OPERATOR          operator identity sent as X-Operator-Id (default demo-operator)
 #   PROVIDER          deterministic | anthropic | ollama (default: server default)
 #   TIMEOUT_SECONDS   how long to drive the run before giving up (default 300)
+#   AUDIT_PAGE_SIZE   events per audit page read at the end (default 500, the endpoint allows 1..5000)
 #   SDLC_API_KEY      X-Api-Key of a control plane in api-key mode (default: SDLC_SECURITY_API_KEY, the variable
 #                     docker-compose.yml passes to the control plane, so one exported key serves both)
 
@@ -24,6 +25,7 @@ OPERATOR="${OPERATOR:-demo-operator}"
 SCENARIO="${1:-greenfield}"
 PROVIDER="${PROVIDER:-}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-300}"
+AUDIT_PAGE_SIZE="${AUDIT_PAGE_SIZE:-500}"
 
 # Pick a working Python (on Windows, "python3" may be a Microsoft Store stub that only prints a hint).
 PY=""
@@ -146,8 +148,22 @@ t = d.get("timing", {}); print("  timing:", ", ".join(f"{k}={v}" for k, v in t.i
 
 echo
 echo "-- audit trail (last 15 events)"
-api GET "/api/v1/runs/$RUN_ID/audit" | json '
-for e in d[-15:]:
+# GET .../audit returns at most `limit` events after `afterSeq`: page through the whole trail, keeping the last 15.
+AFTER_SEQ=0
+LAST_EVENTS="[]"
+while :; do
+  PAGE=$(api GET "/api/v1/runs/$RUN_ID/audit?afterSeq=$AFTER_SEQ&limit=$AUDIT_PAGE_SIZE")
+  read -r COUNT NEXT_SEQ < <(printf '%s' "$PAGE" | json 'print(len(d), d[-1]["seq"] if d else 0)')
+  (( COUNT == 0 )) && break
+  LAST_EVENTS=$(printf '%s\n%s' "$LAST_EVENTS" "$PAGE" | "$PY" -c '
+import sys, json
+kept, page = sys.stdin.read().split("\n", 1)
+print(json.dumps((json.loads(kept) + json.loads(page))[-15:]))' | tr -d '\r')
+  AFTER_SEQ=$NEXT_SEQ
+  (( COUNT < AUDIT_PAGE_SIZE )) && break
+done
+printf '%s' "$LAST_EVENTS" | json '
+for e in d:
     stage = e.get("stageId") or "-"
     actor = e["actor"]["type"] + ":" + e["actor"]["id"]
     print("  %4d  %s  %-18s %-24s %s  %s" % (e["seq"], e["timestamp"], stage, e["type"], actor, e["message"]))

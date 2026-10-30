@@ -98,6 +98,42 @@ class SecurityPostureValidatorTest {
     }
 
     @Test
+    void prodWarnsAboutSingleNodeLeasesTheEvaluationSuiteAndKeysFetchedOverPlainHttp(CapturedOutput output) {
+        prod.withPropertyValues("sdlc.security.mode=oidc",
+                        "sdlc.security.oidc.issuer-uri=http://idp.internal/realms/sdlc",
+                        "sdlc.security.oidc.jwk-set-uri=HTTP://idp.internal/realms/sdlc/certs",
+                        "sdlc.security.oidc.audience=sdlc", "sdlc.governance.four-eyes=true", SIGNING_KEY,
+                        "sdlc.engine.lease-provider=memory", "sdlc.evaluation.enabled=true")
+                .run(context -> assertThat(context).as("warnings, not refusals").hasNotFailed());
+
+        assertThat(output.getOut().lines().filter(line -> line.contains(" WARN ")).toList()).anySatisfy(line ->
+                        assertThat(line).contains("sdlc.engine.lease-provider=memory").contains("single-node only"))
+                .anySatisfy(line -> assertThat(line).contains("sdlc.evaluation.enabled=true"))
+                .anySatisfy(line -> assertThat(line).contains("sdlc.security.oidc.issuer-uri")
+                        .contains("http://idp.internal/realms/sdlc"))
+                .anySatisfy(line -> assertThat(line).contains("sdlc.security.oidc.jwk-set-uri"));
+    }
+
+    @Test
+    void prodWithSharedLeasesNoSuiteAndHttpsKeysHasNoPostureWarning(CapturedOutput output) {
+        prod.withPropertyValues("sdlc.security.mode=oidc", "sdlc.security.oidc.issuer-uri=https://idp.test",
+                        "sdlc.security.oidc.jwk-set-uri=https://idp.test/certs", "sdlc.security.oidc.audience=sdlc",
+                        "sdlc.governance.four-eyes=true", SIGNING_KEY)
+                .run(context -> assertThat(context).hasNotFailed());
+
+        assertThat(output).doesNotContain("single-node only").doesNotContain("sdlc.evaluation.enabled=true")
+                .doesNotContain("is not https");
+    }
+
+    @Test
+    void outsideProdTheProductionWarningsAreNotLogged(CapturedOutput output) {
+        runner.withPropertyValues("sdlc.engine.lease-provider=memory", "sdlc.evaluation.enabled=true")
+                .run(context -> assertThat(context).hasNotFailed());
+
+        assertThat(output).doesNotContain("single-node only").doesNotContain("sdlc.evaluation.enabled=true");
+    }
+
+    @Test
     void outsideProdNoSigningKeyIsRequired() {
         runner.withPropertyValues("sdlc.security.api-key=" + LONG_KEY).run(context -> assertThat(context)
                 .hasNotFailed());

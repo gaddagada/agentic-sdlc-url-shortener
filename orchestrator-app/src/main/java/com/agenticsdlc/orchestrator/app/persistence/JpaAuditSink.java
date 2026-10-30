@@ -6,11 +6,13 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Limit;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import com.agenticsdlc.orchestrator.app.runs.RunConflictException;
 import com.agenticsdlc.orchestrator.core.audit.Actor;
 import com.agenticsdlc.orchestrator.core.audit.ActorType;
 import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
@@ -31,7 +33,9 @@ import tools.jackson.core.type.TypeReference;
  * append transaction the sink enforces chain continuity like the core's {@code InMemoryAuditSink}: a batch whose
  * first {@code prevHash} does not continue the stored head of the run, or that is not itself an intact chain, is
  * rejected with an {@link IllegalStateException} and nothing of the commit is persisted (legacy unsigned batches
- * remain accepted). The unique {@code (run_id, seq)} constraint still guards against concurrent writers.</p>
+ * remain accepted). The unique {@code (run_id, seq)} constraint still guards against concurrent writers. A batch
+ * refused because another writer appended first (it does not continue the stored head, or its sequence numbers are
+ * taken) is a {@link RunConflictException}.</p>
  */
 @Component
 public class JpaAuditSink implements AuditSink {
@@ -64,7 +68,9 @@ public class JpaAuditSink implements AuditSink {
      * chain.
      *
      * @param batch events to append, in sequence order per run (an engine batch always belongs to one run)
-     * @throws IllegalStateException when a run's events do not continue its stored chain or are not an intact chain
+     * @throws RunConflictException when another writer appended to a run first (the batch does not continue the
+     *                              stored chain, or its sequence numbers are taken)
+     * @throws IllegalStateException when a run's events are not an intact chain
      */
     @Override
     public void append(List<AuditEvent> batch) {
@@ -79,7 +85,13 @@ public class JpaAuditSink implements AuditSink {
         transactions.executeWithoutResult(status -> {
             byRun.forEach((runId, runEvents) -> AuditChainContinuity.check(runId,
                     events.findFirstByRunIdOrderBySeqDesc(runId).map(this::toEvent).orElse(null), runEvents));
-            events.saveAll(rows);
+            try {
+                events.saveAll(rows);
+            } catch (DataIntegrityViolationException e) {
+                // the unique (run_id, seq) constraint: a concurrent writer stored these sequence numbers first
+                throw new RunConflictException("audit events of run(s) " + byRun.keySet() + " were refused: their "
+                        + "sequence numbers were stored by another writer first", e);
+            }
         });
     }
 

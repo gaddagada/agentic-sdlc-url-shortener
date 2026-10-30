@@ -2,7 +2,8 @@
 #
 # SecurityPostureValidator refuses to start this profile when the API is open, an API key is shorter than
 # 32 characters, the four-eyes rule is off, the console is enabled without authentication, or no change record
-# signing key of at least 32 bytes is configured.
+# signing key of at least 32 bytes is configured. It starts with a WARN for in-memory run leases (single-node only),
+# for the evaluation suite endpoint, and for an http:// OIDC issuer or JWK set URL.
 #
 # Required settings (environment variables shown):
 #   SDLC_SECURITY_OIDC_ISSUERURI     OIDC issuer, e.g. https://idp.example.com/realms/sdlc
@@ -28,6 +29,14 @@ sdlc:
     enabled: false
 
 management:
+  endpoints:
+    web:
+      exposure:
+        # Only the health endpoint (aggregate status, liveness/readiness probes) is exposed in production. metrics and
+        # info are exposed by the default (local) configuration only; operators who scrape them opt in explicitly,
+        # e.g. MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE=health,metrics, and they then need the same credentials as the
+        # API (a bearer token with any role in oidc mode; X-Api-Key in api-key mode, as public-docs is false here).
+        include: health
   endpoint:
     health:
       # /actuator/health is public: report only the aggregate status

@@ -55,7 +55,7 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics       # local evaluation; the prod profile exposes health only (operators opt in)
   endpoint:
     health:
       # Component statuses (db, diskSpace, workspaceIndex, ...) are shown; their details are not.

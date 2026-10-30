@@ -122,6 +122,33 @@ class ApiKeyAuthFilterTest {
     }
 
     @Test
+    void withPrivateDocumentsTheManagementEndpointsOtherThanHealthNeedTheKey() throws Exception {
+        ApiKeyAuthFilter privateDocs = new ApiKeyAuthFilter("s3cret-key", MAPPER, true);
+        for (String uri : new String[] {"/actuator", "/actuator/", "/actuator/metrics", "/actuator/info",
+                "/ACTUATOR/Metrics", "/actuator;x=1/metrics", "//actuator//metrics", "/actuator/health/../metrics",
+                "/%61ctuator/metrics", "/actuator/healthx"}) {
+            MockFilterChain chain = new MockFilterChain();
+            MockHttpServletResponse response = new MockHttpServletResponse();
+
+            privateDocs.doFilter(request(uri, null), response, chain);
+
+            assertThat(chain.getRequest()).as(uri).isNull();
+            assertThat(response.getStatus()).as(uri).isEqualTo(401);
+        }
+        for (String uri : new String[] {"/actuator/health", "/actuator/health/liveness",
+                "/actuator/health/readiness"}) {
+            MockFilterChain chain = new MockFilterChain();
+
+            privateDocs.doFilter(request(uri, null), new MockHttpServletResponse(), chain);
+
+            assertThat(chain.getRequest()).as(uri).isNotNull();
+        }
+        MockFilterChain publicDocs = new MockFilterChain();
+        filter.doFilter(request("/actuator/metrics", null), new MockHttpServletResponse(), publicDocs);
+        assertThat(publicDocs.getRequest()).as("public documents: the actuator stays public too").isNotNull();
+    }
+
+    @Test
     void withPrivateDocumentsTheConsoleHealthAndLookalikesStayPublic() throws Exception {
         ApiKeyAuthFilter privateDocs = new ApiKeyAuthFilter("s3cret-key", MAPPER, true);
         for (String uri : new String[] {"/", "/index.html", "/js/api.js", "/actuator/health", "/v3/api-docsx",

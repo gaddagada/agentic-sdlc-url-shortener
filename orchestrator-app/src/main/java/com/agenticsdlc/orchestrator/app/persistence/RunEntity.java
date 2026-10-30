@@ -11,8 +11,15 @@ import jakarta.persistence.Version;
 import org.jspecify.annotations.Nullable;
 
 /**
- * A persisted run: the aggregate as one JSON snapshot plus a few queryable columns. {@link #version} is the JPA
- * optimistic-lock version, so two writers can never silently overwrite each other's snapshot.
+ * A persisted run: the aggregate as one JSON snapshot plus a few queryable columns.
+ *
+ * <p>{@link #version} is the JPA optimistic-lock version. The store reads the row and writes it back in one
+ * transaction ({@code JpaRunStore}), so the version only detects transactions that overlap in time: it protects
+ * against lost updates within this node (where the engine's per-run lock serializes the commits of a run anyway),
+ * not against a node that writes a stale in-memory run in a later transaction. Across nodes, lost updates are
+ * prevented by the run leases (only the lease holder mutates a run) and by the engine's stale-state refresh: a node
+ * that acquires a run's lease, or reads a run it is not executing, first reloads the run when the store holds a newer
+ * state.</p>
  *
  * <p>The listing columns added by V2 ({@code autonomy}, {@code workspace_mode}, {@code started_by},
  * {@code risk_level}, {@code node_id}, {@code audit_head_hash}) are copies of snapshot data for paged listings and

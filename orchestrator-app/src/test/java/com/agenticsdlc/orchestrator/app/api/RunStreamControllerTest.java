@@ -116,13 +116,31 @@ class RunStreamControllerTest {
 
     @Test
     void lastEventIdResumesAfterTheLastSeenSequence() {
-        when(engine.get("run-1")).thenReturn(run("run-1", RunStatus.WAITING_HUMAN));
+        Run run = run("run-1", RunStatus.WAITING_HUMAN);
+        run.resetAuditChain(3, null);
+        when(engine.get("run-1")).thenReturn(run);
         when(auditSink.forRun("run-1", 2L, RunStreamHub.AUDIT_PAGE)).thenReturn(List.of(event(3)));
 
         MvcTestResult result = mvc.get().uri("/api/v1/runs/run-1/events").header("Last-Event-ID", "2")
                 .accept(MediaType.TEXT_EVENT_STREAM).asyncExchange();
 
         assertThat(events(result)).extracting(e -> e[0] + "#" + e[1]).containsExactly("audit#3", "run#null");
+    }
+
+    @Test
+    void aLastEventIdBeyondTheRunsSequenceIsIgnoredAndTheWholeTrailIsSent() {
+        // the client saw seq 99 of a database that has since been reset: resuming after 99 would send nothing
+        Run run = run("run-1", RunStatus.WAITING_HUMAN);
+        run.resetAuditChain(3, null);
+        when(engine.get("run-1")).thenReturn(run);
+        when(auditSink.forRun("run-1", 0L, RunStreamHub.AUDIT_PAGE)).thenReturn(List.of(event(1), event(2),
+                event(3)));
+
+        MvcTestResult result = mvc.get().uri("/api/v1/runs/run-1/events").header("Last-Event-ID", "99")
+                .accept(MediaType.TEXT_EVENT_STREAM).asyncExchange();
+
+        assertThat(events(result)).extracting(e -> e[0] + "#" + e[1])
+                .containsExactly("audit#1", "audit#2", "audit#3", "run#null");
     }
 
     @Test

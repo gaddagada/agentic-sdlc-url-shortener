@@ -36,6 +36,12 @@ public final class ProblemTypes {
      * {@code holder} (that node's id) and {@code runId}. Retry when the run waits for a human or has finished.
      */
     public static final URI RUN_LEASED_ELSEWHERE = of("run-leased-elsewhere");
+    /**
+     * The run was written by another engine node (or another writer) after this node read it, so the command was not
+     * applied (the store refused the write); the problem carries {@code runId} when the path names the run. Reload the
+     * run and retry the command if it still applies.
+     */
+    public static final URI RUN_CONFLICT = of("run-conflict");
 
     /** The command is invalid for the run (budget exhausted, unknown stage, missing answers, ...). */
     public static final URI INVALID_COMMAND = of("invalid-command");

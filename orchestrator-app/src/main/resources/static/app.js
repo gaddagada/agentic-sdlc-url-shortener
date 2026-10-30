@@ -54,7 +54,7 @@ const App = {
   artifactSel: { stageId: null, version: null }, // version null = accepted (else latest)
   artifactViews: new Map(), // `${runId}|${stageId}|${version}` -> { status, view?, error?, stale?, refreshing? }
   artifactStateSig: null, // approvals and artifact summaries of the selected run when the cached views were last valid
-  detailsOpen: { payload: false, provenance: false },
+  detailsOpen: { payload: false, provenance: false, policyInForce: false }, // expanded collapsible sections
   tab: TABS.includes(store.get('sdlc.tab')) ? store.get('sdlc.tab') : 'artifacts',
   drafts: {}, // values typed into the pending-actions card, keyed by data-draft
   busy: false, // a governance command is in flight
@@ -949,7 +949,10 @@ function renderMetricsTab() {
 function renderPolicyTab() {
   const run = App.run;
   renderIfChanged('tab:policy', [App.selectedId, run?.policyFindings ?? null, App.policy], () => mount($('panel-policy'),
-    V.renderPolicyInForce(App.policy),
+    V.renderPolicyInForce(App.policy, {
+      open: App.detailsOpen.policyInForce,
+      onToggle: (open) => { App.detailsOpen.policyInForce = open; },
+    }),
     !App.selectedId ? V.placeholder('Select a run to see its policy findings.')
       : run ? V.renderPolicy(run.policyFindings) : V.placeholder('Loading\u2026')));
 }

@@ -17,7 +17,9 @@ param(
   [string]$BaseUrl = $(if ($env:ORCHESTRATOR_URL) { $env:ORCHESTRATOR_URL } else { "http://localhost:8090" }),
   [string]$Operator = "demo-operator",
   [string]$Provider = "",
-  [int]$TimeoutSeconds = 300
+  [int]$TimeoutSeconds = 300,
+  # events per audit page read at the end (the endpoint allows 1..5000)
+  [ValidateRange(1, 5000)][int]$AuditPageSize = 500
 )
 
 $ErrorActionPreference = "Stop"
@@ -110,8 +112,18 @@ Write-Host "  timing: $(($view.timing.PSObject.Properties | Where-Object { $null
 
 Write-Host ""
 Write-Host "-- audit trail (last 15 events)"
-$audit = Invoke-Api GET "/api/v1/runs/$runId/audit"
-$audit | Select-Object -Last 15 | ForEach-Object {
+# GET .../audit returns at most -limit events after -afterSeq: page through the whole trail, keeping the last 15.
+$afterSeq = 0
+$audit = @()
+while ($true) {
+  # ForEach-Object unrolls the JSON array (Windows PowerShell 5.1 passes it on as one object)
+  $page = @(Invoke-Api GET "/api/v1/runs/$runId/audit?afterSeq=$afterSeq&limit=$AuditPageSize" | ForEach-Object { $_ })
+  if ($page.Count -eq 0) { break }
+  $audit = @(($audit + $page) | Select-Object -Last 15)
+  $afterSeq = $page[-1].seq
+  if ($page.Count -lt $AuditPageSize) { break }
+}
+$audit | ForEach-Object {
   $stage = if ($_.stageId) { $_.stageId } else { "-" }
   Write-Host ("  {0,4}  {1}  {2,-18} {3,-24} {4}:{5}  {6}" -f $_.seq, $_.timestamp, $stage, $_.type, $_.actor.type, $_.actor.id, $_.message)
 }

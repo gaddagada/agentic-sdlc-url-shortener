@@ -26,18 +26,19 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * Protects {@code /api/**} with a shared API key sent in {@code X-Api-Key} ({@code sdlc.security.mode=api-key},
  * ADR 0009): a missing or wrong key is answered with a 401 Problem Detail and a {@code WWW-Authenticate} challenge
- * naming the header. The static console and actuator are never behind the key; the OpenAPI document and Swagger UI
- * ({@code /v3/api-docs}, {@code /v3/api-docs/**}, {@code /v3/api-docs.yaml}, {@code /swagger-ui.html},
- * {@code /swagger-ui/**}) are behind it only when {@code sdlc.security.public-docs=false} (in this mode every caller
- * past the filter holds every role, so the filter is what keeps the documents private). Keys are compared as SHA-256
- * digests with {@link MessageDigest#isEqual} (constant time, no length leak) and never logged.
+ * naming the header. The static console and the health endpoint ({@code /actuator/health/**}, liveness probes) are
+ * never behind the key. The OpenAPI document and Swagger UI ({@code /v3/api-docs}, {@code /v3/api-docs/**},
+ * {@code /v3/api-docs.yaml}, {@code /swagger-ui.html}, {@code /swagger-ui/**}) and the other management endpoints
+ * ({@code /actuator/**}) are behind it only when {@code sdlc.security.public-docs=false}, as the prod profile sets (in
+ * this mode every caller past the filter holds every role, so the filter is what keeps them private). Keys are
+ * compared as SHA-256 digests with {@link MessageDigest#isEqual} (constant time, no length leak) and never logged.
  *
  * <p>The filter is registered for every path ({@code /*}) and decides itself whether a request is an API request,
  * on <em>normalized</em> paths only: the container's decoded {@code servletPath + pathInfo} and, as a fail-closed
  * second opinion, the request URI after percent-decoding. Both views are stripped of {@code ;} path parameters,
  * dot segments and duplicate slashes and compared case-insensitively, so encodings such as {@code /%61pi/v1/runs},
  * {@code /api;x=1/v1/runs} or {@code /api/v1//runs} cannot route to a controller without the key. The same
- * normalized views decide whether a request targets the documents.</p>
+ * normalized views decide whether a request targets the documents or the management endpoints.</p>
  */
 public final class ApiKeyAuthFilter extends OncePerRequestFilter {
 
@@ -71,8 +72,8 @@ public final class ApiKeyAuthFilter extends OncePerRequestFilter {
      *
      * @param apiKey the expected key (not blank)
      * @param mapper JSON mapper used to write the Problem Detail
-     * @param protectDocs whether the OpenAPI document and Swagger UI need the key too
-     *                    ({@code sdlc.security.public-docs=false})
+     * @param protectDocs whether the OpenAPI document, Swagger UI and the management endpoints other than health
+     *                    need the key too ({@code sdlc.security.public-docs=false})
      */
     public ApiKeyAuthFilter(String apiKey, JsonMapper mapper, boolean protectDocs) {
         if (apiKey == null || apiKey.isBlank()) {
@@ -85,7 +86,7 @@ public final class ApiKeyAuthFilter extends OncePerRequestFilter {
 
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
-        return !isApiRequest(request) && !(protectDocs && isDocsRequest(request));
+        return !isApiRequest(request) && !(protectDocs && (isDocsRequest(request) || isManagementRequest(request)));
     }
 
     /**
@@ -108,6 +109,17 @@ public final class ApiKeyAuthFilter extends OncePerRequestFilter {
      */
     static boolean isDocsRequest(HttpServletRequest request) {
         return anyNormalizedView(request, ApiKeyAuthFilter::isDocs);
+    }
+
+    /**
+     * Returns whether a request targets a management endpoint other than health ({@code /actuator/**} without
+     * {@code /actuator/health/**}), judged on the same normalized views as {@link #isApiRequest}.
+     *
+     * @param request the request
+     * @return true when either normalized view of the path is such an endpoint
+     */
+    static boolean isManagementRequest(HttpServletRequest request) {
+        return anyNormalizedView(request, ApiKeyAuthFilter::isManagement);
     }
 
     private static boolean anyNormalizedView(HttpServletRequest request, Predicate<String> test) {
@@ -179,6 +191,13 @@ public final class ApiKeyAuthFilter extends OncePerRequestFilter {
         return lower.equals(PROTECTED_ROOT) || lower.startsWith(PROTECTED_ROOT + "/");
     }
 
+    private static boolean isManagement(String normalizedPath) {
+        String lower = normalizedPath.toLowerCase(Locale.ROOT);
+        boolean actuator = lower.equals("/actuator") || lower.startsWith("/actuator/");
+        boolean health = lower.equals("/actuator/health") || lower.startsWith("/actuator/health/");
+        return actuator && !health;
+    }
+
     private static boolean isDocs(String normalizedPath) {
         String lower = normalizedPath.toLowerCase(Locale.ROOT);
         return lower.equals("/v3/api-docs") || lower.startsWith("/v3/api-docs/") || lower.startsWith("/v3/api-docs.")
@@ -198,7 +217,7 @@ public final class ApiKeyAuthFilter extends OncePerRequestFilter {
         problem.put("title", "Unauthorized");
         problem.put("status", HttpServletResponse.SC_UNAUTHORIZED);
         problem.put("detail", "A valid " + HEADER + " header is required for /api/** requests"
-                + (protectDocs ? " and the API documentation." : "."));
+                + (protectDocs ? ", the API documentation and the management endpoints other than health." : "."));
         problem.put("instance", request.getRequestURI());
         response.setStatus(HttpServletResponse.SC_UNAUTHORIZED);
         response.setHeader(HttpHeaders.WWW_AUTHENTICATE, CHALLENGE);

@@ -61,6 +61,10 @@ import com.agenticsdlc.orchestrator.core.port.RunLease;
  * is recovered by the other node once its lease is released or expired. A node that died without releasing its
  * leases and restarts with the same fixed node id reclaims its own leases at once (commands and recovery do not wait
  * for the old lease to expire). The audit chain stays intact throughout.
+ *
+ * <p>A crash is simulated with {@link NodeCrash}: once the crashed node's attempt has started (its last commit is
+ * done), every call of that node to the store, the audit sink and the lease provider fails, so its blocked attempt can
+ * finish later without writing anything, and nothing is released (unlike {@code close()}).</p>
  */
 @DataJpaTest
 @Import({JpaRunStore.class, JpaAuditSink.class, PersistenceFixtures.class})
@@ -101,6 +105,8 @@ class JdbcLeaseMultiNodeTest {
 
     private final MutableClock clock = new MutableClock(Instant.parse("2026-10-30T10:00:00Z"));
     private final CountDownLatch slowImplementation = new CountDownLatch(1);
+    private final CountDownLatch implementationStarted = new CountDownLatch(1);
+    private final NodeCrash crashOfA = new NodeCrash();
     private JdbcRunLeaseProvider leases;
     private OrchestrationEngine a;
     private OrchestrationEngine b;
@@ -216,11 +222,10 @@ class JdbcLeaseMultiNodeTest {
 
     @Test
     void aRunOfACrashedNodeIsRecoveredOnlyOnceItsLeaseExpired() {
-        a = node("node-a", slowImplementation);
+        a = node("node-a", slowImplementation, crashOfA);
         b = node("node-b", null);
         String id = a.start(REQUIREMENT, "crash", RunOptions.defaults().withAutonomy(AutonomyLevel.FULL_AUTO)).id();
-        awaitRun(a, id, r -> r.stage(IMPLEMENT).status() == StageStatus.RUNNING);
-        // node a "crashes": it never renews, releases or completes anything again (its attempt stays blocked)
+        crashDuringImplementation(a, id);
 
         b.recoverInterrupted();
         assertThat(b.get(id).status()).as("the lease is still valid").isEqualTo(RunStatus.RUNNING);
@@ -232,16 +237,26 @@ class JdbcLeaseMultiNodeTest {
         assertThat(recovered.haltReason()).isEqualTo(HaltReason.INTERRUPTED_BY_RESTART);
         assertThat(recovered.stage(IMPLEMENT).status()).isIn(StageStatus.PENDING, StageStatus.STALE);
         assertThat(leases.holderOf(id)).as("recovery released the lease it took").isEmpty();
+
+        // the dead node's blocked attempt finishes now, while node b carries the run on: nothing of it is written
+        slowImplementation.countDown();
+        b.resume(id, ALICE);
+        awaitRun(b, id, r -> r.stage(RELEASE).status() == StageStatus.AWAITING_APPROVAL);
+        b.approve(id, RELEASE, ALICE, "shipped by the surviving node");
+        Run done = awaitRun(b, id, r -> r.status() == RunStatus.COMPLETED);
+        List<AuditEvent> trail = audit.forRun(id, 0);
+        assertValidChain(trail, done);
+        assertThat(nodesOf(trail, AuditEventType.STAGE_STARTED, IMPLEMENT)).containsExactly("node-a", "node-b");
     }
 
     @Test
     void aNodeRestartedWithItsFixedNodeIdTakesItsRunBackWithoutWaitingForTheOldLeaseToExpire() {
-        a = node("node-fixed", slowImplementation);
+        a = node("node-fixed", slowImplementation, crashOfA);
         String id = a.start(REQUIREMENT, "restart", RunOptions.defaults().withAutonomy(AutonomyLevel.FULL_AUTO)).id();
-        awaitRun(a, id, r -> r.stage(IMPLEMENT).status() == StageStatus.RUNNING);
+        crashDuringImplementation(a, id);
         RunLease lost = leases.current(id).orElseThrow();
-        // the node dies without releasing its lease (the engine is dropped, its attempt stays blocked) and a new
-        // engine starts with the same fixed node id on the same database; the clock does not move: the lease is valid
+        // a new engine starts with the same fixed node id on the same database; the clock does not move: the dead
+        // engine's lease is still valid
         b = node("node-fixed", null);
         assertThat(leases.holderOf(id)).contains("node-fixed");
 
@@ -259,9 +274,9 @@ class JdbcLeaseMultiNodeTest {
 
     @Test
     void recoveryOnARestartWithTheFixedNodeIdInterruptsItsRunAtOnce() {
-        a = node("node-fixed", slowImplementation);
+        a = node("node-fixed", slowImplementation, crashOfA);
         String id = a.start(REQUIREMENT, "restart", RunOptions.defaults().withAutonomy(AutonomyLevel.FULL_AUTO)).id();
-        awaitRun(a, id, r -> r.stage(IMPLEMENT).status() == StageStatus.RUNNING);
+        crashDuringImplementation(a, id);
         b = node("node-fixed", null);
 
         b.recoverInterrupted(); // what StartupRecovery does on the restarted node
@@ -272,15 +287,36 @@ class JdbcLeaseMultiNodeTest {
         assertThat(leases.holderOf(id)).as("recovery released the lease it reclaimed").isEmpty();
     }
 
+    /**
+     * Crashes node a while its implementation attempt is blocked: the attempt has started (so the node's last commit,
+     * the stage start, is done) and from now on the node reaches neither the database nor the leases.
+     */
+    private void crashDuringImplementation(OrchestrationEngine node, String id) {
+        awaitRun(node, id, r -> r.stage(IMPLEMENT).status() == StageStatus.RUNNING);
+        try {
+            assertThat(implementationStarted.await(TIMEOUT.toSeconds(), TimeUnit.SECONDS)).isTrue();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(e);
+        }
+        crashOfA.crash();
+    }
+
     private OrchestrationEngine node(String nodeId, @Nullable CountDownLatch implementationGate) {
+        return node(nodeId, implementationGate, null);
+    }
+
+    private OrchestrationEngine node(String nodeId, @Nullable CountDownLatch implementationGate,
+                                     @Nullable NodeCrash crash) {
         List<StageAgent> agents = new ArrayList<>();
         for (StageAgent agent : DeterministicAgents.all(null)) {
             agents.add(implementationGate != null && agent.role() == AgentRole.IMPLEMENTATION
-                    ? new GatedAgent(agent, implementationGate) : agent);
+                    ? new GatedAgent(agent, implementationGate, implementationStarted) : agent);
         }
-        return new OrchestrationEngine(graph, AgentRegistry.of(agents), PolicyEngine.withDefaultRules(), store, audit,
+        return new OrchestrationEngine(graph, AgentRegistry.of(agents), PolicyEngine.withDefaultRules(),
+                crash == null ? store : crash.store(store), crash == null ? audit : crash.audit(audit),
                 NoopMetricsRecorder.INSTANCE, EngineConfig.builder().backoffScale(0).clock(clock).nodeId(nodeId)
-                .leaseProvider(leases).leaseTtl(TTL).build());
+                .leaseProvider(crash == null ? leases : crash.leases(leases)).leaseTtl(TTL).build());
     }
 
     private static Run awaitRun(OrchestrationEngine engine, String id, Predicate<Run> condition) {
@@ -299,8 +335,12 @@ class JdbcLeaseMultiNodeTest {
                 .map(e -> e.data().get("nodeId")).toList();
     }
 
-    /** The deterministic agent of a role that waits for a gate before executing (a slow attempt). */
-    private record GatedAgent(StageAgent delegate, CountDownLatch gate) implements StageAgent {
+    /**
+     * The deterministic agent of a role that waits for a gate before executing (a slow attempt); {@code started} is
+     * counted down when an attempt begins.
+     */
+    private record GatedAgent(StageAgent delegate, CountDownLatch gate, CountDownLatch started)
+            implements StageAgent {
 
         @Override
         public AgentRole role() {
@@ -314,6 +354,7 @@ class JdbcLeaseMultiNodeTest {
 
         @Override
         public StageResult execute(StageContext context) throws Exception {
+            started.countDown();
             gate.await(20, TimeUnit.SECONDS);
             return delegate.execute(context);
         }

@@ -25,6 +25,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.agenticsdlc.orchestrator.app.runs.RunConflictException;
 import com.agenticsdlc.orchestrator.core.audit.Actor;
 import com.agenticsdlc.orchestrator.core.audit.AuditChain;
 import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
@@ -135,8 +136,10 @@ class JpaAuditSinkTest {
     void theSequenceIsUniquePerRun() {
         sink.append(List.of(event("run-a", 1, AuditEventType.RUN_CREATED, null, Actor.system(), Map.of())));
 
+        // another writer stored this sequence number first: a conflict, with the constraint violation as its cause
         assertThatThrownBy(() -> sink.append(List.of(event("run-a", 1, AuditEventType.RUN_CREATED, null,
-                Actor.system(), Map.of())))).isInstanceOf(DataIntegrityViolationException.class);
+                Actor.system(), Map.of())))).isInstanceOf(RunConflictException.class)
+                .hasCauseInstanceOf(DataIntegrityViolationException.class).hasMessageContaining("run-a");
         assertThat(sink.forRun("run-a", 0)).hasSize(1);
     }
 
@@ -197,15 +200,17 @@ class JpaAuditSinkTest {
         sink.append(stored);
 
         List<AuditEvent> forked = chain("run-x", 3, 4, stored.getFirst().hash());
-        assertThatThrownBy(() -> sink.append(forked)).isInstanceOf(IllegalStateException.class)
+        // not continuing the stored head means another writer appended first: a run conflict
+        assertThatThrownBy(() -> sink.append(forked)).isInstanceOf(RunConflictException.class)
                 .hasMessageContaining("does not continue the stored hash chain");
         List<AuditEvent> gap = chain("run-x", 4, 5, stored.getLast().hash());
-        assertThatThrownBy(() -> sink.append(gap)).isInstanceOf(IllegalStateException.class)
+        assertThatThrownBy(() -> sink.append(gap)).isInstanceOf(RunConflictException.class)
                 .hasMessageContaining("does not follow seq 2");
+        // a batch broken in itself is an integrity error, not a conflict
         AuditEvent good = chain("run-x", 3, 3, stored.getLast().hash()).getFirst();
         AuditEvent forged = good.withChain(good.prevHash(), AuditChain.GENESIS);
         assertThatThrownBy(() -> sink.append(List.of(forged))).isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("content hashes to");
+                .isNotInstanceOf(RunConflictException.class).hasMessageContaining("content hashes to");
         AuditEvent unsigned = event("run-x", 3, AuditEventType.STAGE_READY, null, Actor.system(), Map.of());
         assertThatThrownBy(() -> sink.append(List.of(unsigned))).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("would break the run's hash chain");

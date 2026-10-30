@@ -1,6 +1,7 @@
 package com.agenticsdlc.orchestrator.app.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -16,12 +17,18 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.scheduling.TaskScheduler;
@@ -46,7 +53,8 @@ import com.agenticsdlc.orchestrator.core.model.RunOptions;
  * makes writes lag: a backlog longer than the live event limit is still delivered completely, while a stream whose
  * live events pile up beyond the limit is closed (its client reconnects with Last-Event-ID) and frees its slot. A
  * stream whose write is blocked (a client that stopped reading) is closed without the publishing thread ever waiting
- * for that write.
+ * for that write, and one the container drops meanwhile keeps its slot (and its writer's permit) until that write
+ * returns. Audit gaps are filled page by page.
  */
 class RunStreamHubTest {
 
@@ -99,7 +107,8 @@ class RunStreamHubTest {
         BlockingEmitter emitter = new BlockingEmitter();
         RunStreamHub blocking = new RunStreamHub(engine, auditSink, new RunViewMapper(GRAPH, CLOCK), GRAPH,
                 JsonCodec.standard(), bus, mock(TaskScheduler.class), new BoundedSendExecutor(5),
-                new RunStreamHub.Settings(5, Duration.ofSeconds(15), Duration.ofMinutes(5)), CLOCK, timeout -> emitter);
+                new RunStreamHub.Settings(5, Duration.ofSeconds(15), Duration.ofMinutes(5)), CLOCK, timeout -> emitter,
+                RunStreamHub.AUDIT_PAGE);
         Run run = Run.create("busy", GRAPH, "custom", "Build a URL shortener.", RunOptions.defaults(), NOW);
         try {
             blocking.openList(); // its first event starts a write that never returns: the client stopped reading
@@ -120,6 +129,63 @@ class RunStreamHubTest {
         blocking.destroy();
     }
 
+    @Test
+    void aStreamTheContainerDropsDuringABlockedWriteKeepsItsSlotAndPermitUntilTheWriteReturns() throws Exception {
+        BlockingEmitter stuck = new BlockingEmitter();
+        BlockingEmitter next = new BlockingEmitter();
+        next.release.countDown();
+        Deque<SseEmitter> emitters = new ArrayDeque<>(List.of(stuck, next));
+        BoundedSendExecutor writers = new BoundedSendExecutor(1);
+        RunStreamHub single = new RunStreamHub(engine, auditSink, new RunViewMapper(GRAPH, CLOCK), GRAPH,
+                JsonCodec.standard(), bus, mock(TaskScheduler.class), writers,
+                new RunStreamHub.Settings(1, Duration.ofSeconds(15), Duration.ofMinutes(5)), CLOCK,
+                timeout -> emitters.poll(), RunStreamHub.AUDIT_PAGE);
+        try {
+            single.openList();
+            assertThat(stuck.writing.await(10, TimeUnit.SECONDS)).isTrue();
+
+            // the container reports the broken connection while the write is still blocked
+            stuck.error.get().accept(new IOException("connection reset by peer"));
+
+            assertThat(single.openStreams()).as("the slot is held while the write is blocked").isEqualTo(1);
+            assertThat(writers.availablePermits()).isZero();
+            assertThatThrownBy(single::openList).as("no stream would get a writer").isInstanceOf(
+                    StreamLimitException.class);
+        } finally {
+            stuck.release.countDown();
+        }
+
+        await().atMost(Duration.ofSeconds(10))
+                .until(() -> single.openStreams() == 0 && writers.availablePermits() == 1);
+        single.openList();
+        assertThat(next.writing.await(10, TimeUnit.SECONDS)).as("the next stream got the released permit").isTrue();
+        assertThat(writers.availablePermits()).as("released exactly once").isLessThanOrEqualTo(1);
+        single.destroy();
+    }
+
+    @Test
+    void aGapLongerThanOnePageIsFilledPageByPage() {
+        RecordingEmitter emitter = new RecordingEmitter();
+        RunStreamHub paged = new RunStreamHub(engine, auditSink, new RunViewMapper(GRAPH, CLOCK), GRAPH,
+                JsonCodec.standard(), bus, mock(TaskScheduler.class), Runnable::run,
+                new RunStreamHub.Settings(5, Duration.ofSeconds(15), Duration.ofMinutes(5)), CLOCK, timeout -> emitter,
+                2);
+        Run run = Run.create("gappy", GRAPH, "custom", "Build a URL shortener.", RunOptions.defaults(), NOW);
+        run.resetAuditChain(2, null);
+        when(engine.get("gappy")).thenReturn(run);
+        AtomicReference<List<AuditEvent>> stored = new AtomicReference<>(events(1, 2));
+        when(auditSink.forRun(eq("gappy"), anyLong(), anyInt())).thenAnswer(call -> stored.get().stream()
+                .filter(e -> e.seq() > call.<Long>getArgument(1)).limit(call.<Integer>getArgument(2)).toList());
+        paged.openRun("gappy", null);
+
+        // another node commits events 3 to 8 (no event here), then this node commits event 9
+        stored.set(events(1, 9));
+        bus.committed(new RunCommitted(item(run), run.toSnapshot(), List.of(event(9))));
+
+        assertThat(emitter.auditIds).containsExactly(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L);
+        paged.destroy();
+    }
+
     private void drainWrites() {
         while (!pendingWrites.isEmpty()) {
             pendingWrites.poll().run();
@@ -134,7 +200,14 @@ class RunStreamHubTest {
 
         final CountDownLatch writing = new CountDownLatch(1);
         final CountDownLatch release = new CountDownLatch(1);
+        final AtomicReference<Consumer<Throwable>> error = new AtomicReference<>();
         volatile boolean completed;
+
+        @Override
+        public void onError(Consumer<Throwable> callback) {
+            error.set(callback);
+            super.onError(callback);
+        }
 
         @Override
         public void send(SseEventBuilder builder) throws IOException {
@@ -154,6 +227,28 @@ class RunStreamHubTest {
         public void complete() {
             super.complete();
             completed = true;
+        }
+    }
+
+    /** An emitter that records the sequence numbers (SSE ids) of the audit events it sends. */
+    private static final class RecordingEmitter extends SseEmitter {
+
+        private static final Pattern AUDIT_ID = Pattern.compile("event:audit\nid:(\\d+)\n");
+
+        final List<Long> auditIds = new CopyOnWriteArrayList<>();
+
+        @Override
+        public void send(SseEventBuilder builder) {
+            StringBuilder text = new StringBuilder();
+            builder.build().forEach(part -> {
+                if (part.getData() instanceof String chunk) {
+                    text.append(chunk);
+                }
+            });
+            Matcher matcher = AUDIT_ID.matcher(text);
+            if (matcher.find()) {
+                auditIds.add(Long.parseLong(matcher.group(1)));
+            }
         }
     }
 

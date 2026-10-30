@@ -4,12 +4,16 @@ import java.net.URI;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+
+import jakarta.servlet.http.HttpServletRequest;
 
 import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.MessageSourceResolvable;
 import org.springframework.core.MethodParameter;
+import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -28,9 +32,11 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.context.request.WebRequest;
 import org.springframework.web.method.annotation.HandlerMethodValidationException;
+import org.springframework.web.servlet.HandlerMapping;
 import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExceptionHandler;
 
 import com.agenticsdlc.orchestrator.app.llm.ProviderUnavailableException;
+import com.agenticsdlc.orchestrator.app.runs.RunConflictException;
 import com.agenticsdlc.orchestrator.app.scenario.ScenarioNotFoundException;
 import com.agenticsdlc.orchestrator.core.engine.InvalidCommandException;
 import com.agenticsdlc.orchestrator.core.engine.InvalidRunStateException;
@@ -48,7 +54,10 @@ import com.agenticsdlc.orchestrator.core.engine.RunNotFoundException;
  * state, {@link InvalidCommandException} for invalid commands), four-eyes violations and unavailable providers are
  * 409 with the engine's message; a command on a run another engine node is executing
  * ({@link RunLeasedElsewhereException}) is 409 of type {@code run-leased-elsewhere} with {@code holder} and
- * {@code runId}; a plain {@link IllegalStateException} (engine closed or shutting down) is 503, and so is a stream
+ * {@code runId}; a write the store refused because another node (or writer) changed the run first is 409 of type
+ * {@code run-conflict} with {@code runId} (a {@link RunConflictException} or Spring's
+ * {@link OptimisticLockingFailureException}, raw or as the cause of the engine's {@link InvalidRunStateException});
+ * a plain {@link IllegalStateException} (engine closed or shutting down) is 503, and so is a stream
  * request beyond {@code sdlc.console.max-sse-connections} ({@link StreamLimitException}, with {@code Retry-After});
  * an operation disabled by configuration is 404 ({@link FeatureDisabledException}) and a second concurrent evaluation
  * suite run 409 ({@link EvaluationInProgressException});
@@ -105,19 +114,38 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         return respond(problem);
     }
 
+    /**
+     * A state conflict, unless it reports a write the store refused because the run changed meanwhile (the engine
+     * wraps store failures of a commit with the store exception as the cause): that is a {@code run-conflict}.
+     */
     @ExceptionHandler(InvalidRunStateException.class)
-
-    ResponseEntity<ProblemDetail> handleInvalidRunState(InvalidRunStateException ex) {
+    ResponseEntity<ProblemDetail> handleInvalidRunState(InvalidRunStateException ex, HttpServletRequest request) {
+        if (isWriteConflict(ex)) {
+            return runConflict(ex, request);
+        }
         return respond(problem(HttpStatus.CONFLICT, ProblemTypes.INVALID_STATE, "Command not allowed in this state",
                 ex.getMessage()));
     }
 
     /**
+     * The store refused a write because another node (or writer) changed the run first: the command was not applied.
+     * The store's message is logged, not returned.
+     */
+    @ExceptionHandler({RunConflictException.class, OptimisticLockingFailureException.class})
+    ResponseEntity<ProblemDetail> handleRunConflict(RuntimeException ex, HttpServletRequest request) {
+        return runConflict(ex, request);
+    }
+
+    /**
      * A plain {@link IllegalStateException} is what the engine throws once it is closed or shutting down (state
-     * conflicts are {@link InvalidRunStateException}); the message is not returned.
+     * conflicts are {@link InvalidRunStateException}); the message is not returned. One caused by a refused write is a
+     * {@code run-conflict}.
      */
     @ExceptionHandler(IllegalStateException.class)
-    ResponseEntity<ProblemDetail> handleIllegalState(IllegalStateException ex) {
+    ResponseEntity<ProblemDetail> handleIllegalState(IllegalStateException ex, HttpServletRequest request) {
+        if (isWriteConflict(ex)) {
+            return runConflict(ex, request);
+        }
         LOG.warn("request refused while the control plane is unavailable: {}", ex.getMessage());
         return respond(problem(HttpStatus.SERVICE_UNAVAILABLE, ProblemTypes.SERVICE_UNAVAILABLE,
                 "Service unavailable", "control plane is shutting down"));
@@ -260,6 +288,43 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         }
         String name = parameter.getParameterName();
         return name == null ? "arg" + parameter.getParameterIndex() : name;
+    }
+
+    /**
+     * Returns whether an exception, or one of its causes, is a write the store refused because the run changed
+     * meanwhile.
+     *
+     * @param error the exception
+     * @return true for a {@link RunConflictException} or an {@link OptimisticLockingFailureException} in the chain
+     */
+    static boolean isWriteConflict(Throwable error) {
+        Throwable current = error;
+        for (int depth = 0; current != null && depth < 16; depth++) {
+            if (current instanceof RunConflictException || current instanceof OptimisticLockingFailureException) {
+                return true;
+            }
+            current = current.getCause() == current ? null : current.getCause();
+        }
+        return false;
+    }
+
+    private static ResponseEntity<ProblemDetail> runConflict(Throwable ex, HttpServletRequest request) {
+        String runId = runId(request);
+        LOG.warn("command refused: the run was written concurrently runId={} error={}", runId, ex.toString());
+        ProblemDetail problem = problem(HttpStatus.CONFLICT, ProblemTypes.RUN_CONFLICT, "Run changed concurrently",
+                (runId == null ? "The run" : "Run " + runId) + " was written by another engine node (or another "
+                        + "writer) first, so this command was not applied. Reload the run and retry the command if it "
+                        + "still applies.");
+        if (runId != null) {
+            problem.setProperty("runId", runId);
+        }
+        return respond(problem);
+    }
+
+    /** The run id of the request path ({@code /api/v1/runs/{id}/...}), when the matched mapping has one. */
+    private static @Nullable String runId(HttpServletRequest request) {
+        Object variables = request.getAttribute(HandlerMapping.URI_TEMPLATE_VARIABLES_ATTRIBUTE);
+        return variables instanceof Map<?, ?> map && map.get("id") instanceof String id ? id : null;
     }
 
     private static ProblemDetail problem(HttpStatus status, URI type, String title, @Nullable String detail) {

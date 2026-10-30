@@ -3,6 +3,7 @@ package com.agenticsdlc.orchestrator.app.security;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.jspecify.annotations.Nullable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.InitializingBean;
@@ -10,6 +11,7 @@ import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import com.agenticsdlc.orchestrator.app.config.OrchestratorProperties;
+import com.agenticsdlc.orchestrator.app.config.OrchestratorProperties.Engine.LeaseProvider;
 import com.agenticsdlc.orchestrator.app.config.OrchestratorProperties.Security.Mode;
 
 /**
@@ -24,6 +26,11 @@ import com.agenticsdlc.orchestrator.app.config.OrchestratorProperties.Security.M
  *       reaching the console could start, approve and stop runs), or (e) no usable change record signing key is
  *       configured ({@code sdlc.governance.signing-key}, at least 32 bytes). Every violation is listed in one
  *       message.</li>
+ *   <li>With the {@value #PROD_PROFILE} profile active, settings that are legitimate but risky in production start
+ *       with one WARN each ({@link #productionWarnings}): in-memory run leases
+ *       ({@code sdlc.engine.lease-provider=memory}, single-node only), the evaluation suite endpoint
+ *       ({@code sdlc.evaluation.enabled=true}), and in {@code oidc} mode an issuer or JWK set URL that is not https
+ *       (token signing keys fetched without TLS).</li>
  *   <li>Outside {@value #PROD_PROFILE}, {@code open} mode logs a single WARN that the API is unauthenticated (local
  *       development mode).</li>
  * </ul>
@@ -66,6 +73,7 @@ public class SecurityPostureValidator implements InitializingBean {
                 throw new IllegalStateException("refusing to start with the '" + PROD_PROFILE + "' profile: "
                         + String.join("; ", violations));
             }
+            productionWarnings(properties).forEach(warning -> LOG.warn("production posture: {}", warning));
         }
         logPosture(security, production);
     }
@@ -161,6 +169,40 @@ public class SecurityPostureValidator implements InitializingBean {
             }
         }
         return List.copyOf(violations);
+    }
+
+    /**
+     * Returns the settings that the production profile accepts but that need a deliberate decision (logged as
+     * WARNs at startup): in-memory run leases, the evaluation suite endpoint, and in {@code oidc} mode an issuer or
+     * JWK set URL that is not https.
+     *
+     * @param properties configuration
+     * @return one message per risky setting, empty when there is none
+     */
+    public static List<String> productionWarnings(OrchestratorProperties properties) {
+        List<String> warnings = new ArrayList<>();
+        if (properties.engine().leaseProvider() == LeaseProvider.MEMORY) {
+            warnings.add("sdlc.engine.lease-provider=memory keeps run leases in this process: the deployment is "
+                    + "single-node only (several nodes on one database would execute the same runs; use jdbc)");
+        }
+        if (properties.evaluation().enabled()) {
+            warnings.add("sdlc.evaluation.enabled=true lets ADMIN callers run the evaluation suite on this production "
+                    + "node (isolated in-memory engines whose gates are approved as evaluation-runner, CPU-heavy); "
+                    + "run it offline instead");
+        }
+        OrchestratorProperties.Security security = properties.security();
+        if (security.effectiveMode() == Mode.OIDC) {
+            plainHttp(warnings, "sdlc.security.oidc.issuer-uri", security.oidc().issuerUri());
+            plainHttp(warnings, "sdlc.security.oidc.jwk-set-uri", security.oidc().jwkSetUri());
+        }
+        return List.copyOf(warnings);
+    }
+
+    private static void plainHttp(List<String> warnings, String property, @Nullable String url) {
+        if (url != null && url.strip().regionMatches(true, 0, "http://", 0, "http://".length())) {
+            warnings.add(property + " " + url.strip() + " is not https: the token signing keys are fetched without "
+                    + "TLS, so anyone on the network path could substitute them and forge tokens");
+        }
     }
 
     private static void requireMapping(List<String> problems, String role, List<String> values) {

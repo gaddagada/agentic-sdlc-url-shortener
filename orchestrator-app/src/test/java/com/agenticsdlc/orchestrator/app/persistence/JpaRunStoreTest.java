@@ -20,9 +20,10 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.agenticsdlc.orchestrator.app.api.RunLauncher;
+import com.agenticsdlc.orchestrator.app.runs.RunConflictException;
 import com.agenticsdlc.orchestrator.core.agent.AgentRegistry;
 import com.agenticsdlc.orchestrator.core.agent.deterministic.DeterministicAgents;
-import com.agenticsdlc.orchestrator.app.api.RunLauncher;
 import com.agenticsdlc.orchestrator.core.audit.Actor;
 import com.agenticsdlc.orchestrator.core.audit.AuditChain;
 import com.agenticsdlc.orchestrator.core.audit.AuditEvent;
@@ -237,9 +238,10 @@ class JpaRunStoreTest {
 
         run.markStarted(T0.plusSeconds(5));
         run.touch(T0.plusSeconds(5));
-        // seq 2 is new, seq 1 violates the unique (run_id, seq) constraint: the whole commit must roll back
+        // seq 2 is new, seq 1 violates the unique (run_id, seq) constraint (a run conflict: those sequence numbers
+        // were stored first): the whole commit must roll back
         assertThatThrownBy(() -> store.commit(run, List.of(event("atomic", 2), event("atomic", 1)), auditSink))
-                .isInstanceOf(DataIntegrityViolationException.class);
+                .isInstanceOf(RunConflictException.class).hasCauseInstanceOf(DataIntegrityViolationException.class);
 
         RunEntity row = runs.findById("atomic").orElseThrow();
         assertThat(row.getVersion()).as("snapshot update rolled back").isEqualTo(version);

@@ -69,7 +69,10 @@ public class RunStreamController {
                     + "Then, for every change this node commits: the new 'audit' events, then the new 'run'. "
                     + "'heartbeat' every sdlc.console.sse-heartbeat-interval (15 s), data {\"time\": ISO-8601}. When "
                     + "the run is COMPLETED or ABORTED the stream ends after its final 'run' event. Reconnect with "
-                    + "Last-Event-ID to resume without gaps. Only commits of this node are streamed (header "
+                    + "Last-Event-ID to resume without gaps; an id beyond the run's last audit seq (for example after "
+                    + "a database reset) is ignored and the whole trail is sent. Audit events another node committed "
+                    + "meanwhile are sent before the next change of this node. Only commits of this node are streamed "
+                    + "(header "
                     + NODE_HEADER + "); poll runs held by other nodes. 503 (stream-limit-reached, Retry-After) beyond "
                     + "sdlc.console.max-sse-connections.",
             responses = @ApiResponse(responseCode = "200", description = "The event stream",
