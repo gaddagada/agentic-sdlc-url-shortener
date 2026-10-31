@@ -6,7 +6,7 @@ import java.util.Objects;
 /**
  * Run-level budgets bounding autonomy. Per-stage attempts come from the stage's retry policy.
  *
- * <p>The default token budget (600 000) is sized for a complete LLM run of the ten-stage default workflow with an
+ * <p>The default token budget (1 500 000) is sized for a complete LLM run of the ten-stage default workflow with an
  * Opus-class model: every stage prompt carries the requirement specification and the full JSON of its direct
  * predecessors' artifacts (summaries of the rest), the late stages see a full change set, and retries plus a
  * verification feedback loop re-send that context. A live brownfield run measured roughly 4k to 40k input tokens
@@ -22,14 +22,14 @@ import java.util.Objects;
  *                         {@value #DEFAULT_MAX_FEEDBACK_LOOPS})
  * @param maxReplans maximum re-plans (default 3)
  * @param maxAgentCalls maximum agent attempts across all stages (default 40)
- * @param maxLlmTokens maximum LLM input plus output tokens (default 600 000)
+ * @param maxLlmTokens maximum LLM input plus output tokens (default 1 500 000)
  * @param maxActiveDuration maximum active (non-human-wait) duration (default 2 hours)
  */
 public record RunBudget(int maxFeedbackLoops, int maxReplans, int maxAgentCalls, long maxLlmTokens,
                         Duration maxActiveDuration) {
 
     /** Default token budget: ten stages with full direct-predecessor artifacts in context, retries included. */
-    public static final long DEFAULT_MAX_LLM_TOKENS = 600_000L;
+    public static final long DEFAULT_MAX_LLM_TOKENS = 1_500_000L;
 
     /** Default verification feedback loop (and rework) budget. */
     public static final int DEFAULT_MAX_FEEDBACK_LOOPS = 3;

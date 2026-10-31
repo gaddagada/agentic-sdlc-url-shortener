@@ -87,8 +87,8 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
     private static final String MAP_NOTE = "\n\nOutput encoding note: JSON objects with free-form keys (for example "
             + "coverageMatrix) must be returned as arrays of {\"key\": ..., \"value\": ...} entries.";
 
-    /** Ephemeral (5 minute) cache breakpoint. */
-    private static final CacheControlEphemeral CACHE_BREAKPOINT = CacheControlEphemeral.builder().build();
+    /** Ephemeral cache breakpoint with the configured lifetime ({@code sdlc.llm.anthropic.cache-ttl}). */
+    private final CacheControlEphemeral cacheBreakpoint;
 
     /**
      * Sends a Messages API request and returns the complete response message (the streaming SDK call in
@@ -134,6 +134,9 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
         this.settings = settings;
         this.codec = codec;
         this.overrideSender = sender;
+        this.cacheBreakpoint = CacheControlEphemeral.builder()
+                .ttl(CacheControlEphemeral.Ttl.of(settings.cacheTtl()))
+                .build();
     }
 
     @Override
@@ -181,9 +184,9 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
                 .maxTokens(Math.min(request.maxOutputTokens(), settings.maxOutputTokens()))
                 .systemOfTextBlockParams(List.of(TextBlockParam.builder()
                         .text(request.system())
-                        .cacheControl(CACHE_BREAKPOINT)
+                        .cacheControl(cacheBreakpoint)
                         .build()))
-                .addUserMessageOfContentBlockParams(userBlocks(request, schema.hasMaps()))
+                .addUserMessageOfContentBlockParams(userBlocks(request, schema.hasMaps(), cacheBreakpoint))
                 .outputConfig(OutputConfig.builder().format(outputFormat(schema)).build())
                 .build();
         long started = System.nanoTime();
@@ -244,12 +247,13 @@ public final class AnthropicLlmClient implements ProviderClient, AutoCloseable {
      * @param hasMaps whether the output schema encodes maps as entry arrays
      * @return one or two text blocks
      */
-    static List<ContentBlockParam> userBlocks(LlmRequest request, boolean hasMaps) {
+    static List<ContentBlockParam> userBlocks(LlmRequest request, boolean hasMaps,
+                                              CacheControlEphemeral breakpoint) {
         List<ContentBlockParam> blocks = new ArrayList<>(2);
         if (request.hasStableContext()) {
             blocks.add(ContentBlockParam.ofText(TextBlockParam.builder()
                     .text(request.stableContext())
-                    .cacheControl(CACHE_BREAKPOINT)
+                    .cacheControl(breakpoint)
                     .build()));
         }
         String user = hasMaps ? request.user() + MAP_NOTE : request.user();

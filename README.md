@@ -10,7 +10,7 @@ what is accepted).
   <a href="https://github.com/gaddagada/agentic-sdlc-url-shortener/actions/workflows/ci.yml"><img src="https://github.com/gaddagada/agentic-sdlc-url-shortener/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/Java-25-007396?logo=openjdk&logoColor=white" alt="Java 25">
   <img src="https://img.shields.io/badge/Spring%20Boot-4.1.2-6DB33F?logo=springboot&logoColor=white" alt="Spring Boot 4.1.2">
-  <img src="https://img.shields.io/badge/tests-1419-brightgreen" alt="1419 tests run in CI">
+  <img src="https://img.shields.io/badge/tests-1439-brightgreen" alt="1439 tests run in CI">
   <img src="https://img.shields.io/badge/line%20coverage-94.1%25-brightgreen" alt="Line coverage 94.1%">
 </p>
 
@@ -117,7 +117,7 @@ metacharacters and without credential-like environment variables. The release ga
 is required by the `ALWAYS` exit gate, by rule CHG-002 and, in `FULL_AUTO`, by GOV-003, and no policy pack can
 disable CHG-002, GOV-003 or the secret-leak guard SEC-002.
 
-**Budgets bound autonomy:** 40 agent calls, 600 000 LLM tokens, 2 h of active time, 3 feedback loops and
+**Budgets bound autonomy:** 40 agent calls, 1 500 000 LLM tokens, 2 h of active time, 3 feedback loops and
 3 re-plans per run by default. A breach safe-stops the run; only an explicit human resume grants one more default
 allowance, and the audit log records it.
 
@@ -354,18 +354,21 @@ same roles, produce the same typed artifacts and pass the same validation and ga
   retry prompt names the hunk, the path and the nearest mismatch.
 - **Prompt layout and caching:** system prompt, a run-stable context (requirement, clarification answers, accepted
   requirement specification, codebase index) and the stage-specific part; the prompt hash covers all three. The
-  Anthropic client marks the system prompt and the stable context as ephemeral cache breakpoints and reports cache
+  Anthropic client marks the system prompt and the stable context as ephemeral cache breakpoints (one-hour lifetime
+  by default, `sdlc.llm.anthropic.cache-ttl`) and reports cache
   reads and writes (`sdlc.llm.cache.read.tokens`, `sdlc.llm.cache.creation.tokens`); input-token budgets count
   cached tokens too. Ollama receives one user message.
-- **Observed:** three live Claude-backed brownfield runs. Every analysis and design stage (requirements, task plan,
-  code-grounded impact analysis, design with evaluated alternatives, test plan) succeeded on the first attempt in
-  20 to 54 s each. The first run hit the then-default 200 000-token budget; the next two produced complete change
-  sets (up to 51 000 streamed output tokens), had them rejected by the Claude verifier (the diffs were written
-  without the source of the modified files in view), and safe-stopped after the then-default two feedback loops
-  for a human decision instead of releasing unverified code. That root cause is what the source-aware stages,
-  real diff application and advisory checks above address; the status of the re-run is in
-  [docs/SCENARIOS.md](docs/SCENARIOS.md#the-same-scenario-with-an-llm-provider). Ollama on a CPU took about 100 s
-  for one intake call.
+- **Observed:** five live Claude-backed brownfield runs. Every analysis and design stage (requirements, task plan,
+  code-grounded impact analysis, design with evaluated alternatives, test plan) succeeded on the first attempt.
+  Runs 1 to 3 (bulk API) were safe-stopped: one by the then-default token budget, two at the verification gate
+  because their diffs were written without the source of the modified files. Run 4 (campaign labels) stopped
+  the same way for an upstream reason: the LLM impact stage named no Java component and the design no paths, so
+  the implementer saw no source. After the static impact analysis was wired into those stages, run 5 wrote real
+  diffs against the entity, DTOs, service and repositories, passed verification on its second change set, was
+  safe-stopped by the token budget two stages before the end and completed with a signed change record after an
+  operator resume (15 LLM calls, $6.08 at list prices). Details, numbers and what the verifier still flagged:
+  [docs/SCENARIOS.md](docs/SCENARIOS.md#the-same-scenario-with-an-llm-provider). Ollama on a CPU took about
+  100 s for one intake call.
 
 ### Cost configuration
 
@@ -588,8 +591,8 @@ agentic-sdlc-url-shortener/
 | Module | Tests | Highlights |
 |---|---|---|
 | `url-shortener` | 493 (+15 with Docker) | parameterized SSRF validator cases (IPv6 zone, 6to4, NAT64 and Teredo forms included), the resolve-time check against a fake resolver; MockMvc and JPA slices; end-to-end integration (create, bulk, redirect, click, analytics, 410, idempotency, 429); idempotency takeover protection; IPv6 /64 rate-limit keys and the bounded bucket store; one rate-limiter contract run against the in-memory limiter, a Java simulator of the Redis Lua script and, with Docker, a real `redis:7-alpine` (Testcontainers, Failsafe); rate-limit and API-key bypass attempts over a real servlet container; OpenAPI contract; ArchUnit layering |
-| `orchestrator-core` | 555 | engine behaviour with fake agents: latch-proven parallel branches, retries, fallback, rollback with compensations, re-plan, budgets, restart recovery, store failures; the audit hash chain and signed change records; run leases across engines and registry eviction; policy packs and the regex guard; the evaluation suite; the LLM price book; the dependency inventory; the provider circuit breaker; unified-diff application with hunk diagnostics; every policy rule; deterministic agents; snapshot round trip |
-| `orchestrator-app` | 356 (+2 with Docker) | REST slices, scenarios end to end through MockMvc, the three security modes with real JWTs from a local JWK set, roles, four-eyes and the production posture; server-sent event streams; the paged listing query; JDBC leases with two engines on one database; the persistence contract on H2 and, with Docker, on `postgres:17-alpine`; signed change records end to end; policy pack files; observations and OTLP wiring; Anthropic and Ollama clients against stubs; 2 skipped by default: the live Anthropic test (needs `ANTHROPIC_API_KEY`) and the opt-in OpenAPI regeneration |
+| `orchestrator-core` | 574 | engine behaviour with fake agents: latch-proven parallel branches, retries, fallback, rollback with compensations, re-plan, budgets, restart recovery, store failures; the audit hash chain and signed change records; run leases across engines and registry eviction; policy packs and the regex guard; the evaluation suite; the LLM price book; the dependency inventory; the provider circuit breaker; unified-diff application with hunk diagnostics; every policy rule; deterministic agents; snapshot round trip |
+| `orchestrator-app` | 357 (+2 with Docker) | REST slices, scenarios end to end through MockMvc, the three security modes with real JWTs from a local JWK set, roles, four-eyes and the production posture; server-sent event streams; the paged listing query; JDBC leases with two engines on one database; the persistence contract on H2 and, with Docker, on `postgres:17-alpine`; signed change records end to end; policy pack files; observations and OTLP wiring; Anthropic and Ollama clients against stubs; 2 skipped by default: the live Anthropic test (needs `ANTHROPIC_API_KEY`) and the opt-in OpenAPI regeneration |
 
 `./mvnw -B verify` runs everything and writes JaCoCo reports to `<module>/target/site/jacoco/index.html`. The
 integration tests that need Docker (15 in `RedisRateLimiterIT`, 2 in `PostgresPersistenceIT`) run only where Docker

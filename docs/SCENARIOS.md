@@ -577,7 +577,7 @@ became an INVALID_OUTPUT retry with the validation message in the next prompt; t
 corrected on the next attempt, while the test plan repeated its error twice before the budget stopped the run.
 The token budget bounded the cost of a run that would otherwise have kept retrying, and safe-stopped it without
 discarding accepted work. Two engineering changes followed. First, 200 000 tokens was too small for an
-Opus-class model on this pipeline: the default budget is now 600 000 and every prompt carries full JSON only for the
+Opus-class model on this pipeline: the default budget was raised to 600 000 (and later to 1 500 000) and every prompt carries full JSON only for the
 stage's direct predecessors (other upstream artifacts are summarized), with `budget.maxLlmTokens` on `POST /runs`
 still available as an override. Second, a complete change set did not fit in 16 000 output tokens: the Anthropic
 adapter now streams up to 32 000 tokens, stage timeouts are tripled for LLM attempts, and the implementation prompt
@@ -589,7 +589,7 @@ The same requirement was run twice more with the Anthropic provider after the ha
 artifact fields, trimmed prompt context, 600 000-token budget, streamed outputs). Both runs are persisted in the
 demo database (`fc88e41f` and `d93ca72d`) and can be inspected in the console.
 
-<p align="center"><img src="images/screenshots/console-llm-run.png" width="100%" alt="Claude-backed brownfield run that safe-stopped after two verification feedback loops: pipeline with anthropic agents, verification failed, documentation and security review stale, metrics tab with LLM token usage."></p>
+<p align="center"><img src="images/screenshots/console-llm-artifact.png" width="100%" alt="Artifact view of a Claude-backed brownfield run: the change set rendered from the artifact with its MODIFY diffs against the real source of the link and analytics code."></p>
 
 | | Run 2 (`fc88e41f`) | Run 3 (`d93ca72d`) |
 |---|---|---|
@@ -637,17 +637,52 @@ Commit `6980e5b` addresses that root cause in three ways
   default build (test placement) can be reported as advisory and no longer costs a feedback loop, and the default
   budget is now three loops instead of two.
 
-A re-run of the Claude-backed brownfield scenario on the hardened build is pending at the time of writing.
+### Runs 4 and 5: the campaign-label requirement on the hardened build
 
-The re-run uses the campaign-label requirement of section 2, so its artifacts will not be directly comparable with
-runs 1 to 3: a good result is a design with one nullable `campaign` column and its migration, the new analytics
-endpoint, and diffs that apply to the current source of the link and bulk paths. Since these runs the Anthropic
-client also caches the system prompt and the run-stable context, and every call is priced when
-`sdlc.llm.pricing` is configured, so a re-run reports cache tokens and an estimated cost. The commit `6980e5b` also
-added the per-provider circuit breaker, which counts consecutive provider failures across stages: in run 1, the two
-`test-design` failures and the truncated `implement` attempt between them would have opened it, after which every
-new attempt for that provider runs on the deterministic agents for 10 minutes (`FALLBACK_ENGAGED`, reason
-`circuit open`). A re-run's audit log has to be read with that in mind.
+Two more Claude-backed runs (`claude-opus-5-5`, Guided autonomy, workspace REPO, the sample policy pack active, an
+HMAC signing key configured, Opus 5.5 list prices configured so every call is priced) were made on 2026-10-30
+against the campaign-label requirement of section 2. Both are persisted in the local database and their audit
+chains verify; the console screenshots in this document come from run 5.
+
+| | Run 4 (`d7be9f15`, commit `c0c7292`) | Run 5 (`10791e24`, commit `cbcecf8`) |
+|---|---|---|
+| Impact analysis (LLM) | 4 components: two migration files and two `yml` files, no Java type, no entities, no endpoints | 14 components with indexed paths at confidence 0.5 to 1.0 (`LinkService`, `LinkController`, `BulkLinkController`, the DTOs, ...), `reconciliation` lists 6 upgrades where static analysis rated a component higher than the model |
+| Design (LLM) | components named in prose ("Link entity", "CreateLink request/response DTOs"), no paths | every existing component carries its indexed path |
+| Source shown to the implementer | none: nothing to resolve | 20 files (controllers, services, DTOs, entities, repositories), recorded in `STAGE_STARTED.impactedSources` |
+| Change sets | v1 to v4: `CREATE` only (a new `campaign` package, a servlet filter, an auto-configuration); v2 tried one `MODIFY` diff against a path that does not exist | v1: 9 `MODIFY` diffs (`Link`, `CreateLinkRequest`, `LinkService`, repositories, `AnalyticsService`, ...) and 9 new files; v2: 10 diffs and 8 new files, the endpoint moved into `AnalyticsController` as designed, a migration test and an integration test added |
+| Verification | four reports failed on the same blocking finding: the campaign is never persisted on create | v1 failed on one blocking finding (no tests for the migration and compatibility MUSTs) and 4 advisory ones; v2 passed with 4 advisory findings |
+| Loops and retries | 3 feedback loops, then `AGENT_FAILURE_EXHAUSTED` | 1 feedback loop; one `TRANSIENT` retry because the first rework attempt hit the 64 000 output-token limit |
+| End state | `SAFE_STOPPED` / `AGENT_FAILURE_EXHAUSTED`; 21 agent calls, 19 LLM calls | `SAFE_STOPPED` / `BUDGET_EXCEEDED` (793 896 of 600 000 tokens) with `verify`, `document` and `security-scan` accepted; the operator resumed the run with the extended budget, `release-readiness` produced its checklist, `CHG-002` was approved and the run `COMPLETED` with a signed change record |
+| Tokens and cost | 467 439 input, 114 326 output, 123 178 cache reads, 115 080 cache writes; $3.80 | 658 510 input, 164 279 output, 0 cache reads, 162 954 cache writes; $6.08 |
+| Active time | 12.3 min | 27.1 min (end to end 28.5 min; MTTR 8.0 min between the budget stop and the resume) |
+| Evaluation score | 89.2 % (design `known-types-in-repo` 0 %) | 94.8 % |
+
+**What run 4 showed.** The governance worked (bounded loops, correct invalidation of `document` and `security-scan`,
+a safe stop instead of a release) and the verifier was right every time, but the run could not converge for a reason
+upstream of the implementer: the LLM impact stage produced no Java components and the LLM design produced no paths,
+so `ImpactedSources` had nothing to resolve and the implementer worked blind, as it wrote itself in attempt 3 ("those
+sources were not visible"). The audit trail did not record which sources an attempt had seen.
+
+**What changed (commit `464307c`).** The deterministic `ImpactAnalyzer` now runs for every repository run and its
+result is handed to every stage: the impact prompt receives the static candidates and must keep them unless it can
+say why they are unaffected, the design prompt receives the impacted components with their indexed paths, both
+schemas require paths from the index, components the model names without a path are resolved against the index,
+omitted static candidates with confidence 0.8 or higher are merged in (recorded under `reconciliation`), identifiers
+in verifier feedback resolve to files, the implementer can list `requestedSources` instead of guessing, and
+`STAGE_STARTED` records the sources shown ([ORCHESTRATION.md](ORCHESTRATION.md) section 8).
+
+**What run 5 showed.** With the real sources in view the model wrote diffs against the actual entity, DTOs,
+service and repositories, the verifier's one blocking objection was about missing tests rather than missing
+behaviour, and the second change set passed. Two limits then showed: the default token budget of 600 000 was sized
+before prompts carried source (an implement call now costs about 84 000 input tokens, a verify call about 80 000),
+so the run safe-stopped two stages before the end and needed an operator resume; and the 5-minute prompt cache
+expired between the long implementation calls, so none of the 162 954 cached tokens was read back. Both are
+corrected in the release: the default budget is 1 500 000 tokens and the Anthropic cache breakpoints use the
+one-hour TTL (`sdlc.llm.anthropic.cache-ttl`). The advisory findings the verifier left open (a bulk invalid-label
+test, boundary and injection tests, a performance check) are exactly the review a human would do before merging the
+change set, which this prototype does not apply to the repository.
+
+<p align="center"><img src="images/screenshots/console-llm-run.png" width="100%" alt="Claude-backed brownfield run that completed after an operator resume: pipeline with anthropic agents on every stage, two approvals, one feedback loop, one retry, LLM cost and cache figures in the banner."></p>
 
 ---
 

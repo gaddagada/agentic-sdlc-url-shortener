@@ -166,6 +166,8 @@ class AnthropicLlmClientTest {
         assertThat(system.get(0).path("type").asString()).isEqualTo("text");
         assertThat(system.get(0).path("text").asString()).isEqualTo("system prompt");
         assertThat(system.get(0).path("cache_control").path("type").asString()).isEqualTo("ephemeral");
+        assertThat(system.get(0).path("cache_control").path("ttl").asString()).as("default cache lifetime")
+                .isEqualTo("1h");
 
         assertThat(body.path("messages").size()).isEqualTo(1);
         JsonNode message = body.path("messages").get(0);
@@ -175,10 +177,32 @@ class AnthropicLlmClientTest {
         assertThat(content.get(0).path("type").asString()).isEqualTo("text");
         assertThat(content.get(0).path("text").asString()).isEqualTo("REQUIREMENT: shorten links\nCODEBASE: index");
         assertThat(content.get(0).path("cache_control").path("type").asString()).isEqualTo("ephemeral");
+        assertThat(content.get(0).path("cache_control").path("ttl").asString()).isEqualTo("1h");
         assertThat(content.get(1).path("text").asString()).startsWith("user prompt")
                 .contains("arrays of {\"key\"").doesNotContain("REQUIREMENT");
         assertThat(content.get(1).has("cache_control")).as("per-attempt text is not cached").isFalse();
         assertThat(body.path("output_config").path("format").path("type").asString()).isEqualTo("json_schema");
+    }
+
+    @Test
+    void theCacheLifetimeIsConfigurable() throws Exception {
+        AtomicReference<MessageCreateParams> sent = new AtomicReference<>();
+        LlmProperties.Anthropic fiveMinutes = new LlmProperties.Anthropic(true, "claude-opus-5-5", "sk-test", 16000,
+                Duration.ofSeconds(180), "5m");
+        AnthropicLlmClient client = client(fiveMinutes, params -> {
+            sent.set(params);
+            return message(TEST_PLAN_JSON, StopReason.END_TURN);
+        });
+
+        client.complete(STABLE_REQUEST, TestPlan.class);
+
+        JsonNode body = body(sent.get());
+        assertThat(body.path("system").get(0).path("cache_control").path("ttl").asString()).isEqualTo("5m");
+        assertThat(body.path("messages").get(0).path("content").get(0).path("cache_control").path("ttl")
+                .asString()).isEqualTo("5m");
+        assertThatThrownBy(() -> new LlmProperties.Anthropic(true, "claude-opus-5-5", "sk-test", 16000,
+                Duration.ofSeconds(180), "2h"))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("cache-ttl");
     }
 
     @Test

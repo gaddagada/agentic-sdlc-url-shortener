@@ -640,12 +640,17 @@ implementation, verification and security-review roles of `REPO` runs with a wor
 the impacted files with notes about what was cut or left out. Nothing else.
 
 **Impacted sources.** `StageExecutor.impactedSourceRequests` decides which files an attempt sees, by priority:
-`MODIFY` targets first (the `MODIFY` changes of the accepted and of the latest change set, files of those change
-sets or other repository paths named in the stage feedback or the previous error, `MODIFY` components of the
-accepted impact analysis, `DELETE` changes), then `EXTEND` components, then `REGRESSION_RISK` components. Component
-paths the codebase index does not know are resolved by path suffix or type name.
+`MODIFY` targets first (the `MODIFY` changes of the accepted and of the latest change set, the paths the latest
+change set lists in `requestedSources`, repository paths, `*.java` file names and type names mentioned in the
+stage feedback, in failed blocking-check details or in the previous error, `MODIFY` components of the accepted
+impact analysis, the `MODIFY` and `EXTEND` components of the deterministic impact analysis with confidence 0.8 or
+higher, and `DELETE` changes), then `EXTEND` components (including the existing components of the accepted
+design), then `REGRESSION_RISK` components; within a group, requests are ordered by confidence. Names resolve
+against the index only when exactly one production type carries them, so "Link entity" in a verifier's feedback
+requests `domain/Link.java` while "the link" requests nothing; component paths the index does not know are
+resolved by path suffix or type name.
 [`ImpactedSources`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/workspace/ImpactedSources.java)
-reads them from the workspace root (not from a sandbox) within two limits from
+reads the files from the workspace root (not from a sandbox) within two limits from
 [`EngineConfig`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/EngineConfig.java):
 `sourceContextPerFileChars` (default 20 000) and `sourceContextTotalChars` (default 120 000). A cut file ends with a
 `[truncated]` marker line; a regression risk is read only when the remaining budget holds it whole (or, for a file
@@ -660,7 +665,14 @@ credential-like tokens are replaced with `[redacted]` before the source leaves t
 ([`ImpactedSourcesTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/workspace/ImpactedSourcesTest.java),
 `implementationVerificationAndSecurityReviewSeeBoundedImpactedSources`,
 `runsWithoutTheRepositoryWorkspaceOrWithoutAWorkspaceRootGetNoSources`). Because the previous error is one of the
-inputs, the retry after a diff that did not apply shows the source of exactly that file.
+inputs, the retry after a diff that did not apply shows the source of exactly that file. The implementer is told
+that a file it was not shown must not be guessed: it lists the path in the change set's `requestedSources` and
+leaves that change out, and the next attempt (after a feedback loop, or after an `INVALID_OUTPUT` rejection, whose
+error text carries the requested paths) shows those files
+([`StaticImpactSourcesTest`](../orchestrator-core/src/test/java/com/agenticsdlc/orchestrator/core/engine/StaticImpactSourcesTest.java)).
+`STAGE_STARTED` for `implement`, `verify` and `security-scan` records `impactedSources` (the paths shown, in
+reading order, up to 40) and `impactedSourceNotes` (up to 10), so a run's audit trail shows exactly what each
+attempt was allowed to read.
 
 **Versions and hashing.** Versions are per stage, start at 1 and never repeat: `Run.nextArtifactVersion` takes
 the higher of the history's maximum and a per-stage counter persisted in the snapshot, so rejected, failed and
@@ -753,7 +765,7 @@ not the audit trail.
 | Bound | Default | Checked | On breach |
 |---|---|---|---|
 | `maxAgentCalls` ([`RunBudget`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/model/RunBudget.java)) | 40 | before every attempt (first, retry, fallback, rework, clarification re-run) | `BUDGET_EXCEEDED`, safe-stop |
-| `maxLlmTokens` (input plus output) | 600 000 | before every attempt, once any tokens were used | same |
+| `maxLlmTokens` (input plus output) | 1 500 000 | before every attempt, once any tokens were used | same |
 | `maxActiveDuration` (elapsed minus human wait) | 2 h | before every attempt | same |
 | `maxFeedbackLoops` (verify loops and REWORK) | 3 | on a failed report (a failed blocking check or an uncovered requirement); on REWORK | stage fails, or rejection refused |
 | `maxReplans` | 3 | on `replan` | command refused |
@@ -762,7 +774,7 @@ not the audit trail.
 
 `RunOptions.budgetOverride` replaces the defaults per run. Usage is never reset. A human `resume` after
 `BUDGET_EXCEEDED` extends every limit by one default allowance (`RunBudget.extended()`, for example 40 more agent
-calls and 600 000 more tokens) and records `budgetExtended` in `RUN_RESUMED`
+calls and 1 500 000 more tokens) and records `budgetExtended` in `RUN_RESUMED`
 (`agentCallBudgetExceededSafeStopsTheRun` proves the safe-stop and the extension); a `replan` does not extend the
 budget, so it re-stops at the next activation while the budget is still exhausted. Engine settings
 ([`EngineConfig`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrator/core/engine/EngineConfig.java)): ambiguity threshold 0.5, backoff scale 1.0, maximum backoff 30 s, sandbox and sandbox
@@ -929,12 +941,13 @@ one [`LlmRequest`](../orchestrator-core/src/main/java/com/agenticsdlc/orchestrat
 |---|---|---|
 | `system` | role, governance constraints (reference only indexed files, never include secrets, JSON only, upper-case enum values), output size and role guidance | every attempt of a role |
 | `stableContext` | the active requirement, clarification answers, the accepted requirement specification as full JSON and, for analysis, architecture and implementation, the codebase index (at most 400 types) | every attempt and feedback loop of a role; shared by all stages of a run that get the same index (none, or the codebase-aware roles) |
-| `user` | full JSON of the direct predecessors' artifacts (at most 60 000 characters each), summaries of the other upstream artifacts, "Source of impacted files (authoritative; write diffs against exactly this text)" for implementation, verification and security review (section 8), feedback, the previous error and the output schema from `JsonSchemas` (all properties required, `additionalProperties: false`) | one attempt |
+| `user` | full JSON of the direct predecessors' artifacts (at most 60 000 characters each), summaries of the other upstream artifacts, "Source of impacted files (authoritative; write diffs against exactly this text)" for implementation, verification and security review (section 8), "Components found by static analysis of the indexed tree" (path, name, type, change type, confidence; at most 40, plus the static entities, migrations and endpoints) for codebase analysis, "Impacted components and their indexed paths" for architecture (both roles must take every path of an existing component from that list; after the call, components without a known path are resolved against the index, omitted static candidates with confidence 0.8 or higher are merged in and the impact artifact lists every such change under `reconciliation`), feedback, the previous error and the output schema from `JsonSchemas` (all properties required, `additionalProperties: false`) | one attempt |
 
 The split exists so that a provider can cache the prefix (system prompt plus stable context) across the attempts
 and stages of a run (`thePromptIsSplitIntoSystemRunStableContextAndStageSpecificUserContent`); `LlmStageAgent`
 computes the prompt hash over all three parts. The Anthropic client sends the system prompt and the stable context
-as two text blocks with ephemeral cache breakpoints, followed by the stage part without one, and reports the cache
+as two text blocks with ephemeral cache breakpoints (lifetime `sdlc.llm.anthropic.cache-ttl`, one hour by default so
+the prefix survives a long streamed implementation call), followed by the stage part without one, and reports the cache
 reads and writes in `LlmUsage` (section 10.1); a prefix shorter than the model's minimum cacheable length is simply
 not cached. The Ollama client sends `LlmRequest.userWithContext()`, the stable context followed by the stage part in
 one user message. The implementation guidance carries the diff rules (`--- a/<path>` and `+++ b/<path>`
@@ -1072,7 +1085,7 @@ same run stops only at the release gate (`fullAutoGreenfieldOnlyNeedsTheReleaseA
 | Completion | change record finalized in place | a new engine-authored `release-readiness` version, excluded from agent-latency metrics |
 | Human-wait time | `WAITING_HUMAN` intervals | `WAITING_HUMAN` and `SAFE_STOPPED` intervals |
 | Retry wake-up | stage set back to `RUNNING` via `pump` | the wake-up submits the attempt directly, guarded by the stage token |
-| Budget defaults | `maxFeedbackLoops=2`, `maxLlmTokens=200_000` (spec 5.3) | 3 feedback loops and 600 000 tokens, after live Claude-backed runs exhausted both |
+| Budget defaults | `maxFeedbackLoops=2`, `maxLlmTokens=200_000` (spec 5.3) | 3 feedback loops and 1 500 000 tokens, after live Claude-backed runs exhausted both (600 000 was exhausted again once prompts carried the impacted sources) |
 | Verification verdict | `passed` when all structural checks passed (spec 5.6.7) | `passed` when no blocking check failed and nothing is uncovered; failed advisory checks are reported only |
 | Fallback trigger | attempts exhausted (spec 5.5) | also, before the provider is called, an open per-provider circuit shared by all runs |
 | Sandbox materialization | the change set is materialized into the sandbox (spec 5.6.5) | DIFF content is applied to the file; a hunk that does not match rejects the whole change set as INVALID_OUTPUT before anything is written |

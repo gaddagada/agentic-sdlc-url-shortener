@@ -16,12 +16,12 @@ against a real Redis. The control plane has one Docker-only integration test cla
 | Module | Tests | Unit | Slice and component | End-to-end and contract | Architecture |
 |---|---|---|---|---|---|
 | `url-shortener` | 493, plus 15 with Docker | validator (also the resolve-time check and embedded IPv4 forms), codes, user agents, IP resolution (ports, IPv6 prefixes) and anonymization, rate limiter contract on three backends, bounded bucket store, idempotency takeover, bulk service, host resolver, problem mapping, services | `@WebMvcTest` controllers, `@DataJpaTest` repositories with Flyway, filters (rate limit, API key, Redis auto-configuration veto), async executor | `@SpringBootTest` integration over MockMvc and over a real servlet container (rate limit, API key); OpenAPI contract; `RedisRateLimiterIT` against `redis:7-alpine` (Testcontainers, Failsafe) | ArchUnit layering |
-| `orchestrator-core` | 555 | policy rules and packs, regex guard, secret patterns, graph validation, canonical and strict canonical JSON, audit chain and signers, lease provider, metrics and price book, evaluation scorers and suite, deterministic agents, workspace (index, impact, impacted sources, unified diffs, sandbox, dependency inventory), verification reports | engine with fake agents and an in-memory store and audit sink, including the provider circuit breaker, the hash chain across engines, leases between two engines and registry eviction | full pipeline with the real deterministic agents; the bundled evaluation suite | ArchUnit boundaries |
-| `orchestrator-app` | 356, plus 2 with Docker | provider catalog, structured-output schema, metrics recorder, API key filter, OIDC token validation and role mapping, posture validator, four-eyes guard, dependency flags, pricing properties | `@WebMvcTest` controllers, `@DataJpaTest` stores, JDBC leases, listing queries, `@RestClientTest` Ollama client, Anthropic client with a stubbed sender, the event hub with a controllable write executor | scenarios through `@SpringBootTest` and MockMvc; the three security modes with real JWTs; the persistence contract on H2 and, with Docker, `PostgresPersistenceIT` on `postgres:17-alpine`; OpenAPI contract; 1 live Anthropic test | ArchUnit layering |
+| `orchestrator-core` | 574 | policy rules and packs, regex guard, secret patterns, graph validation, canonical and strict canonical JSON, audit chain and signers, lease provider, metrics and price book, evaluation scorers and suite, deterministic agents, workspace (index, impact, impacted sources, unified diffs, sandbox, dependency inventory), verification reports | engine with fake agents and an in-memory store and audit sink, including the provider circuit breaker, the hash chain across engines, leases between two engines and registry eviction | full pipeline with the real deterministic agents; the bundled evaluation suite | ArchUnit boundaries |
+| `orchestrator-app` | 357, plus 2 with Docker | provider catalog, structured-output schema, metrics recorder, API key filter, OIDC token validation and role mapping, posture validator, four-eyes guard, dependency flags, pricing properties | `@WebMvcTest` controllers, `@DataJpaTest` stores, JDBC leases, listing queries, `@RestClientTest` Ollama client, Anthropic client with a stubbed sender, the event hub with a controllable write executor | scenarios through `@SpringBootTest` and MockMvc; the three security modes with real JWTs; the persistence contract on H2 and, with Docker, `PostgresPersistenceIT` on `postgres:17-alpine`; OpenAPI contract; 1 live Anthropic test | ArchUnit layering |
 
 Totals at the `v1.0.0` tag, from the Surefire and Failsafe reports and the commit messages: `url-shortener` 493 tests
-plus the 15 of `RedisRateLimiterIT`; `orchestrator-core` 555, of which `refusesSymbolicLinksThatEscapeTheWorkspaceRoot`
-is skipped on Windows when the account may not create symbolic links (it runs on Linux); `orchestrator-app` 356, of
+plus the 15 of `RedisRateLimiterIT`; `orchestrator-core` 574, of which `refusesSymbolicLinksThatEscapeTheWorkspaceRoot`
+is skipped on Windows when the account may not create symbolic links (it runs on Linux); `orchestrator-app` 357, of
 which 2 are skipped by default (the live Anthropic test without `ANTHROPIC_API_KEY`, the opt-in OpenAPI
 regeneration), plus the 2 of `PostgresPersistenceIT`. A machine without Docker reports the 17 Docker-only tests as
 skipped. CI runs on Linux with Docker, so it executes 1 404 tests: everything except the two skipped by default.
@@ -241,9 +241,9 @@ numbers:
 | Module | Lines covered | Lines missed | Line coverage | Branch coverage |
 |---|---|---|---|---|
 | `url-shortener` | 1 229 | 66 | 94.9 % | 87.5 % |
-| `orchestrator-core` | 9 447 | 592 | 94.1 % | 82.0 % |
-| `orchestrator-app` | 2 704 | 186 | 93.6 % | 78.9 % |
-| all three | 13 380 | 844 | 94.1 % | 81.9 % |
+| `orchestrator-core` | 9 921 | 625 | 94.1 % | 81.8 % |
+| `orchestrator-app` | 2 713 | 186 | 93.6 % | 78.9 % |
+| all three | 13 863 | 877 | 94.1 % | 81.7 % |
 
 The README badges are static shields.io badges with these numbers. To regenerate them after a full build, run from
 the repository root:

@@ -145,9 +145,14 @@ through a compliant re-plan; injected faults recover through retries (MTTR about
 fallback; a re-plan revokes the earlier design approval and the change record lists only current approvals; a
 Claude-backed run produced substantially richer artifacts and was safe-stopped by the token budget, and two
 follow-up runs stopped at the verification gate because their diffs were written without the source, which the
-second pass addresses (all three on the earlier bulk-API requirement); the campaign-label brownfield run over the
-committed tree ranks the link, bulk and analytics code first, completes with two approvals and leaves an audit chain
-that verifies, while its design shows the kind of schema over-reach the design gate exists to catch.
+second pass addresses (all three on the earlier bulk-API requirement); the deterministic campaign-label brownfield run over the committed tree ranks the link, bulk and analytics code
+first, completes with two approvals and leaves an audit chain that verifies, while its design shows the kind of
+schema over-reach the design gate exists to catch; of the two Claude-backed runs on that requirement, the fourth
+stopped at verification because the LLM impact and design stages left the implementer without any source (fixed by
+feeding the static impact analysis into those stages and into source selection), and the fifth wrote real diffs
+against the entity, DTOs, service and repositories, passed verification on its second change set, was safe-stopped
+by the 600 000-token budget two stages before the end and completed with a signed change record after an operator
+resume (15 LLM calls, $6.08 at list prices).
 
 ## 6. Where to look for each quality attribute
 
@@ -202,7 +207,7 @@ Stated plainly, with the production path in [RISKS_AND_TRADEOFFS.md](RISKS_AND_T
   in view, and the engine safe-stopped as designed. The second pass gives those stages the source, applies diffs
   for real in the sandbox, stops advisory findings from costing a loop and allows three loops; whether Claude now
   converges is recorded in [SCENARIOS.md](SCENARIOS.md#the-same-scenario-with-an-llm-provider). The deterministic
-  path is the reproducible baseline; the defaults are 600 000 tokens and 64 000 streamed output tokens, and prompts
+  path is the reproducible baseline; the defaults are 1 500 000 tokens and 64 000 streamed output tokens, and prompts
   summarize non-adjacent artifacts.
 - Source-aware prompts send up to 120 000 characters of repository source per implementation, verification and
   security-review attempt; secret files are refused by name and credential-like tokens redacted by pattern, other

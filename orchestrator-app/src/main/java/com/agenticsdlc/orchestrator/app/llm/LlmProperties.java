@@ -12,6 +12,7 @@ import jakarta.validation.constraints.NotNull;
 
 import org.jspecify.annotations.Nullable;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 import org.springframework.boot.context.properties.bind.Name;
 import org.springframework.validation.annotation.Validated;
@@ -119,13 +120,44 @@ public record LlmProperties(
      *                        change set does not hit HTTP read timeouts)
      * @param timeout request timeout of one streamed call (default 900 s; stage timeouts are scaled by
      *                {@code sdlc.engine.llm-timeout-scale} to stay above it)
+     * @param cacheTtl lifetime of the prompt-cache breakpoints on the system prompt and the run-stable context:
+     *                 {@code 5m} or {@code 1h} (default {@code 1h}: a cache write costs more, but the cached prefix
+     *                 survives the minutes a streamed implementation call takes, so the next call reads it back)
      */
     public record Anthropic(
             @DefaultValue("true") boolean enabled,
             @DefaultValue("claude-opus-5-5") @NotBlank String model,
             @DefaultValue("") String apiKey,
             @DefaultValue("64000") @Min(256) @Max(128000) int maxOutputTokens,
-            @DefaultValue("900s") @NotNull Duration timeout) {
+            @DefaultValue("900s") @NotNull Duration timeout,
+            @DefaultValue("1h") @NotBlank String cacheTtl) {
+
+        /** Cache lifetimes the Anthropic API accepts. */
+        public static final java.util.Set<String> CACHE_TTLS = java.util.Set.of("5m", "1h");
+
+        /**
+         * Validates the cache lifetime. This canonical constructor is the one Spring binds properties through.
+         */
+        @ConstructorBinding
+        public Anthropic {
+            if (cacheTtl == null || !CACHE_TTLS.contains(cacheTtl.strip())) {
+                throw new IllegalArgumentException("sdlc.llm.anthropic.cache-ttl must be 5m or 1h, was: " + cacheTtl);
+            }
+            cacheTtl = cacheTtl.strip();
+        }
+
+        /**
+         * Settings with the default one-hour cache lifetime.
+         *
+         * @param enabled whether the provider is registered
+         * @param model model id
+         * @param apiKey API key
+         * @param maxOutputTokens maximum output tokens per request
+         * @param timeout request timeout of one streamed call
+         */
+        public Anthropic(boolean enabled, String model, String apiKey, int maxOutputTokens, Duration timeout) {
+            this(enabled, model, apiKey, maxOutputTokens, timeout, "1h");
+        }
 
         /**
          * Returns whether an API key is configured.
@@ -139,7 +171,7 @@ public record LlmProperties(
         @Override
         public String toString() {
             return "Anthropic[enabled=" + enabled + ", model=" + model + ", apiKey=" + (hasApiKey() ? "***" : "")
-                    + ", maxOutputTokens=" + maxOutputTokens + ", timeout=" + timeout + "]";
+                    + ", maxOutputTokens=" + maxOutputTokens + ", timeout=" + timeout + ", cacheTtl=" + cacheTtl + "]";
         }
     }
 

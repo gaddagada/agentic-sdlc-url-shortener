@@ -148,6 +148,7 @@ sdlc:
       api-key: ${ANTHROPIC_API_KEY:}
       max-output-tokens: 64000             # responses are streamed; a full change set needs this much
       timeout: 900s                        # one streamed call; stage timeouts are x3 for LLM attempts
+      cache-ttl: 1h                        # prompt-cache lifetime (5m | 1h); 1h outlives the minutes a change set takes to stream
     ollama:
       enabled: true
       base-url: http://localhost:11434
