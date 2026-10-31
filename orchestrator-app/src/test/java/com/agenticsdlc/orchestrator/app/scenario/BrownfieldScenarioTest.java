@@ -126,8 +126,8 @@ class BrownfieldScenarioTest {
         assertThat(ranked.indexOf(link)).as("the entity ranks among the directly impacted components")
                 .isLessThan((int) direct);
         assertThat(impact.entities()).first().isEqualTo("Link (links)");
-        // The analyzer reports the latest Flyway migration of the repository and proposes the next version; it does
-        // not filter migrations by module, so the latest one may belong to another module (orchestrator-app V2).
+        // The analyzer reports the latest Flyway migration of the module that owns the impacted entities and proposes
+        // the next version for that module (url-shortener V1 and a proposed V2, never orchestrator-app migrations).
         assertThat(impact.migrations()).hasSize(2);
         assertThat(impact.migrations().getFirst()).matches(".+/src/main/resources/db/migration/V\\d+__\\w+\\.sql");
         assertThat(impact.migrations().get(1)).matches("proposed: V\\d+__\\w+\\.sql");

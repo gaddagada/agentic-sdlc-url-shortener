@@ -56,7 +56,7 @@ import tools.jackson.databind.JsonNode;
  *
  * <p>Requests are sent with the streaming Messages API ({@code createStreaming}) and the text deltas are
  * accumulated into the final {@link Message} with the SDK's {@link MessageAccumulator}: long outputs (up to
- * {@code sdlc.llm.anthropic.max-output-tokens}, 32k by default) keep the connection busy instead of sitting idle
+ * {@code sdlc.llm.anthropic.max-output-tokens}, 64 000 by default) keep the connection busy instead of sitting idle
  * until a read timeout, and the stop reason and usage are read from the accumulated message exactly as from a
  * non-streaming response.</p>
  *

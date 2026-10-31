@@ -324,7 +324,7 @@ default) is the route to real verification.
 
 `COMPLETED`; 10 agent calls; 2 approvals; 89 audit events; end-to-end 2.58 s with 0.10 s active.
 
-<p align="center"><img src="images/screenshots/console-artifact.png" width="100%" alt="Console artifact view of the brownfield run: the requirement specification rendered from the artifact, with version, hash, status, attempts, agent and duration."></p>
+<p align="center"><img src="images/screenshots/console-artifact.png" width="100%" alt="Console artifact view of the greenfield run: the requirement specification rendered from the artifact, with version, hash, status, attempts, agent and duration."></p>
 
 ---
 

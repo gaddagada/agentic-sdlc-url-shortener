@@ -10,8 +10,8 @@ what is accepted).
   <a href="https://github.com/gaddagada/agentic-sdlc-url-shortener/actions/workflows/ci.yml"><img src="https://github.com/gaddagada/agentic-sdlc-url-shortener/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
   <img src="https://img.shields.io/badge/Java-25-007396?logo=openjdk&logoColor=white" alt="Java 25">
   <img src="https://img.shields.io/badge/Spring%20Boot-4.1.2-6DB33F?logo=springboot&logoColor=white" alt="Spring Boot 4.1.2">
-  <img src="https://img.shields.io/badge/tests-1404-brightgreen" alt="1404 tests run in CI">
-  <img src="https://img.shields.io/badge/line%20coverage-94.0%25-brightgreen" alt="Line coverage 94.0%">
+  <img src="https://img.shields.io/badge/tests-1419-brightgreen" alt="1419 tests run in CI">
+  <img src="https://img.shields.io/badge/line%20coverage-94.1%25-brightgreen" alt="Line coverage 94.1%">
 </p>
 
 **What this is**
@@ -181,13 +181,17 @@ to polling):
 the recording are inflated: the run was slowed down with a debugger breakpoint so that the intermediate states stay
 on screen. Without it the deterministic stages take well under a second of active time.</sub></p>
 
-<p align="center"><img src="docs/images/screenshots/console-overview.png" width="100%" alt="Operator console showing a completed brownfield run: status banner with timing and budget usage, run controls, the pipeline graph with all ten stages succeeded, and the rendered requirement specification."></p>
+<p align="center"><img src="docs/images/screenshots/console-overview.png" width="100%" alt="Operator console showing a completed greenfield run: header with the active policy pack and the Live stream indicator, status banner with timing and budget usage, run controls, the pipeline graph with all ten stages succeeded, the paged run list and the rendered requirement specification."></p>
 
 | Clarification before planning (ambiguous scenario) | Policy denial before any agent runs |
 |---|---|
 | <img src="docs/images/screenshots/console-clarification.png" alt="Ambiguous run waiting at intake with four clarification questions, each with suggested answers." width="100%"> | <img src="docs/images/screenshots/console-policy-denial.png" alt="Policy-denied run: halt banner naming SEC-001 and CMP-002, resume refused, re-plan offered." width="100%"> |
 
 <p align="center"><img src="docs/images/screenshots/console-lineage.png" width="100%" alt="Lineage tab: each box is one artifact version; edges run from an input to the artifact derived from it; superseded versions are faded."></p>
+
+| Evaluation tab | Audit tab |
+|---|---|
+| <img src="docs/images/screenshots/console-evaluation.png" alt="Evaluation tab: deterministic scores per stage with the weakest criterion named, 94.1% overall for the greenfield run." width="100%"> | <img src="docs/images/screenshots/console-audit.png" alt="Audit tab: the hash chain verified over 89 events, event-type filters, and the release-readiness change record accepted with two approvals and signed with HMAC-SHA256." width="100%"> |
 
 **Scripted alternative.** The demo scripts start a catalog scenario through the REST API, answer clarification
 questions with canned answers, approve every gate as operator `demo-operator` (auto-approval for demonstration,
@@ -585,13 +589,13 @@ agentic-sdlc-url-shortener/
 |---|---|---|
 | `url-shortener` | 493 (+15 with Docker) | parameterized SSRF validator cases (IPv6 zone, 6to4, NAT64 and Teredo forms included), the resolve-time check against a fake resolver; MockMvc and JPA slices; end-to-end integration (create, bulk, redirect, click, analytics, 410, idempotency, 429); idempotency takeover protection; IPv6 /64 rate-limit keys and the bounded bucket store; one rate-limiter contract run against the in-memory limiter, a Java simulator of the Redis Lua script and, with Docker, a real `redis:7-alpine` (Testcontainers, Failsafe); rate-limit and API-key bypass attempts over a real servlet container; OpenAPI contract; ArchUnit layering |
 | `orchestrator-core` | 555 | engine behaviour with fake agents: latch-proven parallel branches, retries, fallback, rollback with compensations, re-plan, budgets, restart recovery, store failures; the audit hash chain and signed change records; run leases across engines and registry eviction; policy packs and the regex guard; the evaluation suite; the LLM price book; the dependency inventory; the provider circuit breaker; unified-diff application with hunk diagnostics; every policy rule; deterministic agents; snapshot round trip |
-| `orchestrator-app` | 341 (+2 with Docker) | REST slices, scenarios end to end through MockMvc, the three security modes with real JWTs from a local JWK set, roles, four-eyes and the production posture; server-sent event streams; the paged listing query; JDBC leases with two engines on one database; the persistence contract on H2 and, with Docker, on `postgres:17-alpine`; signed change records end to end; policy pack files; observations and OTLP wiring; Anthropic and Ollama clients against stubs; 2 skipped by default: the live Anthropic test (needs `ANTHROPIC_API_KEY`) and the opt-in OpenAPI regeneration |
+| `orchestrator-app` | 356 (+2 with Docker) | REST slices, scenarios end to end through MockMvc, the three security modes with real JWTs from a local JWK set, roles, four-eyes and the production posture; server-sent event streams; the paged listing query; JDBC leases with two engines on one database; the persistence contract on H2 and, with Docker, on `postgres:17-alpine`; signed change records end to end; policy pack files; observations and OTLP wiring; Anthropic and Ollama clients against stubs; 2 skipped by default: the live Anthropic test (needs `ANTHROPIC_API_KEY`) and the opt-in OpenAPI regeneration |
 
 `./mvnw -B verify` runs everything and writes JaCoCo reports to `<module>/target/site/jacoco/index.html`. The
 integration tests that need Docker (15 in `RedisRateLimiterIT`, 2 in `PostgresPersistenceIT`) run only where Docker
 is available and are reported as skipped otherwise; GitHub's runners have Docker, so CI runs them. Line coverage of
-the last local builds: 94.9 % (`url-shortener`), 94.1 % (`orchestrator-core`), 93.2 % (`orchestrator-app`),
-94.0 % overall. CI runs the same build on Java 25 and builds both container images. Details and how to regenerate
+the last local builds: 94.9 % (`url-shortener`), 94.1 % (`orchestrator-core`), 93.6 % (`orchestrator-app`),
+94.1 % overall. CI runs the same build on Java 25 and builds both container images. Details and how to regenerate
 the numbers: [docs/TESTING.md](docs/TESTING.md).
 
 ## Releases
