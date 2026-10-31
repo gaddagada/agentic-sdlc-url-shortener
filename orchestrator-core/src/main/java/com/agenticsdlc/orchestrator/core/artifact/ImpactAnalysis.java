@@ -19,6 +19,10 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  * @param riskFactors identified risk factors
  * @param suggestedTests existing tests to re-run and new tests to add
  * @param summary one-paragraph summary
+ * @param reconciliation what the engine changed when it reconciled a model-written analysis with the deterministic
+ *                       static analysis of the indexed tree (components resolved to indexed paths, static candidates
+ *                       the model omitted, back-filled entities, migrations and endpoints); empty when nothing was
+ *                       reconciled. Whatever a model writes here is replaced
  */
 public record ImpactAnalysis(
         String workspaceRoot,
@@ -31,7 +35,10 @@ public record ImpactAnalysis(
         List<DataFlow> dataFlows,
         List<String> riskFactors,
         List<String> suggestedTests,
-        String summary) implements ArtifactPayload {
+        String summary,
+        @SchemaDescription("Leave empty: the engine records here how this analysis was reconciled with the static "
+                + "analysis of the indexed tree.")
+        List<String> reconciliation) implements ArtifactPayload {
 
     /**
      * Normalizes collections and text.
@@ -46,6 +53,30 @@ public record ImpactAnalysis(
         riskFactors = Immutables.list(riskFactors);
         suggestedTests = Immutables.list(suggestedTests);
         summary = Immutables.text(summary);
+        reconciliation = Immutables.list(reconciliation);
+    }
+
+    /**
+     * Creates an analysis without reconciliation notes (the shape before reconciliation existed).
+     *
+     * @param workspaceRoot the indexed workspace name, or {@code "none"}
+     * @param indexedFiles number of indexed files
+     * @param existingCodebase whether an existing codebase was analysed
+     * @param components impacted (or proposed) components
+     * @param endpoints impacted HTTP endpoints
+     * @param entities impacted entities
+     * @param migrations relevant existing migrations and proposed new ones
+     * @param dataFlows controller to storage data flows
+     * @param riskFactors identified risk factors
+     * @param suggestedTests existing tests to re-run and new tests to add
+     * @param summary one-paragraph summary
+     */
+    public ImpactAnalysis(String workspaceRoot, int indexedFiles, boolean existingCodebase,
+                          List<ImpactedComponent> components, List<ImpactedEndpoint> endpoints, List<String> entities,
+                          List<String> migrations, List<DataFlow> dataFlows, List<String> riskFactors,
+                          List<String> suggestedTests, String summary) {
+        this(workspaceRoot, indexedFiles, existingCodebase, components, endpoints, entities, migrations, dataFlows,
+                riskFactors, suggestedTests, summary, List.of());
     }
 
     /** Type of an impacted component. */
@@ -87,13 +118,18 @@ public record ImpactAnalysis(
      *
      * @param name simple type name
      * @param type component type
-     * @param path repository-relative path (forward slashes)
+     * @param path repository-relative path (forward slashes) as listed in the codebase index; empty only for a
+     *             {@link ChangeNature#NEW} component without a proposed location
      * @param confidence 0..1
      * @param reasons why the component is impacted
      * @param nature nature of the impact
      */
-    public record ImpactedComponent(String name, ComponentType type, String path, double confidence,
-                                    List<String> reasons, ChangeNature nature) {
+    public record ImpactedComponent(String name, ComponentType type,
+                                    @SchemaDescription("Repository-relative path with forward slashes, copied from "
+                                            + "the codebase index (or from the static analysis candidates); required "
+                                            + "for every existing component. May be empty only for a NEW component.")
+                                    String path,
+                                    double confidence, List<String> reasons, ChangeNature nature) {
         /**
          * Normalizes fields.
          */
@@ -181,6 +217,9 @@ public record ImpactAnalysis(
                 dataFlows.stream().map(f -> List.of(f.from(), f.via(), f.to())).toList());
         md.heading(3, "Risk factors").bullets(riskFactors);
         md.heading(3, "Suggested tests").bullets(suggestedTests);
+        if (!reconciliation.isEmpty()) {
+            md.heading(3, "Reconciliation with static analysis").bullets(reconciliation);
+        }
         return md.render();
     }
 }

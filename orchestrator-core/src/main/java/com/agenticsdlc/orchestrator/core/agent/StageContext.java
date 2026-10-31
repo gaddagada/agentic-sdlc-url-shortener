@@ -11,6 +11,7 @@ import org.jspecify.annotations.Nullable;
 
 import com.agenticsdlc.orchestrator.core.artifact.Artifact;
 import com.agenticsdlc.orchestrator.core.artifact.ArtifactPayload;
+import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis;
 import com.agenticsdlc.orchestrator.core.model.Approval;
 import com.agenticsdlc.orchestrator.core.model.ClarificationQuestion;
 import com.agenticsdlc.orchestrator.core.model.RunOptions;
@@ -45,6 +46,12 @@ import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
  *                        otherwise. LLM agents put it into their prompt so diffs are written against the real text;
  *                        deterministic agents may ignore it
  * @param impactedSourceNotes notes about impacted files that were truncated, not found, refused, skipped or omitted
+ * @param staticImpact the deterministic static impact analysis ({@code ImpactAnalyzer}) of the run's accepted
+ *                     requirement specification over the workspace index, computed once per plan version and
+ *                     specification by the engine for REPO runs with a non-empty index; null otherwise (no index, or
+ *                     the stage does not depend on the requirement specification). LLM agents use it to reconcile
+ *                     the impact analysis and the design with the indexed tree; the engine uses it to choose the
+ *                     impacted sources
  */
 public record StageContext(
         String runId,
@@ -65,7 +72,8 @@ public record StageContext(
         AgentSettings settings,
         Set<String> directPredecessors,
         Map<String, String> impactedSources,
-        List<String> impactedSourceNotes) {
+        List<String> impactedSourceNotes,
+        @Nullable ImpactAnalysis staticImpact) {
 
     /**
      * Copies collections.
@@ -86,6 +94,40 @@ public record StageContext(
         directPredecessors = Immutables.sortedSet(directPredecessors);
         impactedSources = Immutables.sortedMap(impactedSources);
         impactedSourceNotes = Immutables.list(impactedSourceNotes);
+    }
+
+    /**
+     * Creates a context without a static impact analysis.
+     *
+     * @param runId run id
+     * @param stageId stage id
+     * @param role agent role
+     * @param requirement active requirement
+     * @param originalRequirement original requirement
+     * @param clarificationAnswers answers by question id
+     * @param clarificationQuestions the questions that were answered
+     * @param upstream accepted artifacts of all transitive predecessors, by stage id
+     * @param feedback feedback for this stage
+     * @param attempt attempt number (1-based)
+     * @param planVersion plan version
+     * @param previousError error of the previous attempt, or null
+     * @param workspaceIndex codebase index, or null
+     * @param options run options
+     * @param approvals approvals granted in the current plan version
+     * @param settings engine settings for agents
+     * @param directPredecessors ids of the stage's direct predecessors
+     * @param impactedSources source of the files the change touches
+     * @param impactedSourceNotes notes about impacted files that were cut or left out
+     */
+    public StageContext(String runId, String stageId, AgentRole role, String requirement, String originalRequirement,
+                        Map<String, String> clarificationAnswers, List<ClarificationQuestion> clarificationQuestions,
+                        Map<String, Artifact> upstream, List<String> feedback, int attempt, int planVersion,
+                        @Nullable String previousError, @Nullable CodebaseIndex workspaceIndex, RunOptions options,
+                        List<Approval> approvals, AgentSettings settings, Set<String> directPredecessors,
+                        Map<String, String> impactedSources, List<String> impactedSourceNotes) {
+        this(runId, stageId, role, requirement, originalRequirement, clarificationAnswers, clarificationQuestions,
+                upstream, feedback, attempt, planVersion, previousError, workspaceIndex, options, approvals, settings,
+                directPredecessors, impactedSources, impactedSourceNotes, null);
     }
 
     /**
@@ -161,7 +203,19 @@ public record StageContext(
     public StageContext withImpactedSources(Map<String, String> sources, List<String> notes) {
         return new StageContext(runId, stageId, role, requirement, originalRequirement, clarificationAnswers,
                 clarificationQuestions, upstream, feedback, attempt, planVersion, previousError, workspaceIndex,
-                options, approvals, settings, directPredecessors, sources, notes);
+                options, approvals, settings, directPredecessors, sources, notes, staticImpact);
+    }
+
+    /**
+     * Returns a copy of this context with a static impact analysis.
+     *
+     * @param analysis the deterministic static impact analysis, or null for none
+     * @return the copy
+     */
+    public StageContext withStaticImpact(@Nullable ImpactAnalysis analysis) {
+        return new StageContext(runId, stageId, role, requirement, originalRequirement, clarificationAnswers,
+                clarificationQuestions, upstream, feedback, attempt, planVersion, previousError, workspaceIndex,
+                options, approvals, settings, directPredecessors, impactedSources, impactedSourceNotes, analysis);
     }
 
     /**

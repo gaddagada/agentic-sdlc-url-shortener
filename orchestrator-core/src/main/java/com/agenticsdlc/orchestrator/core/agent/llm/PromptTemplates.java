@@ -3,19 +3,24 @@ package com.agenticsdlc.orchestrator.core.agent.llm;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import com.agenticsdlc.orchestrator.core.agent.AgentRole;
 import com.agenticsdlc.orchestrator.core.agent.StageContext;
 import com.agenticsdlc.orchestrator.core.artifact.Artifact;
+import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis;
+import com.agenticsdlc.orchestrator.core.artifact.ImpactAnalysis.ImpactedComponent;
 import com.agenticsdlc.orchestrator.core.artifact.RequirementSpec;
 import com.agenticsdlc.orchestrator.core.artifact.VerificationReport;
 import com.agenticsdlc.orchestrator.core.json.JsonCodec;
 import com.agenticsdlc.orchestrator.core.model.ClarificationQuestion;
 import com.agenticsdlc.orchestrator.core.workspace.CodebaseIndex;
+import com.agenticsdlc.orchestrator.core.workspace.IndexLookup;
 import com.agenticsdlc.orchestrator.core.workspace.IndexedType;
 import com.agenticsdlc.orchestrator.core.workspace.WorkspaceSandbox;
 
@@ -29,7 +34,9 @@ import com.agenticsdlc.orchestrator.core.workspace.WorkspaceSandbox;
  *       active requirement, the clarification answers, the accepted {@link RequirementSpec} (full JSON) and, for the
  *       codebase-aware roles (analysis, architecture, implementation), the codebase index;</li>
  *   <li>{@link #user(StageContext, JsonCodec, Map)}: stage-specific content, namely the artifacts of the stage's
- *       direct predecessors (full JSON), summaries of the other upstream artifacts, the source of impacted files
+ *       direct predecessors (full JSON), summaries of the other upstream artifacts, the components found by static
+ *       analysis of the indexed tree (impact role of REPO runs, {@link StageContext#staticImpact()}), the impacted
+ *       components with their indexed paths (design role of REPO runs), the source of impacted files
  *       (implementation, verification, security review of REPO runs), feedback, the previous attempt's error and
  *       the output schema.</li>
  * </ol>
@@ -88,6 +95,25 @@ public final class PromptTemplates {
             + "improvements. Set passed to true exactly when no blocking check failed and no requirement is "
             + "uncovered: advisory failures never fail verification.";
 
+    /** Implementation rule for an existing file whose source the prompt does not show. */
+    public static final String REQUESTED_SOURCES_RULE = "If a file you must change is not shown under \"Source of "
+            + "impacted files\", do not guess its content: list its path (as the codebase index lists it) in "
+            + "requestedSources and keep that change out of this change set; the next attempt shows that source.";
+
+    /** Rule for the impact and design roles: paths come from the index they are given. */
+    public static final String INDEX_PATHS_RULE = "Every path of an existing file must be copied from the codebase "
+            + "index or from the component list you are given; never invent a package or directory for an existing "
+            + "type.";
+
+    /** Heading of the static analysis candidates in the impact prompt. */
+    public static final String STATIC_IMPACT_HEADING = "## Components found by static analysis of the indexed tree";
+
+    /** Heading of the impacted components with their paths in the design prompt. */
+    public static final String IMPACTED_PATHS_HEADING = "## Impacted components and their paths";
+
+    /** Maximum components listed in the static analysis and impacted path sections. */
+    static final int MAX_LISTED_COMPONENTS = 40;
+
     /** Roles whose user prompt shows the source of impacted files (when the context carries it). */
     public static final Set<AgentRole> SOURCE_ROLES = Collections.unmodifiableSet(EnumSet.of(AgentRole.IMPLEMENTATION,
             AgentRole.VERIFICATION, AgentRole.SECURITY_REVIEW));
@@ -124,17 +150,23 @@ public final class PromptTemplates {
             case PLANNING -> "Task ids are T1, T2, ...; the dependency graph must be acyclic; human-owned tasks are "
                     + "reviews and approvals.";
             case CODEBASE_ANALYSIS -> "Use only types, paths and endpoints from the codebase index. Confidence is "
-                    + "between 0 and 1.";
+                    + "between 0 and 1. Give every component a type, a nature and the path the index lists for it "
+                    + "(an empty path only for a NEW component). " + INDEX_PATHS_RULE + " When the prompt lists "
+                    + "components found by static analysis, keep them unless you can say why they are not affected "
+                    + "(say why in the summary). Leave reconciliation empty.";
             case ARCHITECTURE -> "Consider at least two alternatives and choose exactly one. Mark breaking API changes "
                     + "and backward-incompatible data changes explicitly. Keep the design compact: list only the "
-                    + "components that change, one sentence per responsibility, no code.";
+                    + "components that change, one sentence per responsibility, no code. Set path on every existing "
+                    + "component (isNew false), copied from the impacted components or the codebase index, and leave "
+                    + "it empty for new components. " + INDEX_PATHS_RULE;
             case IMPLEMENTATION -> "Paths are repository-relative with forward slashes and start with " + roots
                     + " (the orchestrator modules, the build wrapper and CI files are off limits). Keep the change "
                     + "set compact; the response is cut off at the output token limit. Change only the files the "
                     + "design needs. For an existing file (one listed in the codebase index) use operation MODIFY with "
                     + "contentKind DIFF: a unified diff of only the changed hunks; never repeat unchanged code. "
                     + DIFF_RULES + " Use operation CREATE with contentKind FULL only for new files that do not exist "
-                    + "yet; never CREATE an existing file. Add tests with real assertions for every production change "
+                    + "yet; never CREATE an existing file. " + REQUESTED_SOURCES_RULE + " Add tests with real "
+                    + "assertions for every production change "
                     + "and a new Flyway migration for every data model change. buildCommand is informational: the "
                     + "engine always runs its own fixed build. When verification feedback is present, return the "
                     + "complete corrected change set (same compact rules, every feedback item addressed) rather than "
@@ -213,6 +245,8 @@ public final class PromptTemplates {
     public static String user(StageContext context, JsonCodec codec, Map<String, Object> schema) {
         StringBuilder out = new StringBuilder();
         appendUpstream(out, context, codec);
+        appendStaticImpact(out, context);
+        appendImpactedPaths(out, context);
         appendSources(out, context);
         if (!context.feedback().isEmpty()) {
             out.append("## Feedback to address\n");
@@ -294,6 +328,93 @@ public final class PromptTemplates {
             }
             out.append('\n');
         }
+    }
+
+    /**
+     * Impact role: the components the deterministic static analysis found in the indexed tree (path, name, type,
+     * change type, confidence), with its entities, migrations and endpoints, to keep unless the model can say why
+     * they are not affected.
+     */
+    private static void appendStaticImpact(StringBuilder out, StageContext context) {
+        ImpactAnalysis analysis = context.staticImpact();
+        if (context.role() != AgentRole.CODEBASE_ANALYSIS || analysis == null || !analysis.existingCodebase()
+                || analysis.components().isEmpty()) {
+            return;
+        }
+        out.append(STATIC_IMPACT_HEADING).append('\n')
+                .append("Components found by static analysis of the indexed tree; keep them unless you can say why "
+                        + "they are not affected (say why in the summary), and copy their paths. Columns: path | "
+                        + "name | type | change type | confidence.\n");
+        int listed = 0;
+        for (ImpactedComponent c : analysis.components()) {
+            if (listed++ >= MAX_LISTED_COMPONENTS) {
+                out.append("- ... (").append(analysis.components().size() - MAX_LISTED_COMPONENTS).append(" more)\n");
+                break;
+            }
+            out.append("- ").append(c.path()).append(" | ").append(c.name()).append(" | ").append(c.type())
+                    .append(" | ").append(c.nature()).append(" | ")
+                    .append(String.format(Locale.ROOT, "%.2f", c.confidence())).append('\n');
+        }
+        if (!analysis.entities().isEmpty()) {
+            out.append("Entities: ").append(String.join(", ", analysis.entities())).append('\n');
+        }
+        if (!analysis.migrations().isEmpty()) {
+            out.append("Migrations: ").append(String.join(", ", analysis.migrations())).append('\n');
+        }
+        if (!analysis.endpoints().isEmpty()) {
+            out.append("Endpoints: ").append(String.join(", ", analysis.endpoints().stream()
+                    .limit(MAX_LISTED_COMPONENTS).map(e -> e.method() + " " + e.path() + " (" + e.controller() + ")")
+                    .toList())).append('\n');
+        }
+        out.append('\n');
+    }
+
+    /**
+     * Design role of REPO runs: the existing components of the accepted impact analysis (resolved to indexed paths)
+     * and the static candidates of at least 0.8 confidence, so that the design copies real paths.
+     */
+    private static void appendImpactedPaths(StringBuilder out, StageContext context) {
+        CodebaseIndex index = context.workspaceIndex();
+        if (context.role() != AgentRole.ARCHITECTURE || index == null || index.isEmpty()) {
+            return;
+        }
+        Map<String, String> lines = new LinkedHashMap<>();
+        Optional<ImpactAnalysis> impact = context.find(ImpactAnalysis.class);
+        if (impact.isPresent()) {
+            for (ImpactedComponent c : impact.get().components()) {
+                if (c.nature() == ImpactAnalysis.ChangeNature.NEW) {
+                    continue;
+                }
+                IndexLookup.resolve(index, c.path(), c.name()).ifPresent(path -> lines.putIfAbsent(path,
+                        c.name() + " [" + c.type() + ", " + c.nature() + "]"));
+            }
+        }
+        ImpactAnalysis analysis = context.staticImpact();
+        if (analysis != null) {
+            for (ImpactedComponent c : analysis.components()) {
+                if (c.confidence() >= IndexReconciliation.MERGE_CONFIDENCE
+                        && (c.nature() == ImpactAnalysis.ChangeNature.MODIFY
+                        || c.nature() == ImpactAnalysis.ChangeNature.EXTEND) && index.containsPath(c.path())) {
+                    lines.putIfAbsent(c.path(), c.name() + " [" + c.type() + ", " + c.nature() + ", static analysis]");
+                }
+            }
+        }
+        if (lines.isEmpty()) {
+            return;
+        }
+        out.append(IMPACTED_PATHS_HEADING).append('\n')
+                .append("Existing components this change touches, with their repository paths. Set path on every "
+                        + "existing component of the design (isNew false), copied from this list or the codebase "
+                        + "index; leave it empty for new components.\n");
+        int listed = 0;
+        for (Map.Entry<String, String> line : lines.entrySet()) {
+            if (listed++ >= MAX_LISTED_COMPONENTS) {
+                out.append("- ... (").append(lines.size() - MAX_LISTED_COMPONENTS).append(" more)\n");
+                break;
+            }
+            out.append("- ").append(line.getValue()).append(": ").append(line.getKey()).append('\n');
+        }
+        out.append('\n');
     }
 
     private static void appendSources(StringBuilder out, StageContext context) {

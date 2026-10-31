@@ -14,9 +14,15 @@ import com.agenticsdlc.orchestrator.core.util.Immutables;
  * @param risks implementation risks and documented justifications
  * @param rollbackPlan how to roll the change back
  * @param traces task ids implemented
+ * @param requestedSources repository paths (from the codebase index) whose source the agent needs to write correct
+ *                         diffs but was not shown; the engine shows them in the next implementation attempt (after a
+ *                         verification feedback loop or an INVALID_OUTPUT rejection). Not a file change
  */
 public record ChangeSet(String baseRevision, List<FileChange> changes, String buildCommand, List<String> risks,
-                        String rollbackPlan, List<String> traces) implements ArtifactPayload {
+                        String rollbackPlan, List<String> traces,
+                        @SchemaDescription("Paths from the index that must be shown in the next attempt because they "
+                                + "are required to write correct diffs.")
+                        List<String> requestedSources) implements ArtifactPayload {
 
     /**
      * Normalizes collections and text.
@@ -28,6 +34,22 @@ public record ChangeSet(String baseRevision, List<FileChange> changes, String bu
         risks = Immutables.list(risks);
         rollbackPlan = Immutables.text(rollbackPlan);
         traces = Immutables.list(traces);
+        requestedSources = Immutables.list(requestedSources);
+    }
+
+    /**
+     * Creates a change set that requests no sources (the shape before requested sources existed).
+     *
+     * @param baseRevision the revision the change applies to
+     * @param changes file changes
+     * @param buildCommand proposed build command (informational)
+     * @param risks implementation risks
+     * @param rollbackPlan how to roll the change back
+     * @param traces task ids implemented
+     */
+    public ChangeSet(String baseRevision, List<FileChange> changes, String buildCommand, List<String> risks,
+                     String rollbackPlan, List<String> traces) {
+        this(baseRevision, changes, buildCommand, risks, rollbackPlan, traces, List.of());
     }
 
     /** File operation. */
@@ -161,6 +183,9 @@ public record ChangeSet(String baseRevision, List<FileChange> changes, String bu
         md.heading(3, "Risks").bullets(risks);
         md.heading(3, "Rollback plan").paragraph(rollbackPlan);
         md.field("Traces", Markdown.join(traces));
+        if (!requestedSources.isEmpty()) {
+            md.heading(3, "Requested sources (for the next attempt)").bullets(requestedSources);
+        }
         return md;
     }
 }

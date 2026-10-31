@@ -72,6 +72,7 @@ import com.agenticsdlc.orchestrator.core.model.RunOptions;
 import com.agenticsdlc.orchestrator.core.model.RunStatus;
 import com.agenticsdlc.orchestrator.core.model.StageExecution;
 import com.agenticsdlc.orchestrator.core.model.StageStatus;
+import com.agenticsdlc.orchestrator.core.model.WorkspaceMode;
 import com.agenticsdlc.orchestrator.core.policy.GatePhase;
 import com.agenticsdlc.orchestrator.core.policy.PolicyDecision;
 import com.agenticsdlc.orchestrator.core.policy.PolicyEngine;
@@ -178,6 +179,12 @@ public final class OrchestrationEngine implements AutoCloseable {
 
     /** Maximum length of a failure text recorded in the run, the audit trail and circuit snapshots. */
     static final int MAX_FAILURE_TEXT = 1000;
+
+    /** Maximum impacted source paths recorded in STAGE_STARTED data. */
+    static final int MAX_AUDITED_SOURCES = 40;
+
+    /** Maximum impacted source notes recorded in STAGE_STARTED data. */
+    static final int MAX_AUDITED_SOURCE_NOTES = 10;
 
     private final WorkflowGraph graph;
     private final AgentRegistry agents;
@@ -1551,14 +1558,17 @@ public final class OrchestrationEngine implements AutoCloseable {
         run.updateCounters(RunCounters::plusAgentCall);
         long token = tx.holder.nextToken();
         exec.setToken(token);
-        StageContext context = stageExecutor.buildContext(run, def, exec);
+        StageExecutor.PreparedContext prepared = stageExecutor.prepare(run, def, exec);
+        StageContext context = prepared.context();
         // LLM provider agents get the stage timeout times llmTimeoutScale (long streamed outputs)
         Duration timeout = config.attemptTimeout(def.timeout(), agentId);
+        Map<String, Object> startedData = RunMutation.data("attempt", exec.attempts(), "maxAttempts",
+                def.retryPolicy().maxAttempts(), "agent", agentId, "agentSelection", agentSelection, "planVersion",
+                run.planVersion(), "derivedFrom", context.derivedFrom(), "timeoutMs", timeout.toMillis(), "nodeId",
+                tx.nodeId);
+        startedData.putAll(impactedSourceAuditData(run, def, prepared));
         tx.audit(AuditEventType.STAGE_STARTED, def.id(), Actor.agent(agentId), "attempt " + exec.attempts() + " of "
-                        + def.id() + " started with " + agentId,
-                RunMutation.data("attempt", exec.attempts(), "maxAttempts", def.retryPolicy().maxAttempts(), "agent",
-                        agentId, "agentSelection", agentSelection, "planVersion", run.planVersion(), "derivedFrom",
-                        context.derivedFrom(), "timeoutMs", timeout.toMillis(), "nodeId", tx.nodeId));
+                + def.id() + " started with " + agentId, startedData);
         String runId = run.id();
         String stageId = def.id();
         StageAgent chosen = agent;
@@ -1574,7 +1584,33 @@ public final class OrchestrationEngine implements AutoCloseable {
         LOG.debug("stage started runId={} stageId={} attempt={} agent={}", runId, stageId, exec.attempts(), agentId);
     }
 
-    /** Runs off the lock on a virtual thread; re-enters the lock to apply the outcome. */
+    /**
+     * Returns the STAGE_STARTED data about the impacted sources an implementation, verification or security review
+     * attempt of a REPO run is shown: {@code impactedSources} (paths in reading order, at most
+     * {@value #MAX_AUDITED_SOURCES}) and {@code impactedSourceNotes} (what was cut or left out, at most
+     * {@value #MAX_AUDITED_SOURCE_NOTES}, each at most 300 characters), plus the totals when a list was capped. Empty
+     * for other stages and runs.
+     */
+    private static Map<String, Object> impactedSourceAuditData(Run run, StageDefinition def,
+                                                               StageExecutor.PreparedContext prepared) {
+        if (run.options().workspace() != WorkspaceMode.REPO || !StageExecutor.SOURCE_ROLES.contains(def.role())) {
+            return Map.of();
+        }
+        List<String> shown = prepared.shownSources().stream().map(SecretPatterns::redact).toList();
+        List<String> notes = prepared.context().impactedSourceNotes().stream()
+                .map(n -> abbreviate(SecretPatterns.redact(n), 300)).toList();
+        Map<String, Object> data = RunMutation.data("impactedSources",
+                shown.subList(0, Math.min(shown.size(), MAX_AUDITED_SOURCES)), "impactedSourceNotes",
+                notes.subList(0, Math.min(notes.size(), MAX_AUDITED_SOURCE_NOTES)));
+        if (shown.size() > MAX_AUDITED_SOURCES) {
+            data.put("impactedSourcesTotal", shown.size());
+        }
+        if (notes.size() > MAX_AUDITED_SOURCE_NOTES) {
+            data.put("impactedSourceNotesTotal", notes.size());
+        }
+        return data;
+    }
+
     /**
      * Whether the accepted change set under review is a skeleton plan (at least one change with
      * {@link ChangeSet.ContentKind#SKELETON} content).
@@ -1585,6 +1621,7 @@ public final class OrchestrationEngine implements AutoCloseable {
                 .orElse(false);
     }
 
+    /** Runs off the lock on a virtual thread; re-enters the lock to apply the outcome. */
     private void runAttempt(RunRegistry.RunHolder submittedTo, String runId, String stageId, long token,
                             StageAgent agent, String agentId, StageContext context, Duration timeout,
                             @Nullable String circuitProvider) {
@@ -1788,7 +1825,8 @@ public final class OrchestrationEngine implements AutoCloseable {
             }
             payload.validate();
         } catch (InvalidArtifactException e) {
-            handleFailure(tx, def, exec, new StageFailure(FailureKind.INVALID_OUTPUT, e.getMessage(), e, success.llm()));
+            handleFailure(tx, def, exec, new StageFailure(FailureKind.INVALID_OUTPUT, e.getMessage(), e, success.llm(),
+                    payload instanceof ChangeSet changeSet ? changeSet.requestedSources() : List.of()));
             return;
         } catch (StageFailure f) {
             handleFailure(tx, def, exec, f);
@@ -1933,14 +1971,18 @@ public final class OrchestrationEngine implements AutoCloseable {
 
     /**
      * Retry (retryable failure with attempts left), else fallback to the deterministic agent (when enabled and
-     * not already engaged), else stage failure with rollback and safe-stop.
+     * not already engaged), else stage failure with rollback and safe-stop. When the failure names requested sources
+     * (for example those of a change set the sandbox rejected), the stage's last error gets a
+     * {@link StageExecutor#REQUESTED_SOURCES_PREFIX} line, so that the next attempt shows those files, and
+     * RETRY_SCHEDULED records them as {@code requestedSources}.
      */
     private void handleFailure(RunMutation tx, StageDefinition def, StageExecution exec, StageFailure failure) {
         Run run = tx.run;
         // agent and provider messages may carry credentials or large payloads: never persist or audit them verbatim
         String described = safeFailureText(failure.describe());
         String error = failure.getMessage() == null ? null : safeFailureText(failure.getMessage());
-        exec.setLastError(described);
+        String requested = StageExecutor.requestedSourcesLine(failure.requestedSources());
+        exec.setLastError(requested == null ? described : described + "\n" + requested);
         run.markFailure(tx.now, def.id());
         if (failure.retryable() && exec.attempts() < def.retryPolicy().maxAttempts()) {
             Duration backoff = def.retryPolicy().backoff(exec.attempts(), config.maxBackoff(), config.backoffScale());
@@ -1953,7 +1995,9 @@ public final class OrchestrationEngine implements AutoCloseable {
             tx.audit(AuditEventType.RETRY_SCHEDULED, def.id(), Actor.system(), "attempt " + exec.attempts()
                             + " failed (" + described + "); retry in " + backoff.toMillis() + " ms",
                     RunMutation.data("attempt", exec.attempts(), "kind", failure.kind(), "error", error,
-                            "backoffMs", backoff.toMillis(), "nextAttemptAt", exec.nextAttemptAt()));
+                            "backoffMs", backoff.toMillis(), "nextAttemptAt", exec.nextAttemptAt(),
+                            "requestedSources", requested == null ? null
+                                    : StageExecutor.requestedSourcesIn(requested)));
             scheduleRetry(run.id(), def.id(), token, backoff);
             return;
         }

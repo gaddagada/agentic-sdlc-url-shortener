@@ -4,6 +4,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,6 +32,8 @@ public final class CodebaseIndex {
     private final List<String> configFiles;
     private final Map<String, Set<String>> contentTokens;
     private final Set<String> paths;
+    private final List<String> files;
+    private final Map<String, List<IndexedType>> bySimpleName;
 
     /**
      * Creates an index.
@@ -58,6 +61,31 @@ public final class CodebaseIndex {
         all.addAll(this.configFiles);
         this.types.forEach(t -> all.add(t.path()));
         this.paths = Set.copyOf(all);
+        this.files = List.copyOf(new java.util.TreeSet<>(all));
+        Map<String, List<IndexedType>> named = new HashMap<>();
+        this.types.forEach(t -> named.computeIfAbsent(t.simpleName(), k -> new java.util.ArrayList<>()).add(t));
+        Map<String, List<IndexedType>> frozen = new HashMap<>();
+        named.forEach((k, v) -> frozen.put(k, List.copyOf(v)));
+        this.bySimpleName = Collections.unmodifiableMap(frozen);
+    }
+
+    /**
+     * Returns every indexed file path (types including tests, migrations and configuration files), sorted.
+     *
+     * @return workspace-relative paths with forward slashes
+     */
+    public List<String> files() {
+        return files;
+    }
+
+    /**
+     * Returns all indexed types with a simple name (production and test types, in path order).
+     *
+     * @param simpleName simple name
+     * @return the types, empty when none
+     */
+    public List<IndexedType> typesNamed(String simpleName) {
+        return bySimpleName.getOrDefault(simpleName, List.of());
     }
 
     /**

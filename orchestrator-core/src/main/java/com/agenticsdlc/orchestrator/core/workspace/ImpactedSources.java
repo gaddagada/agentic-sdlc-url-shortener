@@ -91,14 +91,38 @@ public final class ImpactedSources {
      *
      * @param sources normalized path to content, sorted by path (unmodifiable)
      * @param notes one note per file that was truncated, not found, refused, skipped or omitted, in priority order
+     * @param order the paths of {@code sources} in reading order (priority, then request order); entries that are not
+     *              in {@code sources} are dropped, sources it does not list are appended in path order
      */
-    public record Result(SortedMap<String, String> sources, List<String> notes) {
+    public record Result(SortedMap<String, String> sources, List<String> notes, List<String> order) {
         /**
          * Copies the collections.
          */
         public Result {
             sources = Collections.unmodifiableSortedMap(new TreeMap<>(sources));
             notes = List.copyOf(notes);
+            List<String> ordered = new ArrayList<>();
+            for (String path : order) {
+                if (sources.containsKey(path) && !ordered.contains(path)) {
+                    ordered.add(path);
+                }
+            }
+            for (String path : sources.keySet()) {
+                if (!ordered.contains(path)) {
+                    ordered.add(path);
+                }
+            }
+            order = List.copyOf(ordered);
+        }
+
+        /**
+         * Creates a result whose reading order is the path order.
+         *
+         * @param sources normalized path to content
+         * @param notes notes about files that were cut or left out
+         */
+        public Result(SortedMap<String, String> sources, List<String> notes) {
+            this(sources, notes, List.of());
         }
 
         /**
@@ -152,6 +176,7 @@ public final class ImpactedSources {
         List<Map.Entry<String, Priority>> ordered = new ArrayList<>(wanted.entrySet());
         ordered.sort(Comparator.comparingInt(e -> e.getValue().ordinal())); // stable: request order within a priority
         SortedMap<String, String> sources = new TreeMap<>();
+        List<String> order = new ArrayList<>();
         List<String> notes = new ArrayList<>();
         int remaining = totalChars;
         for (Map.Entry<String, Priority> entry : ordered) {
@@ -201,6 +226,7 @@ public final class ImpactedSources {
             int allowed = Math.min(perFileChars, remaining);
             if (text.content().length() <= allowed) {
                 sources.put(path, text.content());
+                order.add(path);
                 remaining -= text.content().length();
                 continue;
             }
@@ -216,12 +242,13 @@ public final class ImpactedSources {
             }
             String content = cut(text, allowed);
             sources.put(path, content);
+            order.add(path);
             remaining -= content.length();
             notes.add(path + ": truncated to " + allowed + " of " + text.describeLength() + " ("
                     + (allowed < perFileChars ? "total source budget of " + totalChars : "per-file limit of "
                     + perFileChars) + " characters)");
         }
-        return new Result(sources, notes);
+        return new Result(sources, notes, order);
     }
 
     /** Returns why a normalized path is refused before touching the file system, or null. */

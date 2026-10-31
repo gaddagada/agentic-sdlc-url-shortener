@@ -54,8 +54,14 @@ public record DesignSpec(
      * @param responsibility what it does
      * @param type component type (CONTROLLER, SERVICE, ...)
      * @param isNew whether the component is new
+     * @param path repository-relative path (forward slashes) of an existing component, as listed in the codebase
+     *             index; empty for a new component or when the path is unknown
      */
-    public record Component(String name, String responsibility, String type, boolean isNew) {
+    public record Component(String name, String responsibility, String type, boolean isNew,
+                            @SchemaDescription("Repository-relative path of an existing component, copied from the "
+                                    + "impacted components or the codebase index; required when isNew is false. "
+                                    + "Empty for a new component.")
+                            String path) {
         /**
          * Normalizes text.
          */
@@ -63,6 +69,29 @@ public record DesignSpec(
             name = Immutables.text(name);
             responsibility = Immutables.text(responsibility);
             type = Immutables.text(type);
+            path = Immutables.text(path);
+        }
+
+        /**
+         * Creates a component without a path (the shape before paths existed).
+         *
+         * @param name component name
+         * @param responsibility what it does
+         * @param type component type
+         * @param isNew whether the component is new
+         */
+        public Component(String name, String responsibility, String type, boolean isNew) {
+            this(name, responsibility, type, isNew, "");
+        }
+
+        /**
+         * Returns a copy with another path.
+         *
+         * @param value repository-relative path (empty for none)
+         * @return the copy
+         */
+        public Component withPath(String value) {
+            return new Component(name, responsibility, type, isNew, value);
         }
     }
 
@@ -219,9 +248,9 @@ public record DesignSpec(
             md.field("Risk", risk.level() + (risk.factors().isEmpty() ? "" : " (" + String.join(", ", risk.factors())
                     + ")"));
         }
-        md.heading(3, "Components").table(List.of("Component", "Type", "New", "Responsibility"),
+        md.heading(3, "Components").table(List.of("Component", "Type", "New", "Path", "Responsibility"),
                 components.stream().map(c -> List.of(c.name(), c.type(), c.isNew() ? "yes" : "no",
-                        c.responsibility())).toList());
+                        c.path().isEmpty() ? "-" : c.path(), c.responsibility())).toList());
         md.heading(3, "API changes").table(List.of("Method", "Path", "Summary", "Request", "Response", "Errors",
                         "Breaking"),
                 apiChanges.stream().map(a -> List.of(a.method(), a.path(), a.summary(), a.requestSchema(),

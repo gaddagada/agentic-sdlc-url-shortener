@@ -6,6 +6,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -33,7 +34,8 @@ import com.agenticsdlc.orchestrator.core.artifact.RiskAssessment;
 import com.agenticsdlc.orchestrator.core.artifact.RiskLevel;
 
 /**
- * Deterministic architect ({@code design}): derives components from the impact analysis, API changes from
+ * Deterministic architect ({@code design}): derives components from the impact analysis (existing components keep
+ * their indexed path), API changes from
  * requirement verbs and nouns (create, redirect, analytics, delete, get, bulk, alias, expiry), data model
  * changes from entities and nouns, NFR strategies per category, security considerations, personal data
  * handling, alternatives (exactly one chosen), decisions and the design risk
@@ -110,15 +112,18 @@ public final class ArchitectureAgent implements StageAgent {
                 deferred.add(c.name());
                 continue;
             }
+            boolean isNew = c.nature() == ChangeNature.NEW;
             components.put(c.name(), new Component(c.name(), responsibility(c.type(), c.name(), c.nature()),
-                    c.type().name(), c.nature() == ChangeNature.NEW));
+                    c.type().name(), isNew, isNew ? "" : c.path()));
         }
         boolean hasController = components.values().stream().anyMatch(c -> "CONTROLLER".equals(c.type()));
         if (!apiChanges.isEmpty() && !hasController) {
             String path = apiChanges.getFirst().path();
             String name = existingController(impact, path).orElse(controllerFor(path));
-            boolean known = impact.components().stream().anyMatch(c -> c.name().equals(name));
-            components.put(name, new Component(name, "Exposes the new endpoints", "CONTROLLER", !known));
+            Optional<ImpactedComponent> known = impact.components().stream().filter(c -> c.name().equals(name))
+                    .findFirst();
+            components.put(name, new Component(name, "Exposes the new endpoints", "CONTROLLER", known.isEmpty(),
+                    known.filter(c -> c.nature() != ChangeNature.NEW).map(ImpactedComponent::path).orElse("")));
         }
         for (ApiChange api : apiChanges) {
             String dto = leadingType(api.requestSchema());

@@ -602,7 +602,8 @@ path by longest path with estimates S=1, M=2, L=3; parallel groups = tasks per t
 ```
 ImpactAnalysis { String workspaceRoot (or "none"); int indexedFiles; boolean existingCodebase;
   List<ImpactedComponent> components; List<ImpactedEndpoint> endpoints; List<String> entities; List<String> migrations;
-  List<DataFlow> dataFlows; List<String> riskFactors; List<String> suggestedTests; String summary }
+  List<DataFlow> dataFlows; List<String> riskFactors; List<String> suggestedTests; String summary;
+  List<String> reconciliation }   // 11-argument compatibility constructor: reconciliation empty
 ImpactedComponent { String name; String type (CONTROLLER|SERVICE|REPOSITORY|ENTITY|CONFIG|FILTER|TEST|RESOURCE|OTHER); String path; double confidence (0..1); List<String> reasons; ChangeNature nature (MODIFY|EXTEND|NEW|REGRESSION_RISK) }
 ImpactedEndpoint { String method; String path; String controller }
 DataFlow { String from; String to; String via }
@@ -613,13 +614,26 @@ empty index it returns `existingCodebase=false` and proposes NEW components deri
 requirement spec (controller/service/repository/entity per noun group), with the summary "No existing
 codebase; greenfield module structure proposed".
 
+Note (implemented, LLM impact in REPO runs): the prompt lists the components the static analysis found
+(`StageContext.staticImpact`, 5.9) as path | name | type | change type | confidence (at most 40) with its entities,
+migrations and endpoints, "keep them unless you can say why they are not affected"; the schema describes `path` as
+copied from the index, empty only for a NEW component. `LlmStageAgent` reconciles the output before validation
+(`IndexReconciliation`): a non-NEW component whose path the index does not list is resolved by path suffix, file name
+or type name (`IndexLookup`, also prose such as "Link entity"); a missing type comes from the index, a missing change
+type from the static analysis of the path (else MODIFY for an indexed file, NEW otherwise); a second component for
+the same file is dropped; static MODIFY/EXTEND candidates with confidence >= 0.8 the model omitted are merged with
+their static nature, confidence and reasons; empty `entities`, `migrations` and `endpoints` are back-filled;
+`existingCodebase`, `workspaceRoot` and `indexedFiles` come from the index. Every change is listed in
+`reconciliation` (whatever the model wrote there is discarded; the Markdown shows a "Reconciliation with static
+analysis" section).
+
 #### 5.6.4 `design` -> `DesignSpec`
 
 ```
 DesignSpec { String overview; List<Component> components; List<ApiChange> apiChanges; List<DataModelChange> dataModelChanges;
   List<String> sequenceFlows; List<NfrStrategy> nfrStrategies; List<String> securityConsiderations; DataHandling dataHandling;
   List<Alternative> alternativesConsidered; RiskAssessment risk; List<Decision> decisions }
-Component { String name; String responsibility; String type; boolean isNew }
+Component { String name; String responsibility; String type; boolean isNew; String path }   // path: indexed path of an existing component, "" for new ones (4-argument compatibility constructor)
 ApiChange { String method; String path; String summary; String requestSchema; String responseSchema; List<String> errorResponses; boolean breaking }
 DataModelChange { String entity; String change; String migration; boolean backwardCompatible }
 NfrStrategy { String requirementId; String strategy }
@@ -637,10 +651,17 @@ user agent; default retention "90 days", protection "hashed with rotating salt")
 alternatives with one chosen, risk = max(preliminary risk, HIGH if any DataModelChange not backward
 compatible or any breaking API change, MEDIUM if any ApiChange or DataModelChange).
 
+Note (implemented): existing components carry the impact analysis' path (deterministic agent). The LLM design prompt
+of REPO runs lists the impacted components with their indexed paths ("Impacted components and their paths": the
+non-NEW components of the accepted impact analysis, resolved through the index, plus static MODIFY/EXTEND candidates
+with confidence >= 0.8) and asks for `path` on every existing component; `LlmStageAgent` resolves a missing or
+unknown path of a non-new component by path suffix, file name or name (`IndexLookup`; "Link entity" ->
+`.../domain/Link.java`) and leaves new components as written.
+
 #### 5.6.5 `implement` -> `ChangeSet`
 
 ```
-ChangeSet { String baseRevision; List<FileChange> changes; String buildCommand; List<String> risks; String rollbackPlan; List<String> traces (task ids) }
+ChangeSet { String baseRevision; List<FileChange> changes; String buildCommand; List<String> risks; String rollbackPlan; List<String> traces (task ids); List<String> requestedSources }   // 6-argument compatibility constructor: none requested
 FileChange { String path; Operation operation (CREATE|MODIFY|DELETE); String language; String summary; ContentKind contentKind (SKELETON|FULL|DIFF|NONE); String content; List<String> traces }
 ```
 
@@ -657,6 +678,15 @@ missing test file.
 
 LLM `ImplementationAgent` requests `contentKind=FULL` content. Content must be included for every
 CREATE/MODIFY.
+
+Note (implemented): `requestedSources` lists indexed paths the implementer needs to write correct diffs but was not
+shown (schema description: "Paths from the index that must be shown in the next attempt because they are required
+to write correct diffs."); the prompt rule is "If a file you must change is not shown under 'Source of impacted
+files', do not guess its content: list its path in requestedSources and keep that change out of this change set".
+The next attempt shows them (5.9): after a verification feedback loop they are read from the latest change set;
+when a change set fails validation or the sandbox rejects it (INVALID_OUTPUT), `StageFailure.requestedSources()`
+carries them and the engine appends a `Sources requested by the failed attempt (shown in the next attempt): ...` line
+(at most 12 paths) to the stage's last error and records `requestedSources` in RETRY_SCHEDULED data.
 
 Compensation: when the run's `options.workspace == REPO` and `EngineConfig.sandboxEnabled` is true,
 the implementation agent materializes the change set into a `WorkspaceSandbox` (copy of the workspace
@@ -791,6 +821,14 @@ properties, required = all components, `additionalProperties=false`, enums as `e
 `array`, nested records recursively, `Map<String,String>` as object with `additionalProperties:
 {type: string}`). Used by the Ollama client (`format`) and included in prompts as guidance.
 
+Note (implemented): a record component annotated `@SchemaDescription("...")` (artifact package) gets the text as the
+property's `description` (used for `ImpactedComponent.path`, `ImpactAnalysis.reconciliation`, `DesignSpec.Component.path`
+and `ChangeSet.requestedSources`). Prompt rules: the impact and design roles copy every path of an existing file from
+the codebase index or the component list they are given (`PromptTemplates.INDEX_PATHS_RULE`); the implementation role
+lists an unseen file it must change in `requestedSources` instead of guessing it (`REQUESTED_SOURCES_RULE`). The
+static candidates (impact role) and the impacted paths (design role) are part of the stage-specific user prompt, never
+of the run-stable context.
+
 ### 5.7 Policy engine
 
 ```java
@@ -882,6 +920,23 @@ latest migration plus a proposed new migration; tests referencing impacted types
 `suggestedTests` along with proposed new test names. Data flows are derived as
 `controller -> service -> repository -> table` chains for impacted controllers. Risk factors: schema
 change, public API change, filter/security change, shared service change (> 3 dependents).
+
+Note (implemented, static impact in REPO runs): when a REPO run has a non-empty index, `StageExecutor` runs
+`ImpactAnalyzer.analyze(index, spec)` on the accepted requirement specification once per run, plan version,
+specification artifact and index (a re-plan, a clarification that yields a new specification or a re-indexed workspace
+recompute it; an LRU cache of 256 runs keeps no index reference) and exposes it as `StageContext.staticImpact`
+(nullable; compatibility constructors keep the old shapes) to every stage downstream of `intake`. It feeds the LLM impact
+and design prompts (5.6.3, 5.6.4) and the source selection of implement, verify and security-scan
+(`impactedSourceRequests`, one request per path, ordered by priority and then confidence, per-file and total caps
+unchanged): MODIFY priority for the change sets' MODIFY/DELETE targets, the previous change set's and a failed
+attempt's `requestedSources` (at most 12), files named in the feedback, in the details of the failed blocking checks of
+the latest failed verification report (feedback loops only) and in the previous error (repository paths, `*.java`
+names and type names written as identifiers or as "Link entity"/"Link service" prose, resolved through `IndexLookup`
+only when exactly one production type has the name; at most 12 extra files), MODIFY components of the accepted impact
+analysis and static MODIFY/EXTEND components with confidence >= 0.8; EXTEND priority for existing design components and
+EXTEND impact components; REGRESSION_RISK last. `STAGE_STARTED` data of implement, verify and security-scan in REPO runs
+records `impactedSources` (paths shown, reading order, at most 40; `impactedSourcesTotal` when capped) and
+`impactedSourceNotes` (at most 10, each at most 300 characters; `impactedSourceNotesTotal` when capped).
 
 ### 5.10 Reliability metrics
 

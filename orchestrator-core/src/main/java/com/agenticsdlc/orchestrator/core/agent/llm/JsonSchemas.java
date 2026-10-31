@@ -16,11 +16,14 @@ import java.util.Set;
 
 import org.jspecify.annotations.Nullable;
 
+import com.agenticsdlc.orchestrator.core.artifact.SchemaDescription;
+
 /**
  * Derives JSON schemas from records for LLM structured outputs: records become objects whose properties are
  * all required with {@code additionalProperties: false}; enums become string enums; lists and sets become
  * arrays; {@code Map<String, String>} becomes an object with string additional properties; JSpecify
- * {@code @Nullable} components accept {@code null}.
+ * {@code @Nullable} components accept {@code null}; a component annotated with {@link SchemaDescription} gets
+ * its text as the property's {@code description}.
  */
 public final class JsonSchemas {
 
@@ -54,6 +57,10 @@ public final class JsonSchemas {
                 Map<String, Object> nullable = new LinkedHashMap<>();
                 nullable.put("anyOf", List.of(schema, Map.of("type", "null")));
                 schema = nullable;
+            }
+            SchemaDescription description = component.getAnnotation(SchemaDescription.class);
+            if (description != null && !description.value().isBlank()) {
+                schema.put("description", description.value());
             }
             properties.put(component.getName(), schema);
             required.add(component.getName());
