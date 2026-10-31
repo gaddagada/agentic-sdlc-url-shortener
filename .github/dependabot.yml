@@ -32,8 +32,10 @@ updates:
     schedule:
       interval: weekly
     ignore:
-      # The project targets Java 25 LTS; do not propose non-LTS JDK base images.
+      # The project targets Java 25 LTS. The Maven build image is pinned to a tag that carries both the Maven
+      # and the JDK version (maven:3.9.16-eclipse-temurin-25); Dependabot cannot express "same JDK, newer
+      # Maven" for such tags and has proposed Java 26 images twice, so it is bumped by hand.
       - dependency-name: "maven"
-        versions: ["*temurin-26*", "*temurin-27*"]
+      # Runtime image: patch and minor tags of Java 25 are welcome, the next major is not.
       - dependency-name: "eclipse-temurin"
-        versions: ["26*", "27*"]
+        versions: [">= 26"]

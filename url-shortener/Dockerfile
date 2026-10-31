@@ -2,7 +2,7 @@
 # Build context: repository root (docker build -f url-shortener/Dockerfile .)
 
 # Official Maven image matching the wrapper's pinned version (3.9.16) on Temurin 25: no in-container download.
-FROM maven:3.9-eclipse-temurin-26 AS build
+FROM maven:3.9.16-eclipse-temurin-25 AS build
 WORKDIR /workspace
 COPY . .
 RUN mvn -B -ntp -pl url-shortener -am -DskipTests package
